@@ -25,7 +25,8 @@ export async function download({
   endChunk = Infinity,
 }: DownloadOptions) {
   async function getURLInfo() {
-    while (true) {
+    let filename = "";
+    for (let i = 3; i; i--) {
       const abortController = new AbortController();
       const r = await fetch(url, {
         headers: headers,
@@ -36,7 +37,6 @@ export async function download({
         +r.headers.get("content-length")!,
         endChunk - startChunk + 1
       );
-      let filename: string;
       const disposition = r.headers.get("content-disposition");
       if (disposition)
         filename = contentDisposition.parse(disposition).parameters.filename;
@@ -46,16 +46,16 @@ export async function download({
       if (contentLength) return { filename, contentLength };
       else
         console.log(
-          `Content-Length = ${contentLength}, File-Name = ${filename}, retrying...`
+          `文件长度：${contentLength}，文件名：${filename}，正在重试……`
         );
     }
+    return { filename, contentLength: 0 };
   }
 
   async function createFile(filePath: string) {
     try {
       return await fs.open(filePath, "r+");
     } catch (e) {
-      console.error(e);
       return fs.open(filePath, "w");
     }
   }
@@ -64,10 +64,16 @@ export async function download({
   const { contentLength, filename } = await getURLInfo();
   try {
     await fs.mkdir(dirPath, { recursive: true });
-  } catch (e) {
-    console.error(e);
-  }
+  } catch {}
   const filePath = join(dirPath, filename);
+
+  if (!contentLength) {
+    console.log("不支持多线程下载，正在单线程下载中...");
+    const response = await fetch(url, { headers });
+    await Bun.write(filePath, response, { createPath: true });
+    return filePath;
+  }
+
   const file = await createFile(filePath);
 
   try {
@@ -101,7 +107,7 @@ export async function download({
             console.error(e);
           }
         }
-        console.log(`chunk ${result.origin.start} - ${result.origin.end} done`);
+        console.log(`分块 ${result.origin.start} - ${result.origin.end} 完成`);
         writeCount--;
         if (writeCount === 0) writeReslove();
       },
@@ -119,13 +125,14 @@ async function main() {
   program
     .name("fast-down")
     .description("超快的多线程下载器")
-    .version("0.1.3", "-v, --version", "显示当前版本")
+    .version("0.1.4", "-v, --version", "显示当前版本")
     .argument("<string>", "要下载的 URL")
     .option("-t, --threads <number>", "线程数", "32")
     .option("-s, --start <number>", "起始块", "0")
     .option("-e, --end <number>", "结束块", "Infinity")
     .option("-d, --dir <string>", "下载目录", "./")
-    .option("--headers <string>", "请求头", "{}");
+    .option("--headers <string>", "请求头", "{}")
+    .option("-c, --chunk-size <number>", "块大小", 10 * 1024 * 1024 + "");
   program.parse();
   const options = program.opts();
   await download({
@@ -135,6 +142,7 @@ async function main() {
     startChunk: parseInt(options.start) || 0,
     endChunk: parseInt(options.end) || Infinity,
     headers: JSON.parse(options.headers) || {},
+    chunkSize: parseInt(options.chunkSize) || 10 * 1024 * 1024,
   });
 }
 

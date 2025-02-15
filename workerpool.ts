@@ -81,7 +81,7 @@ export function downloadChunk({
           if (activeWorkers === 0) resolve();
           return;
         }
-        console.log(`Worker ${i} stole from ${targetWorkerIndex}`);
+        console.log(`线程 ${i} 偷了线程 ${targetWorkerIndex}`);
         const targetWorker = workerPool[targetWorkerIndex];
         printWorkerData(workerPool[i], i);
         printWorkerData(targetWorker, targetWorkerIndex);
@@ -112,7 +112,7 @@ export function downloadChunk({
         }
         workerPool[i].retryCount++;
         workerPool[i].stolen = false;
-        printWorkerData(workerPool[i], i, "try: ");
+        printWorkerData(workerPool[i], i, "重试：");
         workerPool[i].worker = fetchChunks({
           url,
           headers,
@@ -154,6 +154,6 @@ interface WorkerData {
 
 function printWorkerData(workerData: WorkerData, i: number, msg: string = "") {
   console.log(
-    `${msg}Worker ${i}: ${workerData.startChunk}-${workerData.endChunk}:${workerData.currentChunk}:${workerData.retryCount}:${workerData.stolen}`
+    `${msg}线程 ${i}：${workerData.startChunk}-${workerData.endChunk}:${workerData.currentChunk}:${workerData.retryCount}:${workerData.stolen}`
   );
 }

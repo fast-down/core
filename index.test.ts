@@ -3,21 +3,21 @@ import { download } from "./index.ts";
 import { fileSha256 } from "./fileSha256.ts";
 
 test(
-  "Download ISO file test",
+  "下载 ISO 文件测试",
   async () => {
     const url =
       "https://mirrors.tuna.tsinghua.edu.cn/debian-cd/12.9.0-live/amd64/iso-hybrid/debian-live-12.9.0-amd64-kde.iso";
     const dirPath = ".";
     const threads = 32;
 
-    console.time("Download ISO file test");
+    console.time("下载 ISO 文件测试");
     const outputPath = await download({ url, dirPath, threads });
-    console.timeEnd("Download ISO file test");
+    console.timeEnd("下载 ISO 文件测试");
 
-    console.time("Calculate file hash test");
+    console.time("计算文件 sha256");
     const fileHash = await fileSha256(outputPath);
     console.log(fileHash);
-    console.timeEnd("Calculate file hash test");
+    console.timeEnd("计算文件 sha256");
     expect(fileHash).toBe(
       "6f6a087a4a8326fdb55971d95855f1185f5b547dfe92cf770da4ec555b763d3f"
     );
@@ -26,15 +26,14 @@ test(
 );
 
 test(
-  "Breakpoint continuation test",
+  "断点续传测试",
   async () => {
     const url =
       "https://mirrors.tuna.tsinghua.edu.cn/debian-cd/12.9.0-live/amd64/iso-hybrid/debian-live-12.9.0-amd64-kde.iso";
     const dirPath = ".";
     const threads = 32;
 
-    console.time("Download ISO file test");
-
+    console.time("下载 ISO 文件测试");
     const outputPath = await download({
       url,
       dirPath,
@@ -54,12 +53,12 @@ test(
       threads,
       startChunk: 20,
     });
-    console.timeEnd("Download ISO file test");
+    console.timeEnd("下载 ISO 文件测试");
 
-    console.time("Calculate file hash test");
+    console.time("计算文件 sha256");
     const fileHash = await fileSha256(outputPath);
-    console.timeEnd("Calculate file hash test");
     console.log(fileHash);
+    console.timeEnd("计算文件 sha256");
     expect(fileHash).toBe(
       "6f6a087a4a8326fdb55971d95855f1185f5b547dfe92cf770da4ec555b763d3f"
     );
