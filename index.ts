@@ -109,7 +109,7 @@ async function createFile(filePath: string) {
 
 async function main() {
   const program = new Command();
-  const version = "0.1.5";
+  const version = "0.1.6";
   program
     .name("fast-down")
     .description("超快的多线程下载器")
