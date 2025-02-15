@@ -109,7 +109,7 @@ async function createFile(filePath: string) {
 
 async function main() {
   const program = new Command();
-  const version = "0.1.6";
+  const version = "0.1.7";
   console.log(`fast-down v${version}`);
   program
     .name("fast-down")
