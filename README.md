@@ -10,5 +10,20 @@
 ## 使用方法
 
 ```sh
-fast-down <url> <线程数> <保存文件夹>
+> .\fast-down-windows-x64-modern.exe -h
+Usage: fast-down [options] <string>
+
+超快的多线程下载器
+
+Arguments:
+  string                  要下载的 URL
+
+Options:
+  -v, --version           显示当前版本
+  -t, --threads <number>  线程数 (default: "32")
+  -s, --start <number>    起始块 (default: "0")
+  -e, --end <number>      结束块 (default: "Infinity")
+  -d, --dir <string>      下载目录 (default: "./")
+  --headers <string>      请求头 (default: "{}")
+  -h, --help              display help for command
 ```
