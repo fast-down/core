@@ -110,6 +110,7 @@ async function createFile(filePath: string) {
 async function main() {
   const program = new Command();
   const version = "0.1.6";
+  console.log(`fast-down v${version}`);
   program
     .name("fast-down")
     .description("超快的多线程下载器")
@@ -123,7 +124,6 @@ async function main() {
     .option("-c, --chunk-size <number>", "块大小", 10 * 1024 * 1024 + "");
   program.parse();
   const options = program.opts();
-  console.log(`fast-down v${version}`);
   try {
     await download({
       url: program.args[0],
