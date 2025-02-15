@@ -61,7 +61,11 @@ export async function download({
 
   dirPath = join(process.cwd(), dirPath);
   const { contentLength, filename } = await getURLInfo();
-  await fs.mkdir(dirPath, { recursive: true });
+  try {
+    await fs.mkdir(dirPath, { recursive: true });
+  } catch (e) {
+    console.error(e);
+  }
   const filePath = join(dirPath, filename);
   const file = await createFile(filePath);
 
@@ -114,7 +118,7 @@ async function main() {
   program
     .name("fast-down")
     .description("超快的多线程下载器")
-    .version("0.1.0", "-v, --version", "显示当前版本")
+    .version("0.1.1", "-v, --version", "显示当前版本")
     .argument("<string>", "要下载的 URL")
     .option("-t, --threads <number>", "线程数", "32")
     .option("-s, --start <number>", "起始块", "0")
