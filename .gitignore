@@ -175,3 +175,4 @@ dist
 .DS_Store
 
 debian-live-12.9.0-amd64-kde.iso
+fast-down-*
