@@ -1,9 +1,10 @@
-import { basename, join } from "path";
+import { join } from "path";
 import { type Chunk, downloadChunk } from "./workerpool.ts";
 import fs from "fs/promises";
 import { Command } from "commander";
-import contentDisposition from "content-disposition";
-import sanitize from "sanitize-filename";
+
+import { formatFileSize } from "./formatFileSize.ts";
+import { getURLInfo } from "./getUrlInfo.ts";
 
 export interface DownloadOptions {
   url: string;
@@ -24,58 +25,38 @@ export async function download({
   startChunk = 0,
   endChunk = Infinity,
 }: DownloadOptions) {
-  async function getURLInfo() {
-    let filename = "";
-    for (let i = 3; i; i--) {
-      const abortController = new AbortController();
-      const r = await fetch(url, {
-        headers: headers,
-        signal: abortController.signal,
-      });
-      abortController.abort();
-      const contentLength = Math.min(
-        +r.headers.get("content-length")!,
-        endChunk - startChunk + 1
-      );
-      const disposition = r.headers.get("content-disposition");
-      if (disposition)
-        filename = contentDisposition.parse(disposition).parameters.filename;
-      else filename = decodeURIComponent(basename(new URL(url).pathname));
-      filename = sanitize(filename);
-      if (!filename) filename = "download";
-      if (contentLength) return { filename, contentLength };
-      else
-        console.log(
-          `文件长度：${contentLength}，文件名：${filename}，正在重试……`
-        );
-    }
-    return { filename, contentLength: 0 };
-  }
-
-  async function createFile(filePath: string) {
-    try {
-      return await fs.open(filePath, "r+");
-    } catch (e) {
-      return fs.open(filePath, "w");
-    }
-  }
+  const {
+    contentLength,
+    filename,
+    url: downloadUrl,
+  } = await getURLInfo({
+    url,
+    headers,
+    startChunk,
+    endChunk,
+  });
+  url = downloadUrl;
 
   dirPath = join(process.cwd(), dirPath);
-  const { contentLength, filename } = await getURLInfo();
   try {
     await fs.mkdir(dirPath, { recursive: true });
   } catch {}
   const filePath = join(dirPath, filename);
 
+  console.log(
+    `下载 URL：${url}\n文件名：${filename}\n文件大小：${formatFileSize(
+      contentLength
+    )}`
+  );
   if (!contentLength) {
     console.log("不支持多线程下载，正在单线程下载中...");
     const response = await fetch(url, { headers });
     await Bun.write(filePath, response, { createPath: true });
+    console.log("下载完成");
     return filePath;
   }
 
   const file = await createFile(filePath);
-
   try {
     const chunkCount = Math.ceil(contentLength / chunkSize);
     const chunks: Chunk[] = Array.from({ length: chunkCount }, (_, i) => ({
@@ -120,12 +101,21 @@ export async function download({
   return filePath;
 }
 
+async function createFile(filePath: string) {
+  try {
+    return await fs.open(filePath, "r+");
+  } catch (e) {
+    return fs.open(filePath, "w");
+  }
+}
+
 async function main() {
   const program = new Command();
+  const version = "0.1.5";
   program
     .name("fast-down")
     .description("超快的多线程下载器")
-    .version("0.1.4", "-v, --version", "显示当前版本")
+    .version(version, "-v, --version", "显示当前版本")
     .argument("<string>", "要下载的 URL")
     .option("-t, --threads <number>", "线程数", "32")
     .option("-s, --start <number>", "起始块", "0")
@@ -135,6 +125,7 @@ async function main() {
     .option("-c, --chunk-size <number>", "块大小", 10 * 1024 * 1024 + "");
   program.parse();
   const options = program.opts();
+  console.log(`fast-down v${version}`);
   await download({
     url: program.args[0],
     dirPath: options.dir || "./",
