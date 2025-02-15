@@ -25,14 +25,14 @@ jobs:
 
       - name: Build
         run: |
-          bun build --compile --minify --bytecode index.ts --target=bun-linux-x64-baseline --outfile fast-down-linux-x64-baseline
-          bun build --compile --minify --bytecode index.ts --target=bun-linux-x64-modern --outfile fast-down-linux-x64-modern
-          bun build --compile --minify --bytecode index.ts --target=bun-linux-arm64-modern --outfile fast-down-linux-arm64-modern
-          bun build --compile --minify --bytecode index.ts --target=bun-windows-x64-baseline --outfile fast-down-windows-x64-baseline
-          bun build --compile --minify --bytecode index.ts --target=bun-windows-x64-modern --outfile fast-down-windows-x64-modern
-          bun build --compile --minify --bytecode index.ts --target=bun-darwin-x64-baseline --outfile fast-down-darwin-x64-baseline
-          bun build --compile --minify --bytecode index.ts --target=bun-darwin-x64-modern --outfile fast-down-darwin-x64-modern
-          bun build --compile --minify --bytecode index.ts --target=bun-darwin-arm64-modern --outfile fast-down-darwin-arm64-modern
+          bun build --compile --minify index.ts --target=bun-linux-x64-baseline --outfile fast-down-linux-x64-baseline
+          bun build --compile --minify index.ts --target=bun-linux-x64-modern --outfile fast-down-linux-x64-modern
+          bun build --compile --minify index.ts --target=bun-linux-arm64-modern --outfile fast-down-linux-arm64-modern
+          bun build --compile --minify index.ts --target=bun-windows-x64-baseline --outfile fast-down-windows-x64-baseline
+          bun build --compile --minify index.ts --target=bun-windows-x64-modern --outfile fast-down-windows-x64-modern
+          bun build --compile --minify index.ts --target=bun-darwin-x64-baseline --outfile fast-down-darwin-x64-baseline
+          bun build --compile --minify index.ts --target=bun-darwin-x64-modern --outfile fast-down-darwin-x64-modern
+          bun build --compile --minify index.ts --target=bun-darwin-arm64-modern --outfile fast-down-darwin-arm64-modern
 
       - name: Create Release and Upload Release Asset
         uses: softprops/action-gh-release@v1
