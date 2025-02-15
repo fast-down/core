@@ -1,5 +1,8 @@
 # Fast Down 快下
 
+[![MIT license](https://img.shields.io/badge/license-MIT-brightgreen.svg)](https://opensource.org/licenses/MIT)
+![GitHub last commit (branch)](https://img.shields.io/github/last-commit/share121/fast-down/main)
+
 一个超快的下载器
 
 ## 功能
