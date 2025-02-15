@@ -18,7 +18,7 @@ export async function* fetchChunks(
       },
       signal: data.signal,
     });
-    if (r.status !== 206) throw new Error(`Invalid status code ${r.status}"}`);
+    if (r.status !== 206) throw new Error(`不支持 Range 头`);
     yield r.bytes();
   }
 }

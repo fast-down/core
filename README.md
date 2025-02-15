@@ -12,21 +12,22 @@
 
 ## 使用方法
 
-```sh
+```powershell
 > .\fast-down-windows-x64-modern.exe -h
 Usage: fast-down [options] <string>
 
 超快的多线程下载器
 
 Arguments:
-  string                  要下载的 URL
+  string                     要下载的 URL
 
 Options:
-  -v, --version           显示当前版本
-  -t, --threads <number>  线程数 (default: "32")
-  -s, --start <number>    起始块 (default: "0")
-  -e, --end <number>      结束块 (default: "Infinity")
-  -d, --dir <string>      下载目录 (default: "./")
-  --headers <string>      请求头 (default: "{}")
-  -h, --help              display help for command
+  -v, --version              显示当前版本
+  -t, --threads <number>     线程数 (default: "32")
+  -s, --start <number>       起始块 (default: "0")
+  -e, --end <number>         结束块 (default: "Infinity")
+  -d, --dir <string>         下载目录 (default: "./")
+  --headers <string>         请求头 (default: "{}")
+  -c, --chunk-size <number>  块大小 (default: "10485760")
+  -h, --help                 display help for command
 ```

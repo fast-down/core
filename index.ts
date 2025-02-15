@@ -5,6 +5,7 @@ import { Command } from "commander";
 
 import { formatFileSize } from "./formatFileSize.ts";
 import { getURLInfo } from "./getUrlInfo.ts";
+import { exit } from "process";
 
 export interface DownloadOptions {
   url: string;
@@ -25,17 +26,14 @@ export async function download({
   startChunk = 0,
   endChunk = Infinity,
 }: DownloadOptions) {
-  const {
-    contentLength,
-    filename,
-    url: downloadUrl,
-  } = await getURLInfo({
+  const info = await getURLInfo({
     url,
     headers,
     startChunk,
     endChunk,
   });
-  url = downloadUrl;
+  const { contentLength, filename, canUseRange } = info;
+  url = info.url;
 
   dirPath = join(process.cwd(), dirPath);
   try {
@@ -48,7 +46,7 @@ export async function download({
       contentLength
     )}`
   );
-  if (!contentLength) {
+  if (!contentLength || !canUseRange) {
     console.log("不支持多线程下载，正在单线程下载中...");
     const response = await fetch(url, { headers });
     await Bun.write(filePath, response, { createPath: true });
@@ -126,15 +124,21 @@ async function main() {
   program.parse();
   const options = program.opts();
   console.log(`fast-down v${version}`);
-  await download({
-    url: program.args[0],
-    dirPath: options.dir || "./",
-    threads: parseInt(options.threads) || 32,
-    startChunk: parseInt(options.start) || 0,
-    endChunk: parseInt(options.end) || Infinity,
-    headers: JSON.parse(options.headers) || {},
-    chunkSize: parseInt(options.chunkSize) || 10 * 1024 * 1024,
-  });
+  try {
+    await download({
+      url: program.args[0],
+      dirPath: options.dir || "./",
+      threads: parseInt(options.threads) || 32,
+      startChunk: parseInt(options.start) || 0,
+      endChunk: parseInt(options.end) || Infinity,
+      headers: JSON.parse(options.headers) || {},
+      chunkSize: parseInt(options.chunkSize) || 10 * 1024 * 1024,
+    });
+  } catch (e) {
+    if (e instanceof Error) console.error(e.message);
+    else console.error(e);
+    exit(1);
+  }
 }
 
 if (import.meta.main) {
