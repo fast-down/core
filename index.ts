@@ -2,6 +2,8 @@ import { basename, join } from "path";
 import { type Chunk, downloadChunk } from "./workerpool.ts";
 import fs from "fs/promises";
 import { Command } from "commander";
+import contentDisposition from "content-disposition";
+import sanitize from "sanitize-filename";
 
 export interface DownloadOptions {
   url: string;
@@ -24,24 +26,23 @@ export async function download({
 }: DownloadOptions) {
   async function getURLInfo() {
     while (true) {
+      const abortController = new AbortController();
       const r = await fetch(url, {
-        method: "HEAD",
         headers: headers,
+        signal: abortController.signal,
       });
+      abortController.abort();
       const contentLength = Math.min(
         +r.headers.get("content-length")!,
         endChunk - startChunk + 1
       );
+      let filename: string;
       const disposition = r.headers.get("content-disposition");
-      const filename = (
-        (disposition
-          ?.split(";")
-          .map((s) => s.trim())
-          .find((s) => s.startsWith("filename="))
-          ?.split("=")[1] ??
-          decodeURIComponent(basename(new URL(url).pathname))) ||
-        "download"
-      ).replace(/[\\/:*?"<>|]/g, "_");
+      if (disposition)
+        filename = contentDisposition.parse(disposition).parameters.filename;
+      else filename = decodeURIComponent(basename(new URL(url).pathname));
+      filename = sanitize(filename);
+      if (!filename) filename = "download";
       if (contentLength) return { filename, contentLength };
       else
         console.log(
@@ -118,7 +119,7 @@ async function main() {
   program
     .name("fast-down")
     .description("超快的多线程下载器")
-    .version("0.1.2", "-v, --version", "显示当前版本")
+    .version("0.1.3", "-v, --version", "显示当前版本")
     .argument("<string>", "要下载的 URL")
     .option("-t, --threads <number>", "线程数", "32")
     .option("-s, --start <number>", "起始块", "0")
