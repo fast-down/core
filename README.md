@@ -13,7 +13,8 @@
 ## 使用方法
 
 ```powershell
-> .\fast-down-windows-x64-modern.exe -h
+> .\fast-down.exe -h
+fast-down v0.1.9
 Usage: fast-down [options] <string>
 
 超快的多线程下载器
@@ -27,6 +28,9 @@ Options:
   -s, --start <number>       起始块 (default: "0")
   -e, --end <number>         结束块 (default: "Infinity")
   -d, --dir <string>         下载目录 (default: "./")
+  -f, --filename <string>    文件名
+  --http-proxy <string>      http 代理
+  --https-proxy <string>     https 代理
   --headers <string>         请求头 (default: "{}")
   -c, --chunk-size <number>  块大小 (default: "10485760")
   -h, --help                 display help for command
