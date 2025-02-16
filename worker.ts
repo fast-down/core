@@ -38,6 +38,6 @@ export async function* fetchChunks(
       offset += chunkSize;
       i++;
     }
-    buffer = buffer.slice(offset);
+    if (offset) buffer = buffer.slice(offset);
   }
 }
