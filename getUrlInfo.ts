@@ -44,10 +44,6 @@ export async function getURLInfo({
     filename = sanitize(filename);
     if (!filename) filename = "download";
     if (contentLength) return { filename, contentLength, url, canUseRange };
-    else
-      console.log(
-        `文件长度：${contentLength}，文件名：${filename}，正在重试……`
-      );
   }
   return { filename, contentLength: 0, url, canUseRange };
 }

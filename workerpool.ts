@@ -49,7 +49,6 @@ export function downloadChunk({
         retryCount: 0,
         stolen: false,
       } as WorkerData;
-      printWorkerData(workerPool[i], i);
       const messageHandle = (result: Uint8Array) => {
         onProgress({
           index: workerPool[i].currentChunk,
@@ -81,10 +80,7 @@ export function downloadChunk({
           if (activeWorkers === 0) resolve();
           return;
         }
-        console.log(`线程 ${i} 偷了线程 ${targetWorkerIndex}`);
         const targetWorker = workerPool[targetWorkerIndex];
-        printWorkerData(workerPool[i], i);
-        printWorkerData(targetWorker, targetWorkerIndex);
         targetWorker.stolen = true;
         const splitPoint = Math.ceil(
           (targetWorker.currentChunk + targetWorker.endChunk) / 2
@@ -94,8 +90,6 @@ export function downloadChunk({
           workerPool[i].startChunk =
           targetWorker.endChunk =
             splitPoint;
-        printWorkerData(workerPool[i], i);
-        printWorkerData(targetWorker, targetWorkerIndex);
         workerPool[i].worker = fetchChunks({
           url,
           headers,
@@ -112,7 +106,6 @@ export function downloadChunk({
         }
         workerPool[i].retryCount++;
         workerPool[i].stolen = false;
-        printWorkerData(workerPool[i], i, "重试：");
         workerPool[i].worker = fetchChunks({
           url,
           headers,
@@ -150,10 +143,4 @@ interface WorkerData {
   currentChunk: number;
   retryCount: number;
   stolen: boolean;
-}
-
-function printWorkerData(workerData: WorkerData, i: number, msg: string = "") {
-  console.log(
-    `${msg}线程 ${i}：${workerData.startChunk}-${workerData.endChunk}:${workerData.currentChunk}:${workerData.retryCount}:${workerData.stolen}`
-  );
 }

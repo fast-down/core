@@ -1,7 +1,7 @@
 {
   "name": "fast-down",
   "module": "index.ts",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "devDependencies": {
     "@types/bun": "latest",
     "@types/content-disposition": "^0.5.8"
@@ -11,6 +11,8 @@
   },
   "type": "module",
   "dependencies": {
+    "@types/cli-progress": "^3.11.6",
+    "cli-progress": "^3.12.0",
     "commander": "^13.1.0",
     "content-disposition": "^0.5.4",
     "sanitize-filename": "^1.6.3"
