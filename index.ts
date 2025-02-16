@@ -123,7 +123,9 @@ export async function download({
             );
             break;
           } catch (e) {
-            console.error(e);
+            if (e instanceof Error) console.error(e.message);
+            else console.error(e);
+            await Bun.sleep(1000);
           }
         }
         writeCount--;
