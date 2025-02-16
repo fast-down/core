@@ -61,7 +61,7 @@ export async function download({
     canUseRange,
     canFastDownload,
     url,
-    threads,
+    threads: canFastDownload ? threads : 1,
   });
   let current = 0;
   onProgress?.(0, contentLength);
@@ -169,7 +169,7 @@ async function main() {
   );
   let oldTime = Date.now();
   let oldSize = 0;
-  const outputPath = await download({
+  await download({
     url: program.args[0],
     dirPath: options.dir || "./",
     threads: parseInt(options.threads) || 32,
