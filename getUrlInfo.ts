@@ -8,6 +8,7 @@ export interface getURLInfoOptions {
   startChunk: number;
   endChunk: number;
   filename?: string;
+  proxy?: string;
 }
 export interface getURLInfoResult {
   filename: string;
@@ -21,6 +22,7 @@ export async function getURLInfo({
   startChunk,
   endChunk,
   filename,
+  proxy,
 }: getURLInfoOptions): Promise<getURLInfoResult> {
   let canUseRange = false;
   for (let i = 3; i; i--) {
@@ -34,6 +36,7 @@ export async function getURLInfo({
       },
       signal: abortController.signal,
       priority: "high",
+      proxy,
     });
     if (r.status === 206) canUseRange = true;
     abortController.abort();

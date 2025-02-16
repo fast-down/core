@@ -16,8 +16,7 @@ export interface DownloadOptions {
   startChunk?: number;
   endChunk?: number;
   filename?: string;
-  httpProxy?: string;
-  httpsProxy?: string;
+  proxy?: string;
   onProgress?(current: number, total: number): void;
   onInfo?(info: {
     contentLength: number;
@@ -39,21 +38,18 @@ export async function download({
   startChunk = 0,
   endChunk = Infinity,
   filename,
-  httpProxy,
-  httpsProxy,
+  proxy,
   onProgress,
   onInfo,
 }: DownloadOptions) {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-  if (httpProxy) process.env.HTTP_PROXY = httpProxy;
-  if (httpsProxy) process.env.HTTPS_PROXY = httpsProxy;
-
   const info = await getURLInfo({
     url,
     headers,
     startChunk,
     endChunk,
     filename,
+    proxy,
   });
   const { contentLength, canUseRange } = info;
   url = info.url;
@@ -81,6 +77,7 @@ export async function download({
     const response = await fetch(url, {
       headers,
       priority: "high",
+      proxy,
     });
     if (!response.body) throw new Error("Response body is not readable");
     const file = Bun.file(filePath);
@@ -111,6 +108,7 @@ export async function download({
       url,
       headers,
       chunks,
+      proxy,
       async onProgress(result) {
         writeCount++;
         while (true) {
@@ -152,7 +150,7 @@ async function createFile(filePath: string) {
 
 async function main() {
   const program = new Command();
-  const version = "0.1.9";
+  const version = "0.1.10";
   console.log(`fast-down v${version}`);
   program
     .name("fast-down")
@@ -164,8 +162,7 @@ async function main() {
     .option("-e, --end <number>", "结束块", "Infinity")
     .option("-d, --dir <string>", "下载目录", "./")
     .option("-f, --filename <string>", "文件名")
-    .option("--http-proxy <string>", "http 代理")
-    .option("--https-proxy <string>", "https 代理")
+    .option("-p, --proxy <string>", "代理")
     .option("--headers <string>", "请求头", "{}")
     .option("-c, --chunk-size <number>", "块大小", 10 * 1024 * 1024 + "");
   program.parse();
@@ -198,8 +195,7 @@ async function main() {
     headers: JSON.parse(options.headers) || {},
     chunkSize: parseInt(options.chunkSize) || 10 * 1024 * 1024,
     filename: options.filename,
-    httpProxy: options.httpProxy,
-    httpsProxy: options.httpsProxy,
+    proxy: options.proxy,
     onInfo(info) {
       console.log(
         `下载 URL：${info.url}

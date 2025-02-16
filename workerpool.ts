@@ -12,6 +12,7 @@ export interface DownloadChunkOptions {
   chunks: Chunk[];
   onProgress(data: { origin: Chunk; data: Uint8Array; index: number }): void;
   maxRetries: number;
+  proxy?: string;
 }
 
 export function downloadChunk({
@@ -21,6 +22,7 @@ export function downloadChunk({
   chunks: data,
   onProgress,
   maxRetries = 3,
+  proxy,
 }: DownloadChunkOptions) {
   if (data.length < 1) return Promise.resolve([]);
   if (threads < 1) throw new Error("threadCount must be greater than 0");
@@ -41,6 +43,7 @@ export function downloadChunk({
           headers,
           chunks: data.slice(startChunk, endChunk),
           signal: abortController.signal,
+          proxy,
         }),
         abortController,
         startChunk,
@@ -95,6 +98,7 @@ export function downloadChunk({
           headers,
           chunks: data.slice(splitPoint, workerPool[i].endChunk),
           signal: workerPool[i].abortController.signal,
+          proxy,
         });
         addEventListener(workerPool[i].worker, messageHandle, errorHandel);
       };
@@ -114,6 +118,7 @@ export function downloadChunk({
             workerPool[i].endChunk
           ),
           signal: workerPool[i].abortController.signal,
+          proxy,
         });
         addEventListener(workerPool[i].worker, messageHandle, errorHandel);
       };

@@ -5,6 +5,7 @@ export interface FetchChunksOptions {
   headers: HeadersInit;
   chunks: Chunk[];
   signal: AbortSignal;
+  proxy?: string;
 }
 
 export async function* fetchChunks(
@@ -18,6 +19,7 @@ export async function* fetchChunks(
       },
       signal: data.signal,
       priority: "high",
+      proxy: data.proxy,
     });
     if (r.status !== 206) throw new Error(`不支持 Range 头`);
     yield r.bytes();
