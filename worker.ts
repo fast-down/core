@@ -17,6 +17,7 @@ export async function* fetchChunks(
         Range: `bytes=${chunk.start}-${chunk.end}`,
       },
       signal: data.signal,
+      priority: "high",
     });
     if (r.status !== 206) throw new Error(`不支持 Range 头`);
     yield r.bytes();

@@ -15,6 +15,9 @@ export interface DownloadOptions {
   headers?: HeadersInit;
   startChunk?: number;
   endChunk?: number;
+  filename?: string;
+  httpProxy?: string;
+  httpsProxy?: string;
   onProgress?(current: number, total: number): void;
   onInfo?(info: {
     contentLength: number;
@@ -35,17 +38,26 @@ export async function download({
   headers = {},
   startChunk = 0,
   endChunk = Infinity,
+  filename,
+  httpProxy,
+  httpsProxy,
   onProgress,
   onInfo,
 }: DownloadOptions) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+  if (httpProxy) process.env.HTTP_PROXY = httpProxy;
+  if (httpsProxy) process.env.HTTPS_PROXY = httpsProxy;
+
   const info = await getURLInfo({
     url,
     headers,
     startChunk,
     endChunk,
+    filename,
   });
-  const { contentLength, filename, canUseRange } = info;
+  const { contentLength, canUseRange } = info;
   url = info.url;
+  filename = info.filename;
 
   dirPath = join(process.cwd(), dirPath);
   try {
@@ -66,7 +78,10 @@ export async function download({
   let current = 0;
   onProgress?.(0, contentLength);
   if (!canFastDownload) {
-    const response = await fetch(url, { headers });
+    const response = await fetch(url, {
+      headers,
+      priority: "high",
+    });
     if (!response.body) throw new Error("Response body is not readable");
     const file = Bun.file(filePath);
     const writer = file.writer();
@@ -146,6 +161,9 @@ async function main() {
     .option("-s, --start <number>", "起始块", "0")
     .option("-e, --end <number>", "结束块", "Infinity")
     .option("-d, --dir <string>", "下载目录", "./")
+    .option("-f, --filename <string>", "文件名")
+    .option("--http-proxy <string>", "http 代理")
+    .option("--https-proxy <string>", "https 代理")
     .option("--headers <string>", "请求头", "{}")
     .option("-c, --chunk-size <number>", "块大小", 10 * 1024 * 1024 + "");
   program.parse();
@@ -177,6 +195,9 @@ async function main() {
     endChunk: parseInt(options.end) || Infinity,
     headers: JSON.parse(options.headers) || {},
     chunkSize: parseInt(options.chunkSize) || 10 * 1024 * 1024,
+    filename: options.filename,
+    httpProxy: options.httpProxy,
+    httpsProxy: options.httpsProxy,
     onInfo(info) {
       console.log(
         `下载 URL：${info.url}

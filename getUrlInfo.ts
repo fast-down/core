@@ -7,6 +7,7 @@ export interface getURLInfoOptions {
   headers?: HeadersInit;
   startChunk: number;
   endChunk: number;
+  filename?: string;
 }
 export interface getURLInfoResult {
   filename: string;
@@ -19,8 +20,8 @@ export async function getURLInfo({
   headers,
   startChunk,
   endChunk,
+  filename,
 }: getURLInfoOptions): Promise<getURLInfoResult> {
-  let filename = "";
   let canUseRange = false;
   for (let i = 3; i; i--) {
     const abortController = new AbortController();
@@ -32,18 +33,20 @@ export async function getURLInfo({
         }`,
       },
       signal: abortController.signal,
-      redirect: "follow",
+      priority: "high",
     });
     if (r.status === 206) canUseRange = true;
     abortController.abort();
     const contentLength = +r.headers.get("content-length")!;
-    const disposition = r.headers.get("content-disposition");
-    if (disposition)
-      filename = contentDisposition.parse(disposition).parameters.filename;
-    else filename = decodeURIComponent(basename(new URL(url).pathname));
+    if (!filename) {
+      const disposition = r.headers.get("content-disposition");
+      if (disposition)
+        filename = contentDisposition.parse(disposition).parameters.filename;
+      else filename = decodeURIComponent(basename(new URL(url).pathname));
+    }
     filename = sanitize(filename);
     if (!filename) filename = "download";
     if (contentLength) return { filename, contentLength, url, canUseRange };
   }
-  return { filename, contentLength: 0, url, canUseRange };
+  return { filename: filename!, contentLength: 0, url, canUseRange };
 }
