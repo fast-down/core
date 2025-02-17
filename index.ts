@@ -6,7 +6,7 @@ import { download } from "./download.ts";
 
 async function main() {
   const program = new Command();
-  const version = "0.1.10";
+  const version = "0.1.11";
   console.log(`fast-down v${version}`);
   program
     .name("fast-down")
