@@ -103,6 +103,8 @@ export function downloadChunk({
         addEventListener(workerPool[i].worker, messageHandle, errorHandel);
       };
       const errorHandel = (err: unknown) => {
+        console.error(err);
+        if (!workerPool[i]) console.error(`第 ${i} 项不存在`);
         if (workerPool[i].retryCount >= maxRetries) {
           for (let i = 0; i < workerPool.length; i++)
             if (i in workerPool) workerPool[i].abortController.abort();
