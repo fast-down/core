@@ -3,6 +3,7 @@ import cliProgress from "cli-progress";
 import { formatFileSize } from "./formatFileSize.ts";
 import { exit } from "process";
 import { download } from "./download.ts";
+import { fileSha256 } from "./fileSha256.ts";
 
 async function main() {
   const program = new Command();
@@ -19,6 +20,7 @@ async function main() {
     .option("-d, --dir <string>", "下载目录", "./")
     .option("-f, --filename <string>", "文件名")
     .option("-p, --proxy <string>", "代理")
+    .option("--sha256", "计算下载后文件的 sha256")
     .option("--headers <string>", "请求头", "{}")
     .option("-c, --chunk-size <number>", "块大小", 1 * 1024 * 1024 + "");
   program.parse();
@@ -42,7 +44,7 @@ async function main() {
   );
   let oldTime = Date.now();
   let oldSize = 0;
-  await download({
+  const outputPath = await download({
     url: program.args[0],
     dirPath: options.dir || "./",
     threads: parseInt(options.threads) || 32,
@@ -75,6 +77,11 @@ async function main() {
     },
   });
   bar.stop();
+  if (!options.sha256) return;
+  console.time("计算文件 sha256");
+  const sha256 = await fileSha256(outputPath);
+  console.log(sha256);
+  console.timeEnd("计算文件 sha256");
 }
 
 if (import.meta.main) {
