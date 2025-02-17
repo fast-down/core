@@ -21,23 +21,25 @@ export async function* fetchChunks(
     proxy: data.proxy,
   });
   if (r.status !== 206) throw new Error(`不支持 Range 头`);
-  if (!r.body) throw new Error(`body 为空`);
+  if (!r.body) throw new Error(`响应体为空`);
   let buffer: Uint8Array = new Uint8Array();
   let i = 0;
   for await (const respondChunk of r.body) {
-    const temp = new Uint8Array(buffer.length + respondChunk.length);
-    temp.set(buffer);
-    temp.set(respondChunk, buffer.length);
-    buffer = temp;
-    let offset = 0;
-    while (true) {
+    buffer = mergeUint8Array(buffer, respondChunk);
+    while (i < data.chunks.length) {
       const chunk = data.chunks[i];
       const chunkSize = chunk.end - chunk.start + 1;
-      if (buffer.byteLength < chunkSize) break;
-      yield buffer.slice(offset, offset + chunkSize);
-      offset += chunkSize;
+      if (buffer.length < chunkSize) break;
+      yield buffer.slice(0, chunkSize);
+      buffer = buffer.slice(chunkSize);
       i++;
     }
-    if (offset) buffer = buffer.slice(offset);
   }
+}
+
+function mergeUint8Array(a: Uint8Array, b: Uint8Array) {
+  const t = new Uint8Array(a.length + b.length);
+  t.set(a);
+  t.set(b, a.length);
+  return t;
 }

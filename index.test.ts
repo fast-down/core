@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { download } from "./index.ts";
+import { download } from "./download.ts";
 import { fileSha256 } from "./fileSha256.ts";
 
 test(
