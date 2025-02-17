@@ -9,37 +9,37 @@ export interface FetchChunksOptions {
 }
 
 export async function* fetchChunks(
-  data: FetchChunksOptions
+  options: FetchChunksOptions
 ): AsyncGenerator<Uint8Array, void, unknown> {
-  const r = await fetch(data.url, {
+  const { url, headers, chunks, signal, proxy } = options;
+  const response = await fetch(url, {
     headers: {
-      ...data.headers,
-      Range: `bytes=${data.chunks[0].start}-${data.chunks.at(-1)!.end}`,
+      ...headers,
+      Range: `bytes=${chunks[0].start}-${chunks.at(-1)!.end}`,
     },
-    signal: data.signal,
+    signal,
     priority: "high",
-    proxy: data.proxy,
+    proxy,
   });
-  if (r.status !== 206) throw new Error(`不支持 Range 头`);
-  if (!r.body) throw new Error(`响应体为空`);
-  let buffer: Uint8Array = new Uint8Array();
-  let i = 0;
-  for await (const respondChunk of r.body) {
-    buffer = mergeUint8Array(buffer, respondChunk);
-    while (i < data.chunks.length) {
-      const chunk = data.chunks[i];
-      const chunkSize = chunk.end - chunk.start + 1;
+  if (response.status !== 206) throw new Error(`服务器不支持 Range 请求`);
+  if (!response.body) throw new Error(`响应体为空`);
+  let buffer = new Uint8Array();
+  let chunkIndex = 0;
+  for await (const responseChunk of response.body) {
+    buffer = mergeUint8Arrays(buffer, responseChunk);
+    while (chunkIndex < chunks.length) {
+      const { start, end } = chunks[chunkIndex];
+      const chunkSize = end - start + 1;
       if (buffer.length < chunkSize) break;
-      yield buffer.slice(0, chunkSize);
-      buffer = buffer.slice(chunkSize);
-      i++;
+      yield buffer.subarray(0, chunkSize);
+      buffer = buffer.subarray(chunkSize);
+      chunkIndex++;
     }
   }
 }
-
-function mergeUint8Array(a: Uint8Array, b: Uint8Array) {
-  const t = new Uint8Array(a.length + b.length);
-  t.set(a);
-  t.set(b, a.length);
-  return t;
+function mergeUint8Arrays(a: Uint8Array, b: Uint8Array) {
+  const merged = new Uint8Array(a.length + b.length);
+  merged.set(a);
+  merged.set(b, a.length);
+  return merged;
 }
