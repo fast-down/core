@@ -53,6 +53,7 @@ export function downloadChunk({
         stolen: false,
       } as WorkerData;
       const messageHandle = (result: Uint8Array) => {
+        if (!workerPool[i]) console.error(`第 ${i} 项不存在`);
         onProgress({
           index: workerPool[i].currentChunk,
           origin: data[workerPool[i].currentChunk],
