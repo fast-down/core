@@ -3,6 +3,7 @@ use std::{error::Error, sync::mpsc, thread};
 use reqwest::{
     blocking::Client,
     header::{self, HeaderMap},
+    Proxy,
 };
 
 pub struct DownloadOptions<'a> {
@@ -14,12 +15,17 @@ pub struct DownloadOptions<'a> {
     pub proxy: Option<&'a str>,
 }
 
-pub fn download(options: DownloadOptions) {
-    let info = get_url_info(GetUrlInfoOptions {
-        url: options.url,
-        headers: options.headers,
-        proxy: options.proxy,
-    });
+pub fn download(options: DownloadOptions) -> Result<String, Box<dyn Error>> {
+    // 配置默认 Headers
+    let client = Client::builder().default_headers(options.headers.unwrap_or(HeaderMap::new()));
+    // 配置 Proxy
+    if let Some(proxy) = options.proxy {
+        client = client.proxy(Proxy::all(proxy)?);
+    }
+    let client = client.build()?;
+
+    // 获取 URL 信息
+    let info = get_url_info(client, options.url)?;
 
     let (tx, rx) = mpsc::channel();
 
@@ -35,27 +41,19 @@ pub fn download(options: DownloadOptions) {
     }
 }
 
-pub struct GetUrlInfoOptions<'a> {
-    pub url: &'a str,
-    pub headers: Option<HeaderMap>,
-    pub proxy: Option<&'a str>,
-}
-
 pub struct UrlInfo {
     pub file_size: usize,
     pub content_type: String,
     pub file_name: Option<String>,
 }
 
-pub fn get_url_info(options: GetUrlInfoOptions) -> Result<UrlInfo, Box<dyn Error>> {
-    let client = Client::new();
-    let headers = options.headers.unwrap_or(HeaderMap::new());
+pub fn get_url_info(client: Client, url: &str) -> Result<UrlInfo, Box<dyn Error>> {
+    let headers = HeaderMap::new();
     headers.insert(header::RANGE, header::HeaderValue::from_static("bytes=0-"));
-    let response = client.get(options.url).headers(headers).send()?;
-    if response.status().is_success() {
-        let body = response.text()?;
-        println!("Response: {}", body);
+    let resp = client.get(url).headers(headers).send()?;
+    if resp.status().is_success() {
+        let headers = resp.headers()?;
     } else {
-        println!("Request failed with status: {}", response.status());
+        return Err("Failed to get URL info".into());
     }
 }
