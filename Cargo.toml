@@ -7,3 +7,5 @@ edition = "2021"
 content_disposition = "0.4.0"
 mockito = "1.6.1"
 reqwest = { version = "0.12.12", features = ["blocking"] }
+sanitize-filename = "0.6.0"
+urlencoding = "2.1.3"
