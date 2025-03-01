@@ -18,7 +18,7 @@ pub struct UrlInfo {
     pub last_modified: Option<String>,
 }
 
-pub fn get_url_info(client: Client, url: &str) -> Result<UrlInfo, Box<dyn Error>> {
+pub fn get_url_info(client: &Client, url: &str) -> Result<UrlInfo, Box<dyn Error>> {
     let mut headers = HeaderMap::new();
     headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-"));
     let resp = client.get(url).headers(headers).send()?;
@@ -102,7 +102,7 @@ mod tests {
         let req_url = format!("{}/file", url);
 
         let client = Client::new();
-        let url_info = get_url_info(client, &req_url).unwrap();
+        let url_info = get_url_info(&client, &req_url).unwrap();
 
         assert_eq!(url_info.file_size, 1024);
         assert_eq!(
@@ -144,7 +144,7 @@ mod tests {
         );
 
         let client = Client::new();
-        let url_info = get_url_info(client, &req_url).unwrap();
+        let url_info = get_url_info(&client, &req_url).unwrap();
 
         assert_eq!(url_info.file_size, 1024);
         assert_eq!(url_info.file_name, "🤦‍♀️🙌😒🤣".to_string());
@@ -177,7 +177,7 @@ mod tests {
         let req_url = format!("{}/", url);
 
         let client = Client::new();
-        let url_info = get_url_info(client, &req_url).unwrap();
+        let url_info = get_url_info(&client, &req_url).unwrap();
 
         assert_eq!(url_info.file_size, 1024);
         assert_eq!(
@@ -210,7 +210,7 @@ mod tests {
         let mock = server.mock("GET", "/not_found").with_status(404).create();
 
         let client = Client::new();
-        get_url_info(client, &format!("{}/not_found", url)).unwrap();
+        get_url_info(&client, &format!("{}/not_found", url)).unwrap();
 
         mock.assert();
     }
