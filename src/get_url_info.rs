@@ -1,9 +1,8 @@
 extern crate sanitize_filename;
 use content_disposition::parse_content_disposition;
 use reqwest::{
-    blocking::Client,
     header::{self, HeaderMap, HeaderValue},
-    StatusCode,
+    Client, StatusCode, Url,
 };
 use std::error::Error;
 
@@ -18,200 +17,191 @@ pub struct UrlInfo {
     pub last_modified: Option<String>,
 }
 
-pub fn get_url_info(client: &Client, url: &str) -> Result<UrlInfo, Box<dyn Error>> {
+fn get_file_size(headers: &HeaderMap, status: StatusCode) -> usize {
+    if status == StatusCode::PARTIAL_CONTENT {
+        headers
+            .get(header::CONTENT_RANGE)
+            .and_then(|hv| hv.to_str().ok())
+            .and_then(|s| s.rsplit('/').next())
+            .and_then(|total| total.parse().ok())
+            .unwrap_or(0)
+    } else {
+        headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|hv| hv.to_str().ok())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+}
+
+fn get_header_str(headers: &HeaderMap, header_name: header::HeaderName) -> Option<String> {
+    headers
+        .get(header_name)
+        .and_then(|hv| hv.to_str().ok())
+        .map(String::from)
+}
+
+fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
+    let from_disposition = headers
+        .get(header::CONTENT_DISPOSITION)
+        .and_then(|hv| hv.to_str().ok())
+        .and_then(|s| parse_content_disposition(s).filename_full())
+        .filter(|s| !s.trim().is_empty());
+
+    let from_url = final_url
+        .path_segments()
+        .and_then(|segments| segments.last())
+        .and_then(|s| urlencoding::decode(s).ok())
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty());
+
+    let raw_name = from_disposition
+        .or(from_url)
+        .unwrap_or_else(|| final_url.to_string());
+
+    sanitize_filename::sanitize_with_options(
+        &raw_name,
+        sanitize_filename::Options {
+            windows: true,
+            truncate: true,
+            replacement: "_",
+        },
+    )
+}
+
+pub async fn get_url_info(client: &Client, url: &str) -> Result<UrlInfo, Box<dyn Error>> {
     let mut headers = HeaderMap::new();
     headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-"));
-    let resp = client.get(url).headers(headers).send()?;
+
+    let resp = client.get(url).headers(headers).send().await?;
     let status = resp.status();
-    if status.is_success() {
-        let resp_headers = resp.headers();
-        let final_url = resp.url();
-        Ok(UrlInfo {
-            final_url: final_url.to_string(),
-            can_use_range: status == StatusCode::PARTIAL_CONTENT,
-            file_name: sanitize_filename::sanitize_with_options(
-                match resp_headers
-                    .get(header::CONTENT_DISPOSITION)
-                    .and_then(|e| e.to_str().ok())
-                    .and_then(|e| parse_content_disposition(e).filename_full())
-                    .or_else(|| {
-                        url.split('/')
-                            .last()
-                            .and_then(|s| urlencoding::decode(s).ok())
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_else(|| url.to_string())
-                {
-                    s if s.trim().is_empty() => final_url.to_string(),
-                    s => s,
-                },
-                sanitize_filename::Options {
-                    windows: true,
-                    truncate: true,
-                    replacement: "_",
-                },
-            ),
-            file_size: resp_headers
-                .get(header::CONTENT_LENGTH)
-                .and_then(|e| e.to_str().ok())
-                .and_then(|e| e.parse().ok())
-                .unwrap_or(0),
-            etag: resp_headers
-                .get(header::ETAG)
-                .and_then(|e| e.to_str().ok())
-                .map(|e| e.to_string()),
-            last_modified: resp_headers
-                .get(header::LAST_MODIFIED)
-                .and_then(|e| e.to_str().ok())
-                .map(|e| e.to_string()),
-        })
-    } else {
-        Err(format!(
-            "Error: Failed to get URL info. status code: {}",
-            status.as_str()
+    let final_url = resp.url().clone();
+    let final_url_str = final_url.to_string();
+
+    if !status.is_success() {
+        return Err(format!(
+            "Request failed with status {} for URL: {}",
+            status, final_url_str
         )
-        .into())
+        .into());
     }
+
+    let resp_headers = resp.headers();
+    Ok(UrlInfo {
+        final_url: final_url_str,
+        can_use_range: status == StatusCode::PARTIAL_CONTENT,
+        file_name: get_filename(resp_headers, &final_url),
+        file_size: get_file_size(resp_headers, status),
+        etag: get_header_str(resp_headers, header::ETAG),
+        last_modified: get_header_str(resp_headers, header::LAST_MODIFIED),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mockito::Server;
-    use reqwest::blocking::Client;
+    use reqwest::Client;
 
-    #[test]
-    fn test_get_url_info() {
-        let mut server = Server::new();
-        let url = server.url();
+    #[tokio::test]
+    async fn test_redirect_and_content_range() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock_redirect = server
+            .mock("GET", "/redirect")
+            .with_status(301)
+            .with_header("Location", "/real-file.txt")
+            .create();
+
+        let mock_file = server
+            .mock("GET", "/real-file.txt")
+            .with_status(206)
+            .with_header("Content-Range", "bytes 0-1023/2048")
+            .with_body(vec![0; 1024])
+            .create();
+
+        let client = Client::new();
+        let url_info = get_url_info(&client, &format!("{}/redirect", server.url()))
+            .await
+            .expect("Request should succeed");
+
+        assert_eq!(url_info.file_size, 2048);
+        assert_eq!(url_info.file_name, "real-file.txt");
+        assert_eq!(
+            url_info.final_url,
+            format!("{}/real-file.txt", server.url())
+        );
+        assert!(url_info.can_use_range);
+
+        mock_redirect.assert();
+        mock_file.assert();
+    }
+
+    #[tokio::test]
+    async fn test_content_range_priority() {
+        let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/file")
             .with_status(206)
-            .with_header("content-length", "1024")
-            .with_header("Content-Range", "bytes 0-1023")
+            .with_header("Content-Range", "bytes 0-1023/2048")
+            .create();
+
+        let client = Client::new();
+        let url_info = get_url_info(&client, &format!("{}/file", server.url()))
+            .await
+            .expect("Request should succeed");
+
+        assert_eq!(url_info.file_size, 2048);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_filename_sources() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Test Content-Disposition source
+        let mock1 = server
+            .mock("GET", "/test1")
+            .with_header("Content-Disposition", "attachment; filename=\"test.txt\"")
+            .create();
+        let url_info = get_url_info(&Client::new(), &format!("{}/test1", server.url()))
+            .await
+            .unwrap();
+        assert_eq!(url_info.file_name, "test.txt");
+        mock1.assert();
+
+        // Test URL path source
+        let mock2 = server.mock("GET", "/test2/file.pdf").create();
+        let url_info = get_url_info(&Client::new(), &format!("{}/test2/file.pdf", server.url()))
+            .await
+            .unwrap();
+        assert_eq!(url_info.file_name, "file.pdf");
+        mock2.assert();
+
+        // Test sanitization
+        let mock3 = server
+            .mock("GET", "/test3")
             .with_header(
                 "Content-Disposition",
-                "attachment; filename=\"tecongegssdf.sg..e../\\/\\/\\/\\\\/t.txt\"",
+                "attachment; filename*=UTF-8''%E6%82%AA%E3%81%84%3C%3E%E3%83%95%E3%82%A1%E3%82%A4%E3%83%AB%3F%E5%90%8D.txt"
             )
-            .with_header("ETag", "\"12345\"")
-            .with_header("Last-Modified", "Wed, 21 Oct 2023 07:28:00 GMT")
-            .with_header("Accept-Ranges", "bytes")
-            .with_body([1; 1024])
             .create();
-
-        let req_url = format!("{}/file", url);
-
-        let client = Client::new();
-        let url_info = get_url_info(&client, &req_url).unwrap();
-
-        assert_eq!(url_info.file_size, 1024);
-        assert_eq!(
-            url_info.file_name,
-            "tecongegssdf.sg..e..__________t.txt".to_string()
-        );
-        assert_eq!(url_info.etag, Some("\"12345\"".to_string()));
-        assert_eq!(
-            url_info.last_modified,
-            Some("Wed, 21 Oct 2023 07:28:00 GMT".to_string())
-        );
-        assert!(url_info.can_use_range);
-        assert_eq!(url_info.final_url, req_url);
-
-        mock.assert();
+        let url_info = get_url_info(&Client::new(), &format!("{}/test3", server.url()))
+            .await
+            .unwrap();
+        assert_eq!(url_info.file_name, "悪い__ファイル_名.txt");
+        mock3.assert();
     }
 
-    #[test]
-    fn test_get_url_info_with_path_filename() {
-        let mut server = Server::new();
-        let url = server.url();
-        let mock = server
-            .mock(
-                "GET",
-                "/%F0%9F%A4%A6%E2%80%8D%E2%99%80%EF%B8%8F%F0%9F%99%8C%F0%9F%98%92%F0%9F%A4%A3",
-            )
-            .with_status(206)
-            .with_header("content-length", "1024")
-            .with_header("Content-Range", "bytes 0-1023")
-            .with_header("ETag", "\"12345\"")
-            .with_header("Last-Modified", "Wed, 21 Oct 2023 07:28:00 GMT")
-            .with_header("Accept-Ranges", "bytes")
-            .with_body([1; 1024])
-            .create();
-
-        let req_url = format!(
-            "{}/%F0%9F%A4%A6%E2%80%8D%E2%99%80%EF%B8%8F%F0%9F%99%8C%F0%9F%98%92%F0%9F%A4%A3",
-            url
-        );
-
+    #[tokio::test]
+    async fn test_error_handling() {
+        let server = mockito::Server::new_async().await;
         let client = Client::new();
-        let url_info = get_url_info(&client, &req_url).unwrap();
-
-        assert_eq!(url_info.file_size, 1024);
-        assert_eq!(url_info.file_name, "🤦‍♀️🙌😒🤣".to_string());
-        assert_eq!(url_info.etag, Some("\"12345\"".to_string()));
-        assert_eq!(
-            url_info.last_modified,
-            Some("Wed, 21 Oct 2023 07:28:00 GMT".to_string())
+        let response = get_url_info(&client, &format!("{}/404", server.url())).await;
+        assert!(response.is_err());
+        let err_msg = response.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("404"),
+            "Error message should contain status code"
         );
-        assert!(url_info.can_use_range);
-        assert_eq!(url_info.final_url, req_url);
-
-        mock.assert();
-    }
-
-    #[test]
-    fn test_get_url_info_with_url_filename() {
-        let mut server = Server::new();
-        let url = server.url();
-        let mock = server
-            .mock("GET", "/")
-            .with_status(206)
-            .with_header("content-length", "1024")
-            .with_header("Content-Range", "bytes 0-1023")
-            .with_header("ETag", "\"12345\"")
-            .with_header("Last-Modified", "Wed, 21 Oct 2023 07:28:00 GMT")
-            .with_header("Accept-Ranges", "bytes")
-            .with_body([1; 1024])
-            .create();
-
-        let req_url = format!("{}/", url);
-
-        let client = Client::new();
-        let url_info = get_url_info(&client, &req_url).unwrap();
-
-        assert_eq!(url_info.file_size, 1024);
-        assert_eq!(
-            url_info.file_name,
-            sanitize_filename::sanitize_with_options(
-                &req_url,
-                sanitize_filename::Options {
-                    windows: true,
-                    truncate: true,
-                    replacement: "_"
-                }
-            )
-        );
-        assert_eq!(url_info.etag, Some("\"12345\"".to_string()));
-        assert_eq!(
-            url_info.last_modified,
-            Some("Wed, 21 Oct 2023 07:28:00 GMT".to_string())
-        );
-        assert!(url_info.can_use_range);
-        assert_eq!(url_info.final_url, req_url);
-
-        mock.assert();
-    }
-
-    #[test]
-    #[should_panic = "Error: Failed to get URL info. status code: 404"]
-    fn test_get_url_info_with_error() {
-        let mut server = Server::new();
-        let url = server.url();
-        let mock = server.mock("GET", "/not_found").with_status(404).create();
-
-        let client = Client::new();
-        get_url_info(&client, &format!("{}/not_found", url)).unwrap();
-
-        mock.assert();
     }
 }

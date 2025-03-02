@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 content_disposition = "0.4.0"
 mockito = "1.6.1"
-reqwest = { version = "0.12.12", features = ["blocking"] }
+reqwest = "0.12.12"
 sanitize-filename = "0.6.0"
+tokio = { version = "1.43.0", features = ["full"] }
 urlencoding = "2.1.3"
