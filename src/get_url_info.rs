@@ -11,7 +11,7 @@ use std::error::Error;
 pub struct UrlInfo {
     pub file_size: usize,
     pub file_name: String,
-    pub can_use_range: bool,
+    pub supports_range: bool,
     pub final_url: String,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
@@ -89,7 +89,7 @@ pub async fn get_url_info(client: &Client, url: &str) -> Result<UrlInfo, Box<dyn
     let resp_headers = resp.headers();
     Ok(UrlInfo {
         final_url: final_url_str,
-        can_use_range: status == StatusCode::PARTIAL_CONTENT,
+        supports_range: status == StatusCode::PARTIAL_CONTENT,
         file_name: get_filename(resp_headers, &final_url),
         file_size: get_file_size(resp_headers, status),
         etag: get_header_str(resp_headers, header::ETAG),
@@ -130,7 +130,7 @@ mod tests {
             url_info.final_url,
             format!("{}/real-file.txt", server.url())
         );
-        assert!(url_info.can_use_range);
+        assert!(url_info.supports_range);
 
         mock_redirect.assert();
         mock_file.assert();
