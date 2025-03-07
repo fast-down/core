@@ -17,8 +17,8 @@ pub struct UrlInfo {
     pub last_modified: Option<String>,
 }
 
-fn get_file_size(headers: &HeaderMap, status: StatusCode) -> usize {
-    if status == StatusCode::PARTIAL_CONTENT {
+fn get_file_size(headers: &HeaderMap, status: &StatusCode) -> usize {
+    if *status == StatusCode::PARTIAL_CONTENT {
         headers
             .get(header::CONTENT_RANGE)
             .and_then(|hv| hv.to_str().ok())
@@ -34,7 +34,7 @@ fn get_file_size(headers: &HeaderMap, status: StatusCode) -> usize {
     }
 }
 
-fn get_header_str(headers: &HeaderMap, header_name: header::HeaderName) -> Option<String> {
+fn get_header_str(headers: &HeaderMap, header_name: &header::HeaderName) -> Option<String> {
     headers
         .get(header_name)
         .and_then(|hv| hv.to_str().ok())
@@ -52,8 +52,8 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
         .path_segments()
         .and_then(|segments| segments.last())
         .and_then(|s| urlencoding::decode(s).ok())
-        .map(|s| s.to_string())
-        .filter(|s| !s.trim().is_empty());
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
 
     let raw_name = from_disposition
         .or(from_url)
@@ -75,9 +75,8 @@ pub async fn get_url_info(client: &Client, url: &str) -> Result<UrlInfo, Box<dyn
 
     let resp = client.get(url).headers(headers).send().await?;
     let status = resp.status();
-    let final_url = resp.url().clone();
+    let final_url = resp.url();
     let final_url_str = final_url.to_string();
-
     if !status.is_success() {
         return Err(format!(
             "Request failed with status {} for URL: {}",
@@ -91,9 +90,9 @@ pub async fn get_url_info(client: &Client, url: &str) -> Result<UrlInfo, Box<dyn
         final_url: final_url_str,
         supports_range: status == StatusCode::PARTIAL_CONTENT,
         file_name: get_filename(resp_headers, &final_url),
-        file_size: get_file_size(resp_headers, status),
-        etag: get_header_str(resp_headers, header::ETAG),
-        last_modified: get_header_str(resp_headers, header::LAST_MODIFIED),
+        file_size: get_file_size(resp_headers, &status),
+        etag: get_header_str(resp_headers, &header::ETAG),
+        last_modified: get_header_str(resp_headers, &header::LAST_MODIFIED),
     })
 }
 
