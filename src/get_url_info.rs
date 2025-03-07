@@ -6,8 +6,6 @@ use reqwest::{
 };
 use std::error::Error;
 
-#[derive(Debug)]
-#[allow(dead_code)]
 pub struct UrlInfo {
     pub file_size: usize,
     pub file_name: String,
@@ -192,15 +190,16 @@ mod tests {
     }
 
     #[tokio::test]
+    #[should_panic(expected = "Request failed with status 404 Not Found for URL:")]
     async fn test_error_handling() {
-        let server = mockito::Server::new_async().await;
+        let mut server = mockito::Server::new_async().await;
+        let mock1 = server.mock("GET", "/404").with_status(404).create();
+
         let client = Client::new();
-        let response = get_url_info(&client, &format!("{}/404", server.url())).await;
-        assert!(response.is_err());
-        let err_msg = response.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("404"),
-            "Error message should contain status code"
-        );
+        get_url_info(&client, &format!("{}/404", server.url()))
+            .await
+            .unwrap();
+
+        mock1.assert();
     }
 }

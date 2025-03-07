@@ -253,7 +253,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast-down-rust"
+name = "fast-down"
 version = "0.1.0"
 dependencies = [
  "content_disposition",
