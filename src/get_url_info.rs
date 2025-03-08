@@ -1,5 +1,5 @@
 extern crate sanitize_filename;
-use content_disposition::parse_content_disposition;
+use content_disposition;
 use reqwest::{
     header::{self, HeaderMap, HeaderValue},
     Client, StatusCode, Url,
@@ -43,7 +43,7 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
     let from_disposition = headers
         .get(header::CONTENT_DISPOSITION)
         .and_then(|hv| hv.to_str().ok())
-        .and_then(|s| parse_content_disposition(s).filename_full())
+        .and_then(|s| content_disposition::parse_content_disposition(s).filename_full())
         .filter(|s| !s.trim().is_empty());
 
     let from_url = final_url

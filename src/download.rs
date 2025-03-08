@@ -1,4 +1,4 @@
-use crate::get_url_info;
+use crate::{download_progress::DownloadProgress, get_chunks, get_url_info};
 use reqwest::{header::HeaderMap, Client, Proxy};
 use std::{
     error::Error,
@@ -26,24 +26,6 @@ pub struct DownloadOptions<'a> {
     pub proxy: Option<&'a str>,
 }
 
-#[derive(Debug)]
-pub struct DownloadProgress {
-    pub start: usize,
-    pub end: usize,
-}
-
-impl PartialEq for DownloadProgress {
-    fn eq(&self, other: &Self) -> bool {
-        self.start == other.start && self.end == other.end
-    }
-}
-
-impl DownloadProgress {
-    pub fn has_union(&self, b: &DownloadProgress) -> bool {
-        self.start <= b.end && self.end >= b.start
-    }
-}
-
 pub async fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, Box<dyn Error>> {
     // 配置默认 Headers
     let mut client = Client::builder().default_headers(options.headers.unwrap_or(HeaderMap::new()));
@@ -68,33 +50,25 @@ pub async fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, 
     let file_path =
         Path::new(options.save_folder).join(options.file_name.unwrap_or(&info.file_name));
     let file = fs::File::create(&file_path).await?;
-    let mut writer = BufWriter::new(file);
     let (tx, rx) = mpsc::channel(100);
 
     if can_fast_download {
-        let download_chunk = [
-            DownloadProgress {
-                start: 0,
-                end: 1024,
-            },
-            DownloadProgress {
-                start: 2048,
-                end: 4096,
-            },
+        let download_chunk = vec![
+            DownloadProgress::new(0, 1024),
+            DownloadProgress::new(2048, 4096),
         ];
-        let chunk = get_chunks(&download_chunk, options.threads);
+        let chunk = get_chunks::get_chunks(&download_chunk, options.threads);
+        println!("{:#?}", chunk);
     } else {
+        let mut writer = BufWriter::new(file);
         tokio::spawn(async move {
             let mut response = client.get(&info.final_url).send().await.unwrap();
             let mut downloaded = 0usize;
             while let Some(bytes) = response.chunk().await.unwrap() {
                 let len = bytes.len();
-                tx.send(DownloadProgress {
-                    start: downloaded,
-                    end: downloaded + len,
-                })
-                .await
-                .unwrap();
+                tx.send(DownloadProgress::new(downloaded, downloaded + len))
+                    .await
+                    .unwrap();
                 downloaded += len;
                 writer.write_all(&bytes).await.unwrap();
             }
@@ -108,13 +82,4 @@ pub async fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, 
         file_path,
         rx,
     })
-}
-
-fn get_chunks(download_chunk: &[DownloadProgress], threads: usize) -> Vec<Vec<DownloadProgress>> {
-    let total_size: usize = download_chunk.iter().map(|c| c.end - c.start + 1).sum();
-    let chunk_size = total_size / threads;
-    let remaining_size = total_size % threads;
-    let mut chunks = Vec::new();
-
-    chunks
 }

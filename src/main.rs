@@ -1,5 +1,8 @@
-use fast_down::download::{download, DownloadOptions, DownloadProgress};
-use fast_down::merge_progress;
+use fast_down::{
+    download::{self, DownloadOptions},
+    download_progress::DownloadProgress,
+    merge_progress,
+};
 use reqwest::header::{HeaderMap, HeaderValue};
 
 #[tokio::main]
@@ -9,7 +12,7 @@ async fn main() {
 
     let mut progress: Vec<DownloadProgress> = Vec::new();
 
-    let mut r = download(DownloadOptions {
+    let mut r = download::download(DownloadOptions {
         url: "https://mirrors.tuna.tsinghua.edu.cn/debian-cd/12.9.0-live/amd64/iso-hybrid/debian-live-12.9.0-amd64-kde.iso",
         threads: 32,
         save_folder: "./test/",
