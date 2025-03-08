@@ -1,4 +1,8 @@
 pub fn format_file_size(mut size: f64) -> String {
+    if size < 0.0 {
+        panic!("Size must be a positive number")
+    }
+
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
     const LEN: usize = UNITS.len();
 
@@ -50,5 +54,11 @@ mod tests {
             ),
             "1023.99 YB"
         );
+    }
+
+    #[test]
+    #[should_panic = "Size must be a positive number"]
+    fn test_negative_size() {
+        format_file_size(-1.0);
     }
 }

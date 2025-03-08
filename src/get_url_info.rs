@@ -6,6 +6,7 @@ use reqwest::{
 };
 use std::error::Error;
 
+#[allow(dead_code)]
 pub struct UrlInfo {
     pub file_size: u64,
     pub file_name: String,

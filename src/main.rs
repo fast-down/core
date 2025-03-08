@@ -15,7 +15,8 @@ async fn main() {
     let mut r = download::download(DownloadOptions {
         url: "https://software.download.prss.microsoft.com/dbazure/Win11_24H2_Pro_Chinese_Simplified_x64.iso?t=3514b994-009a-4529-a6bb-3a070a437d0e&P1=1741505777&P2=601&P3=2&P4=HLBLBRGDVsInamMxArey2xTV48WZfRzmLg2%2fZKOaPGMf8wa%2bPsUA6iT4XonZ1cUG9GH009fsZCO3EEzHZp8bA0%2fRxrgFn9qtu%2bldLK24Nj%2bwlZ8rsEKeq6BTIDWGBncEOpGNMBo45WYPGRNX9q2BqJN4JuKLAJjuPxVO24ywxyZxNm7NC3ClA3SRdKtZnAyxBCvLjyR%2fdx839Vfcptya6%2fXZUHYZJjv8D4gMh5O%2bew%2boLtkxlcDCp%2fP8grauRVgMBUKxUCMCkvfkk6Pf1VXu8oX%2fQzUfoY3eQQqps8MWrVMwDpvcQz2jnUsnoLj0o8%2fMT9EFEPHqOvSMyCgogrxAJg%3d%3d",
         threads: 32,
-        save_folder: "./test/",
+        // save_folder: r"C:\Users\Administrator\Desktop\新建文件夹 (3)",
+        save_folder: r".\test",
         file_name: None,
         headers: Some(headers),
         proxy: None,
@@ -36,6 +37,8 @@ async fn main() {
     }
 }
 
-fn draw_progress(total: u64, downloaded: &[DownloadProgress]) {
-    print!("\r{}: {:?}", total, downloaded);
+fn draw_progress(total: u64, progress: &[DownloadProgress]) {
+    let downloaded: u64 = progress.iter().map(|x| x.size()).sum();
+
+    print!("\r{:.2}", downloaded as f64 / total as f64 * 100.0);
 }

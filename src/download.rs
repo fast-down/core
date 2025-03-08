@@ -1,17 +1,17 @@
 use crate::{display_progress, download_progress::DownloadProgress, get_chunks, get_url_info};
+use memmap2::MmapOptions;
 use reqwest::{
     header::{self, HeaderMap},
     Client, Proxy, StatusCode,
 };
 use std::{
     error::Error,
-    io::SeekFrom,
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::{
-    fs::{self},
-    io::{AsyncSeekExt, AsyncWriteExt, BufWriter},
+    fs::{self, OpenOptions},
+    io::{AsyncWriteExt, BufWriter},
     sync::mpsc,
 };
 
@@ -54,15 +54,21 @@ pub async fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, 
     // 创建文件
     let file_path =
         Path::new(options.save_folder).join(options.file_name.unwrap_or(&info.file_name));
-    let file = fs::File::create(&file_path).await?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&file_path)
+        .await?;
     file.set_len(info.file_size).await?;
     let (tx, rx) = mpsc::channel(100);
 
-    if !can_fast_download {
+    if can_fast_download {
         let download_chunk = vec![DownloadProgress::new(0, info.file_size - 1)];
         let chunks = get_chunks::get_chunks(&download_chunk, options.threads);
         let final_url = Arc::new(info.final_url);
         let (tx_write, mut rx_write) = mpsc::channel(100);
+        let client = Arc::new(client);
         for chunk in chunks {
             let client = client.clone();
             let final_url = final_url.clone();
@@ -107,16 +113,16 @@ pub async fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, 
             });
         }
         drop(tx_write);
-        let mut writer = BufWriter::new(file);
+        let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
         tokio::spawn(async move {
             while let Some((pos, bytes)) = rx_write.recv().await {
-                tx.send(DownloadProgress::new(pos, pos + bytes.len() as u64 - 1))
+                let len = bytes.len() as u64;
+                tx.send(DownloadProgress::new(pos, pos + len - 1))
                     .await
                     .unwrap();
-                writer.seek(SeekFrom::Start(pos)).await.unwrap();
-                writer.write_all(&bytes).await.unwrap();
+                mmap[pos as usize..(pos + len) as usize].copy_from_slice(&bytes);
             }
-            writer.flush().await.unwrap();
+            mmap.flush().unwrap();
         });
     } else {
         let mut writer = BufWriter::new(file);

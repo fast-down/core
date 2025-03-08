@@ -27,7 +27,7 @@ impl DownloadProgress {
         Self { start, end }
     }
 
-    pub fn can_merge(&self, b: &DownloadProgress) -> bool {
+    pub fn can_merge(&self, b: &Self) -> bool {
         self.start <= b.end + 1 && b.start <= self.end + 1
     }
 
@@ -35,14 +35,11 @@ impl DownloadProgress {
         self.end - self.start + 1
     }
 
-    pub fn split_at(&self, pos: u64) -> (DownloadProgress, DownloadProgress) {
+    pub fn split_at(&self, pos: u64) -> (Self, Self) {
         if pos < self.start || pos >= self.end {
             panic!("pos out of range");
         }
-        (
-            DownloadProgress::new(self.start, pos),
-            DownloadProgress::new(pos + 1, self.end),
-        )
+        (Self::new(self.start, pos), Self::new(pos + 1, self.end))
     }
 }
 
