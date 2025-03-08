@@ -4,9 +4,13 @@ pub fn get_chunks(
     download_chunk: &Vec<DownloadProgress>,
     threads: usize,
 ) -> Vec<Vec<DownloadProgress>> {
-    let total_size: usize = download_chunk.iter().map(|c| c.size()).sum();
-    let chunk_size = total_size / threads;
-    let mut remaining_size = total_size % threads;
+    if threads == 0 {
+        panic!("threads must be greater than 0");
+    }
+
+    let total_size: u64 = download_chunk.iter().map(|c| c.size()).sum();
+    let chunk_size = total_size / threads as u64;
+    let mut remaining_size = total_size % threads as u64;
     let mut chunks = Vec::with_capacity(threads);
     let mut it = download_chunk.iter();
     let mut previous_end_chunk: Option<DownloadProgress> = None;
@@ -205,5 +209,20 @@ mod tests {
                 vec![DownloadProgress::new(15, 20)],
             ]
         );
+    }
+
+    #[test]
+    fn test_get_chunks_with_zero_chunks() {
+        let chunks = vec![];
+        let result = get_chunks(&chunks, 4);
+        assert_eq!(result, vec![vec![], vec![], vec![], vec![]]);
+    }
+
+    #[test]
+    #[should_panic = "threads must be greater than 0"]
+    fn test_get_chunks_with_zero_thread() {
+        let chunks = vec![];
+        let result = get_chunks(&chunks, 0);
+        assert_eq!(result, vec![vec![], vec![], vec![], vec![]]);
     }
 }

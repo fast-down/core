@@ -1,13 +1,13 @@
 extern crate sanitize_filename;
 use content_disposition;
 use reqwest::{
-    header::{self, HeaderMap, HeaderValue},
+    header::{self, HeaderMap},
     Client, StatusCode, Url,
 };
 use std::error::Error;
 
 pub struct UrlInfo {
-    pub file_size: usize,
+    pub file_size: u64,
     pub file_name: String,
     pub supports_range: bool,
     pub final_url: String,
@@ -15,7 +15,7 @@ pub struct UrlInfo {
     pub last_modified: Option<String>,
 }
 
-fn get_file_size(headers: &HeaderMap, status: &StatusCode) -> usize {
+fn get_file_size(headers: &HeaderMap, status: &StatusCode) -> u64 {
     if *status == StatusCode::PARTIAL_CONTENT {
         headers
             .get(header::CONTENT_RANGE)
@@ -68,10 +68,11 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
 }
 
 pub async fn get_url_info(client: &Client, url: &str) -> Result<UrlInfo, Box<dyn Error>> {
-    let mut headers = HeaderMap::new();
-    headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-"));
-
-    let resp = client.get(url).headers(headers).send().await?;
+    let resp = client
+        .get(url)
+        .header(header::RANGE, "bytes=0-")
+        .send()
+        .await?;
     let status = resp.status();
     let final_url = resp.url();
     let final_url_str = final_url.to_string();

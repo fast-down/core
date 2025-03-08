@@ -1,8 +1,10 @@
+use std::fmt::Display;
+
 #[derive(Debug, Clone)]
 /// 这是一个闭区间 `[start, end]`，表示下载进度
 pub struct DownloadProgress {
-    pub start: usize,
-    pub end: usize,
+    pub start: u64,
+    pub end: u64,
 }
 
 impl PartialEq for DownloadProgress {
@@ -11,8 +13,14 @@ impl PartialEq for DownloadProgress {
     }
 }
 
+impl Display for DownloadProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}", self.start, self.end)
+    }
+}
+
 impl DownloadProgress {
-    pub fn new(start: usize, end: usize) -> Self {
+    pub fn new(start: u64, end: u64) -> Self {
         if end < start {
             panic!("end < start");
         }
@@ -23,11 +31,11 @@ impl DownloadProgress {
         self.start <= b.end + 1 && b.start <= self.end + 1
     }
 
-    pub fn size(&self) -> usize {
+    pub fn size(&self) -> u64 {
         self.end - self.start + 1
     }
 
-    pub fn split_at(&self, pos: usize) -> (DownloadProgress, DownloadProgress) {
+    pub fn split_at(&self, pos: u64) -> (DownloadProgress, DownloadProgress) {
         if pos < self.start || pos >= self.end {
             panic!("pos out of range");
         }
