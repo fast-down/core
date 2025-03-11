@@ -1,9 +1,10 @@
-extern crate sanitize_filename;
 use content_disposition;
 use reqwest::{
+    blocking::Client,
     header::{self, HeaderMap},
-    Client, StatusCode, Url,
+    StatusCode, Url,
 };
+use sanitize_filename;
 use std::error::Error;
 
 #[allow(dead_code)]
@@ -68,12 +69,8 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
     )
 }
 
-pub async fn get_url_info(client: &Client, url: &str) -> Result<UrlInfo, Box<dyn Error>> {
-    let resp = client
-        .get(url)
-        .header(header::RANGE, "bytes=0-")
-        .send()
-        .await?;
+pub fn get_url_info(client: &Client, url: &str) -> Result<UrlInfo, Box<dyn Error>> {
+    let resp = client.get(url).header(header::RANGE, "bytes=0-").send()?;
     let status = resp.status();
     let final_url = resp.url();
     let final_url_str = final_url.to_string();
@@ -99,11 +96,9 @@ pub async fn get_url_info(client: &Client, url: &str) -> Result<UrlInfo, Box<dyn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::Client;
 
-    #[tokio::test]
-    async fn test_redirect_and_content_range() {
-        let mut server = mockito::Server::new_async().await;
+    fn test_redirect_and_content_range() {
+        let mut server = mockito::Server::new();
 
         let mock_redirect = server
             .mock("GET", "/redirect")
@@ -120,7 +115,6 @@ mod tests {
 
         let client = Client::new();
         let url_info = get_url_info(&client, &format!("{}/redirect", server.url()))
-            .await
             .expect("Request should succeed");
 
         assert_eq!(url_info.file_size, 2048);
@@ -135,9 +129,8 @@ mod tests {
         mock_file.assert();
     }
 
-    #[tokio::test]
-    async fn test_content_range_priority() {
-        let mut server = mockito::Server::new_async().await;
+    fn test_content_range_priority() {
+        let mut server = mockito::Server::new();
         let mock = server
             .mock("GET", "/file")
             .with_status(206)
@@ -146,33 +139,28 @@ mod tests {
 
         let client = Client::new();
         let url_info = get_url_info(&client, &format!("{}/file", server.url()))
-            .await
             .expect("Request should succeed");
 
         assert_eq!(url_info.file_size, 2048);
         mock.assert();
     }
 
-    #[tokio::test]
-    async fn test_filename_sources() {
-        let mut server = mockito::Server::new_async().await;
+    fn test_filename_sources() {
+        let mut server = mockito::Server::new();
 
         // Test Content-Disposition source
         let mock1 = server
             .mock("GET", "/test1")
             .with_header("Content-Disposition", "attachment; filename=\"test.txt\"")
             .create();
-        let url_info = get_url_info(&Client::new(), &format!("{}/test1", server.url()))
-            .await
-            .unwrap();
+        let url_info = get_url_info(&Client::new(), &format!("{}/test1", server.url())).unwrap();
         assert_eq!(url_info.file_name, "test.txt");
         mock1.assert();
 
         // Test URL path source
         let mock2 = server.mock("GET", "/test2/file.pdf").create();
-        let url_info = get_url_info(&Client::new(), &format!("{}/test2/file.pdf", server.url()))
-            .await
-            .unwrap();
+        let url_info =
+            get_url_info(&Client::new(), &format!("{}/test2/file.pdf", server.url())).unwrap();
         assert_eq!(url_info.file_name, "file.pdf");
         mock2.assert();
 
@@ -184,23 +172,18 @@ mod tests {
                 "attachment; filename*=UTF-8''%E6%82%AA%E3%81%84%3C%3E%E3%83%95%E3%82%A1%E3%82%A4%E3%83%AB%3F%E5%90%8D.txt"
             )
             .create();
-        let url_info = get_url_info(&Client::new(), &format!("{}/test3", server.url()))
-            .await
-            .unwrap();
+        let url_info = get_url_info(&Client::new(), &format!("{}/test3", server.url())).unwrap();
         assert_eq!(url_info.file_name, "悪い__ファイル_名.txt");
         mock3.assert();
     }
 
-    #[tokio::test]
     #[should_panic(expected = "Request failed with status 404 Not Found for URL:")]
-    async fn test_error_handling() {
-        let mut server = mockito::Server::new_async().await;
+    fn test_error_handling() {
+        let mut server = mockito::Server::new();
         let mock1 = server.mock("GET", "/404").with_status(404).create();
 
         let client = Client::new();
-        get_url_info(&client, &format!("{}/404", server.url()))
-            .await
-            .unwrap();
+        get_url_info(&client, &format!("{}/404", server.url())).unwrap();
 
         mock1.assert();
     }

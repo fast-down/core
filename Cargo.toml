@@ -13,7 +13,7 @@ reqwest = { version = "0.12.12", features = [
   "zstd",
   "deflate",
   "http2",
+  "blocking",
 ] }
 sanitize-filename = "0.6.0"
-tokio = { version = "1.43.0", features = ["full"] }
 urlencoding = "2.1.3"

@@ -25,7 +25,7 @@ export interface DownloadOptions {
   }): void;
 }
 
-export async function download({
+export function download({
   url,
   dirPath,
   threads,

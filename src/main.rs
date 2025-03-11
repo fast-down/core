@@ -5,8 +5,7 @@ use fast_down::{
 };
 use reqwest::header::{HeaderMap, HeaderValue};
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let mut headers = HeaderMap::new();
     headers.insert("User-Agent", HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"));
 
@@ -21,7 +20,7 @@ async fn main() {
         headers: Some(headers),
         proxy: None,
     })
-    .await
+    
     .unwrap();
     println!(
         "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}",
@@ -31,7 +30,7 @@ async fn main() {
         r.file_path.to_str().unwrap()
     );
 
-    while let Some(e) = r.rx.recv().await {
+    while let Ok(e) = r.rx.recv() {
         merge_progress::merge_progress(&mut progress, e);
         draw_progress(r.file_size, &progress);
     }
