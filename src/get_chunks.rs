@@ -7,14 +7,12 @@ pub fn get_chunks(
     if threads == 0 {
         panic!("threads must be greater than 0");
     }
-
-    let total_size: u64 = download_chunk.iter().map(|c| c.size()).sum();
-    let chunk_size = total_size / threads as u64;
-    let mut remaining_size = total_size % threads as u64;
+    let total_size: usize = download_chunk.iter().map(|c| c.size()).sum();
+    let chunk_size = total_size / threads;
+    let mut remaining_size = total_size % threads;
     let mut chunks = Vec::with_capacity(threads);
     let mut iter = download_chunk.iter();
     let mut prev_end_chunk: Option<DownloadProgress> = None;
-
     for _ in 0..threads {
         let real_chunk_size = if remaining_size > 0 {
             remaining_size -= 1;
@@ -24,7 +22,6 @@ pub fn get_chunks(
         };
         let mut inner_chunks = Vec::new();
         let mut inner_size = 0;
-
         if let Some(prev_chunk) = prev_end_chunk.take() {
             let prev_size = prev_chunk.size();
             if prev_size <= real_chunk_size {
@@ -37,7 +34,6 @@ pub fn get_chunks(
                 inner_size += real_chunk_size;
             }
         }
-
         while inner_size < real_chunk_size {
             if let Some(chunk) = iter.next() {
                 let chunk_total_size = chunk.size();
@@ -55,10 +51,8 @@ pub fn get_chunks(
                 break;
             }
         }
-
         chunks.push(inner_chunks);
     }
-
     chunks
 }
 

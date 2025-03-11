@@ -8,7 +8,7 @@ use std::error::Error;
 
 #[allow(dead_code)]
 pub struct UrlInfo {
-    pub file_size: u64,
+    pub file_size: usize,
     pub file_name: String,
     pub supports_range: bool,
     pub final_url: String,
@@ -16,7 +16,7 @@ pub struct UrlInfo {
     pub last_modified: Option<String>,
 }
 
-fn get_file_size(headers: &HeaderMap, status: &StatusCode) -> u64 {
+fn get_file_size(headers: &HeaderMap, status: &StatusCode) -> usize {
     if *status == StatusCode::PARTIAL_CONTENT {
         headers
             .get(header::CONTENT_RANGE)

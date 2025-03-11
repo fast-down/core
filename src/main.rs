@@ -37,8 +37,7 @@ async fn main() {
     }
 }
 
-fn draw_progress(total: u64, progress: &[DownloadProgress]) {
-    let downloaded: u64 = progress.iter().map(|x| x.size()).sum();
-
+fn draw_progress(total: usize, progress: &[DownloadProgress]) {
+    let downloaded: usize = progress.iter().map(|x| x.size()).sum();
     print!("\r{:.2}", downloaded as f64 / total as f64 * 100.0);
 }

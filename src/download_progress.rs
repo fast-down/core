@@ -3,8 +3,8 @@ use std::fmt::Display;
 #[derive(Debug, Clone)]
 /// 这是一个闭区间 `[start, end]`，表示下载进度
 pub struct DownloadProgress {
-    pub start: u64,
-    pub end: u64,
+    pub start: usize,
+    pub end: usize,
 }
 
 impl PartialEq for DownloadProgress {
@@ -20,7 +20,7 @@ impl Display for DownloadProgress {
 }
 
 impl DownloadProgress {
-    pub fn new(start: u64, end: u64) -> Self {
+    pub fn new(start: usize, end: usize) -> Self {
         if end < start {
             panic!("end < start");
         }
@@ -31,11 +31,11 @@ impl DownloadProgress {
         self.start <= b.end + 1 && b.start <= self.end + 1
     }
 
-    pub fn size(&self) -> u64 {
+    pub fn size(&self) -> usize {
         self.end - self.start + 1
     }
 
-    pub fn split_at(&self, pos: u64) -> (Self, Self) {
+    pub fn split_at(&self, pos: usize) -> (Self, Self) {
         if pos < self.start || pos >= self.end {
             panic!("pos out of range");
         }
@@ -52,6 +52,10 @@ mod tests {
         let progress = DownloadProgress::new(0, 100);
         assert_eq!(progress.start, 0);
         assert_eq!(progress.end, 100);
+
+        let progress = DownloadProgress::new(0, 0);
+        assert_eq!(progress.start, 0);
+        assert_eq!(progress.end, 0);
     }
 
     #[test]
@@ -113,6 +117,24 @@ mod tests {
     fn test_can_merge_start_end_overlap() {
         let a = DownloadProgress::new(0, 5);
         let b = DownloadProgress::new(5, 10);
+        assert!(a.can_merge(&b));
+        assert!(b.can_merge(&a));
+    }
+
+    #[test]
+    fn test_can_merge_sub() {
+        let a = DownloadProgress::new(5, 10);
+        let b = DownloadProgress::new(0, 20);
+        assert!(a.can_merge(&b));
+        assert!(b.can_merge(&a));
+
+        let a = DownloadProgress::new(5, 10);
+        let b = DownloadProgress::new(0, 10);
+        assert!(a.can_merge(&b));
+        assert!(b.can_merge(&a));
+
+        let a = DownloadProgress::new(5, 10);
+        let b = DownloadProgress::new(5, 20);
         assert!(a.can_merge(&b));
         assert!(b.can_merge(&a));
     }

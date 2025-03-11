@@ -16,7 +16,7 @@ use tokio::{
 };
 
 pub struct DownloadInfo {
-    pub file_size: u64,
+    pub file_size: usize,
     pub file_name: String,
     pub file_path: PathBuf,
     pub rx: mpsc::Receiver<DownloadProgress>,
@@ -60,7 +60,7 @@ pub async fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, 
         .create(true)
         .open(&file_path)
         .await?;
-    file.set_len(info.file_size).await?;
+    file.set_len(info.file_size as u64).await?;
     let (tx, rx) = mpsc::channel(100);
 
     if can_fast_download {
@@ -91,11 +91,11 @@ pub async fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, 
                 let mut start_pos = chunk[0].start;
                 let mut size = chunk[0].size();
                 while let Some(bytes) = response.chunk().await.unwrap() {
-                    downloaded += bytes.len() as u64;
+                    downloaded += bytes.len();
                     if downloaded >= size {
                         while downloaded >= size {
                             tx_write
-                                .send((start_pos + downloaded, bytes.slice(0..=size as usize)))
+                                .send((start_pos + downloaded, bytes.slice(0..=size)))
                                 .await
                                 .unwrap();
                             i += 1;
@@ -116,11 +116,11 @@ pub async fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, 
         let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
         tokio::spawn(async move {
             while let Some((pos, bytes)) = rx_write.recv().await {
-                let len = bytes.len() as u64;
+                let len = bytes.len();
                 tx.send(DownloadProgress::new(pos, pos + len - 1))
                     .await
                     .unwrap();
-                mmap[pos as usize..(pos + len) as usize].copy_from_slice(&bytes);
+                mmap[pos..(pos + len)].copy_from_slice(&bytes);
             }
             mmap.flush().unwrap();
         });
@@ -131,13 +131,10 @@ pub async fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, 
             let mut downloaded = 0;
             while let Some(bytes) = response.chunk().await.unwrap() {
                 let len = bytes.len();
-                tx.send(DownloadProgress::new(
-                    downloaded,
-                    downloaded + len as u64 - 1,
-                ))
-                .await
-                .unwrap();
-                downloaded += len as u64;
+                tx.send(DownloadProgress::new(downloaded, downloaded + len - 1))
+                    .await
+                    .unwrap();
+                downloaded += len;
                 writer.write_all(&bytes).await.unwrap();
             }
             writer.flush().await.unwrap();
