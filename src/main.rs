@@ -21,11 +21,12 @@ fn main() {
         proxy: None,
     })    .unwrap();
     println!(
-        "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}",
+        "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}",
         r.file_name,
         format_file_size::format_file_size(r.file_size as f64),
         r.file_size,
-        r.file_path.to_str().unwrap()
+        r.file_path.to_str().unwrap(),
+        r.threads
     );
 
     while let Ok(e) = r.rx.recv() {
@@ -36,5 +37,5 @@ fn main() {
 
 fn draw_progress(total: usize, progress: &[DownloadProgress]) {
     let downloaded: usize = progress.iter().map(|x| x.size()).sum();
-    print!("\r{:.2}", downloaded as f64 / total as f64 * 100.0);
+    print!("\r{:.2}%", downloaded as f64 / total as f64 * 100.0);
 }

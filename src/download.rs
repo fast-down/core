@@ -9,7 +9,7 @@ use std::{
     cell::RefCell,
     error::Error,
     fs::{self, OpenOptions},
-    io::{BufWriter, Read, Write},
+    io::Read,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{mpsc, Arc},
@@ -20,6 +20,7 @@ pub struct DownloadInfo {
     pub file_size: usize,
     pub file_name: String,
     pub file_path: PathBuf,
+    pub threads: usize,
     pub rx: mpsc::Receiver<DownloadProgress>,
 }
 
@@ -63,7 +64,7 @@ pub fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, Box<dy
     file.set_len(info.file_size as u64)?;
     let (tx, rx) = mpsc::channel();
 
-    if can_fast_download {
+    if !can_fast_download {
         let download_chunk = vec![DownloadProgress::new(0, info.file_size - 1)];
         let chunks = get_chunks::get_chunks(&download_chunk, options.threads);
         let final_url = Arc::new(info.final_url);
@@ -135,7 +136,7 @@ pub fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, Box<dy
             });
         }
     } else {
-        let mut writer = BufWriter::new(file);
+        let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
         thread::spawn(move || {
             let mut response = client.get(&info.final_url).send().unwrap();
             let mut downloaded = 0;
@@ -147,10 +148,10 @@ pub fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, Box<dy
                 }
                 tx.send(DownloadProgress::new(downloaded, downloaded + len - 1))
                     .unwrap();
+                mmap[downloaded..downloaded + len].copy_from_slice(&buffer[..len]);
                 downloaded += len;
-                writer.write_all(&buffer[..len]).unwrap();
             }
-            writer.flush().unwrap();
+            mmap.flush().unwrap();
         });
     }
 
@@ -158,6 +159,11 @@ pub fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, Box<dy
         file_size: info.file_size,
         file_name: info.file_name,
         file_path,
+        threads: if can_fast_download {
+            options.threads
+        } else {
+            1
+        },
         rx,
     })
 }

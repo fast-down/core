@@ -2,6 +2,9 @@
 name = "fast-down"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+authors = ["share121 <2854631158@qq.com>"]
+description = "超级快的下载器"
 
 [dependencies]
 content_disposition = "0.4.0"
