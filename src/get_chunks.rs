@@ -140,6 +140,30 @@ mod tests {
     }
 
     #[test]
+    fn test_splite_big_file() {
+        let chunks = vec![DownloadProgress::new(0, 3512893440 - 1)];
+        let result = get_chunks(&chunks, 32);
+        println!("{:#?}", result);
+        assert_eq!(result.len(), 32);
+        let chunk_size: usize = result[0].iter().map(|c| c.size()).sum();
+        for chunk_group in result.iter().skip(1) {
+            assert_eq!(
+                chunk_size,
+                chunk_group.iter().map(|c| c.size()).sum::<usize>()
+            );
+        }
+        let total_size: usize = result
+            .iter()
+            .map(|c| c.iter().map(|c| c.size()).sum::<usize>())
+            .sum();
+        assert_eq!(total_size, 3512893440);
+        assert_eq!(
+            result[result.len() - 1][result[result.len() - 1].len() - 1].end,
+            3512893440 - 1
+        );
+    }
+
+    #[test]
     fn test_multiple_splits_across_chunks() {
         let chunks = vec![DownloadProgress::new(1, 10), DownloadProgress::new(21, 35)];
         let result = get_chunks(&chunks, 3);

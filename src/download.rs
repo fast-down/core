@@ -6,10 +6,12 @@ use reqwest::{
     Proxy, StatusCode,
 };
 use std::{
+    cell::RefCell,
     error::Error,
     fs::{self, OpenOptions},
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{mpsc, Arc},
     thread,
 };
@@ -62,59 +64,76 @@ pub fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, Box<dy
     let (tx, rx) = mpsc::channel();
 
     if can_fast_download {
-        // let download_chunk = vec![DownloadProgress::new(0, info.file_size - 1)];
-        // let chunks = get_chunks::get_chunks(&download_chunk, options.threads);
-        // let final_url = Arc::new(info.final_url);
-        // let (tx_write, mut rx_write) = mpsc::channel();
-        // let client = Arc::new(client);
-        // for chunk in chunks {
-        //     let client = client.clone();
-        //     let final_url = final_url.clone();
-        // let tx_write = tx_write.clone();
-        //     thread::spawn(move || {
-        //         let mut response = client
-        //             .get(&*final_url)
-        //             .header(
-        //                 header::RANGE,
-        //                 format!("bytes={}", display_progress::display_progress(&chunk)),
-        //             )
-        //             .send()
-        //             .unwrap();
-        //         if response.status() != StatusCode::PARTIAL_CONTENT {
-        //             panic!("Error: response code is {}, not 206", response.status());
-        //         }
-        //         let mut downloaded = 0;
-        //         let mut i = 0;
-        //         let mut start_pos = chunk[0].start;
-        //         let mut size = chunk[0].size();
-        // while let Some(bytes) = response.chunk().unwrap() {
-        //     downloaded += bytes.len();
-        //     if downloaded >= size {
-        //         while downloaded >= size {
-        //             tx_write
-        //                 .send((start_pos + downloaded, bytes.slice(0..=size)))
-        //                 .unwrap();
-        //             i += 1;
-        //             start_pos = chunk[i].start;
-        //             downloaded -= size;
-        //             size = chunk[i].size();
-        //         }
-        //     } else {
-        //         tx_write.send((start_pos + downloaded, bytes)).unwrap();
-        //     }
-        // }
-        // });
-        // }
-        // drop(tx_write);
-        // let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
-        // thread::spawn(move || {
-        //     while let Some((pos, bytes)) = rx_write.recv() {
-        //         let len = bytes.len();
-        //         tx.send(DownloadProgress::new(pos, pos + len - 1)).unwrap();
-        //         mmap[pos..(pos + len)].copy_from_slice(&bytes);
-        //     }
-        //     mmap.flush().unwrap();
-        // });
+        let download_chunk = vec![DownloadProgress::new(0, info.file_size - 1)];
+        let chunks = get_chunks::get_chunks(&download_chunk, options.threads);
+        let final_url = Arc::new(info.final_url);
+        let client = Arc::new(client);
+        for chunk_group in chunks {
+            let client = client.clone();
+            let final_url = final_url.clone();
+            let tx = tx.clone();
+            let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
+            thread::spawn(move || {
+                let mut response = client
+                    .get(&*final_url)
+                    .header(
+                        header::RANGE,
+                        format!("bytes={}", display_progress::display_progress(&chunk_group)),
+                    )
+                    .send()
+                    .unwrap();
+                if response.status() != StatusCode::PARTIAL_CONTENT {
+                    panic!("Error: response code is {}, not 206", response.status());
+                }
+                let mut remain: Option<Rc<RefCell<[u8]>>> = None;
+                let mut remain_start = 0;
+                'outer: for chunk in chunk_group {
+                    let mut downloaded = 0;
+                    let size = chunk.size();
+                    if let Some(remain_buffer) = remain {
+                        let len = remain_buffer.borrow().len() - remain_start;
+                        if len > size {
+                            tx.send(DownloadProgress::new(chunk.start, chunk.end))
+                                .unwrap();
+                            mmap[chunk.start..=chunk.end].copy_from_slice(
+                                &remain_buffer.borrow()[remain_start..remain_start + size],
+                            );
+                            remain = Some(remain_buffer);
+                            remain_start = remain_start + size;
+                            continue;
+                        } else {
+                            let end = chunk.start + len - 1;
+                            tx.send(DownloadProgress::new(chunk.start, end)).unwrap();
+                            mmap[chunk.start..=end].copy_from_slice(
+                                &remain_buffer.borrow()[remain_start..remain_start + len],
+                            );
+                        }
+                        downloaded += len;
+                    }
+                    let buffer = Rc::new(RefCell::new([0u8; 1024]));
+                    loop {
+                        let len = response.read(&mut *buffer.borrow_mut()).unwrap();
+                        if len == 0 {
+                            break 'outer;
+                        }
+                        let start = chunk.start + downloaded;
+                        if downloaded + len > size {
+                            tx.send(DownloadProgress::new(start, chunk.end)).unwrap();
+                            mmap[start..=chunk.end].copy_from_slice(&buffer.borrow()[..size]);
+                            remain = Some(buffer);
+                            remain_start = size;
+                            continue 'outer;
+                        } else {
+                            let end = start + len - 1;
+                            tx.send(DownloadProgress::new(start, end)).unwrap();
+                            mmap[start..=end].copy_from_slice(&buffer.borrow()[..len]);
+                        }
+                        downloaded += len;
+                    }
+                }
+                mmap.flush().unwrap();
+            });
+        }
     } else {
         let mut writer = BufWriter::new(file);
         thread::spawn(move || {

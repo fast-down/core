@@ -11,17 +11,15 @@ fn main() {
 
     let mut progress: Vec<DownloadProgress> = Vec::new();
 
-    let mut r = download::download(DownloadOptions {
+    let  r = download::download(DownloadOptions {
         url: "https://mirrors.tuna.tsinghua.edu.cn/debian-cd/12.9.0-live/amd64/iso-hybrid/debian-live-12.9.0-amd64-kde.iso",
         threads: 32,
         // save_folder: r"C:\Users\Administrator\Desktop\新建文件夹 (3)",
         save_folder: r".\downloads",
         file_name: None,
-        headers: Some(headers),
+        headers: Some(headers), 
         proxy: None,
-    })
-    
-    .unwrap();
+    })    .unwrap();
     println!(
         "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}",
         r.file_name,

@@ -97,6 +97,7 @@ pub fn get_url_info(client: &Client, url: &str) -> Result<UrlInfo, Box<dyn Error
 mod tests {
     use super::*;
 
+    #[test]
     fn test_redirect_and_content_range() {
         let mut server = mockito::Server::new();
 
@@ -129,6 +130,7 @@ mod tests {
         mock_file.assert();
     }
 
+    #[test]
     fn test_content_range_priority() {
         let mut server = mockito::Server::new();
         let mock = server
@@ -145,6 +147,7 @@ mod tests {
         mock.assert();
     }
 
+    #[test]
     fn test_filename_sources() {
         let mut server = mockito::Server::new();
 
@@ -177,6 +180,7 @@ mod tests {
         mock3.assert();
     }
 
+    #[test]
     #[should_panic(expected = "Request failed with status 404 Not Found for URL:")]
     fn test_error_handling() {
         let mut server = mockito::Server::new();
