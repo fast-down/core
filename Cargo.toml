@@ -10,6 +10,7 @@ description = "超级快的下载器"
 content_disposition = "0.4.0"
 memmap2 = "0.9.5"
 mockito = "1.6.1"
+rayon = "1.10.0"
 reqwest = { version = "0.12.12", features = [
   "gzip",
   "brotli",
@@ -19,4 +20,5 @@ reqwest = { version = "0.12.12", features = [
   "blocking",
 ] }
 sanitize-filename = "0.6.0"
+tempfile = "3.18.0"
 urlencoding = "2.1.3"

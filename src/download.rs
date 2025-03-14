@@ -1,4 +1,6 @@
-use crate::{display_progress, download_progress::DownloadProgress, get_chunks, get_url_info};
+use crate::{
+    display_progress, download_progress::DownloadProgress, get_chunks, get_url_info, scan_file,
+};
 use memmap2::MmapOptions;
 use reqwest::{
     blocking::Client,
@@ -64,8 +66,8 @@ pub fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo, Box<dy
     file.set_len(info.file_size as u64)?;
     let (tx, rx) = mpsc::channel();
 
-    if !can_fast_download {
-        let download_chunk = vec![DownloadProgress::new(0, info.file_size - 1)];
+    if can_fast_download {
+        let download_chunk = scan_file::scan_file(&file)?;
         let chunks = get_chunks::get_chunks(&download_chunk, options.threads);
         let final_url = Arc::new(info.final_url);
         let client = Arc::new(client);
