@@ -10,7 +10,7 @@ description = "超级快的下载器核心库"
 color-eyre = { workspace = true }
 content_disposition = "0.4.0"
 crossbeam-channel = "0.5.14"
-fast-steal = "2.4.0"
+fast-steal = "2.5.0"
 reqwest = { workspace = true }
 sanitize-filename = "0.6.0"
 urlencoding = "2.1.3"

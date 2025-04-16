@@ -11,7 +11,7 @@ impl MergeProgress for Vec<Progress> {
         let i = self.partition_point(|old| old.start < new.start);
         if i == self.len() {
             match self.last_mut() {
-                Some(last) if last.end == new.start => {
+                Some(last) if last.end >= new.start => {
                     last.end = new.end;
                 }
                 _ => self.push(new),
@@ -46,64 +46,57 @@ mod tests {
     #[test]
     fn test_merge_into_empty_vec() {
         let mut v: Vec<Progress> = Vec::new();
-        let new = Progress::new(10, 20);
+        let new = 10..20;
         v.merge_progress(new.clone());
         assert_eq!(v, vec![new]);
     }
 
     #[test]
     fn test_append_non_overlapping() {
-        let mut v = vec![Progress::new(1, 5)];
-        v.merge_progress(Progress::new(6, 10));
-        assert_eq!(v, vec![Progress::new(1, 5), Progress::new(6, 10)]);
+        let mut v = vec![1..5];
+        v.merge_progress(6..10);
+        assert_eq!(v, vec![1..5, 6..10]);
     }
 
     #[test]
     fn test_prepend_non_overlapping() {
-        let mut v = vec![Progress::new(6, 10)];
-        v.merge_progress(Progress::new(1, 5));
-        assert_eq!(v, vec![Progress::new(1, 5), Progress::new(6, 10)]);
+        let mut v = vec![6..10];
+        v.merge_progress(1..5);
+        assert_eq!(v, vec![1..5, 6..10]);
     }
 
     #[test]
     fn test_merge_with_last() {
-        let mut v = vec![Progress::new(1, 5)];
-        v.merge_progress(Progress::new(5, 10));
-        assert_eq!(v, vec![Progress::new(1, 10)]);
+        let mut v = vec![1..5];
+        v.merge_progress(5..10);
+        assert_eq!(v, vec![1..10]);
     }
 
     #[test]
     fn test_merge_between_two() {
-        let mut v = vec![Progress::new(1, 5), Progress::new(10, 15)];
-        v.merge_progress(Progress::new(5, 10));
-        assert_eq!(v, vec![Progress::new(1, 15)]);
+        let mut v = vec![1..5, 10..15];
+        v.merge_progress(5..10);
+        assert_eq!(v, vec![1..15]);
     }
 
     #[test]
     fn test_merge_with_previous_only() {
-        let mut v = vec![Progress::new(1, 5), Progress::new(10, 15)];
-        v.merge_progress(Progress::new(5, 8));
-        assert_eq!(v, vec![Progress::new(1, 8), Progress::new(10, 15)]);
+        let mut v = vec![1..5, 10..15];
+        v.merge_progress(5..8);
+        assert_eq!(v, vec![1..8, 10..15]);
     }
 
     #[test]
     fn test_merge_with_next_only() {
-        let mut v = vec![Progress::new(1, 5), Progress::new(10, 15)];
-        v.merge_progress(Progress::new(8, 10));
-        assert_eq!(v, vec![Progress::new(1, 5), Progress::new(8, 15)]);
+        let mut v = vec![1..5, 10..15];
+        v.merge_progress(8..10);
+        assert_eq!(v, vec![1..5, 8..15]);
     }
 
     #[test]
     fn test_insert_between_two() {
-        let mut v = vec![Progress::new(1, 5), Progress::new(10, 15)];
-        v.merge_progress(Progress::new(6, 8));
-        assert_eq!(
-            v,
-            vec![
-                Progress::new(1, 5),
-                Progress::new(6, 8),
-                Progress::new(10, 15)
-            ]
-        );
+        let mut v = vec![1..5, 10..15];
+        v.merge_progress(6..8);
+        assert_eq!(v, vec![1..5, 6..8, 10..15]);
     }
 }

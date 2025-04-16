@@ -1,7 +1,8 @@
 extern crate std;
 use crate::{
-    download_multi_threads::download_multi_threads, download_single_thread::download_single_thread,
-    progress::Progress,
+    download_multi_threads::{download_multi_threads, DownloadMultiThreadsOptions},
+    download_single_thread::{download_single_thread, DownloadSingleThreadOptions},
+    Event,
 };
 use std::{fs, io::ErrorKind, path::Path, thread::JoinHandle};
 extern crate alloc;
@@ -10,11 +11,6 @@ use color_eyre::eyre::Result;
 use fs::OpenOptions;
 use reqwest::blocking::Client;
 
-pub struct DownloadInfo {
-    pub rx: crossbeam_channel::Receiver<Progress>,
-    pub handle: JoinHandle<()>,
-}
-
 pub struct DownloadOptions<'a> {
     pub url: String,
     pub save_path: &'a Path,
@@ -22,9 +18,13 @@ pub struct DownloadOptions<'a> {
     pub client: Client,
     pub file_size: usize,
     pub can_fast_download: bool,
+    pub get_chunk_size: usize,
+    pub write_chunk_size: usize,
 }
 
-pub fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo> {
+pub fn download<'a>(
+    options: DownloadOptions<'a>,
+) -> Result<(crossbeam_channel::Receiver<Event>, JoinHandle<()>)> {
     let save_folder = options.save_path.parent().unwrap();
     if let Err(e) = fs::create_dir_all(save_folder) {
         if e.kind() != ErrorKind::AlreadyExists {
@@ -37,17 +37,23 @@ pub fn download<'a>(options: DownloadOptions<'a>) -> Result<DownloadInfo> {
         .open(&options.save_path)?;
     file.set_len(options.file_size as u64)?;
 
-    let (rx, handle) = if options.can_fast_download {
-        download_multi_threads(
-            options.url,
-            options.threads,
-            options.file_size,
+    if options.can_fast_download {
+        download_multi_threads(DownloadMultiThreadsOptions {
+            url: options.url,
             file,
-            options.client,
-        )?
+            file_size: options.file_size,
+            client: options.client,
+            threads: options.threads,
+            get_chunk_size: options.get_chunk_size,
+            write_chunk_size: options.write_chunk_size,
+        })
     } else {
-        download_single_thread(options.url, file, options.client)?
-    };
-
-    Ok(DownloadInfo { rx, handle })
+        download_single_thread(DownloadSingleThreadOptions {
+            url: options.url,
+            file,
+            client: options.client,
+            get_chunk_size: options.get_chunk_size,
+            write_chunk_size: options.write_chunk_size,
+        })
+    }
 }

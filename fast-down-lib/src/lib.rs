@@ -2,13 +2,15 @@ mod display_progress;
 mod download;
 mod download_multi_threads;
 mod download_single_thread;
+mod event;
 mod format_file_size;
 mod get_url_info;
 mod merge_progress;
 mod progress;
 mod total;
 
-pub use download::{download, DownloadInfo, DownloadOptions};
+pub use download::{download, DownloadOptions};
+pub use event::Event;
 pub use format_file_size::format_file_size;
 pub use get_url_info::{get_url_info, UrlInfo};
 pub use merge_progress::MergeProgress;

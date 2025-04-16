@@ -1,4 +1,4 @@
-use crate::progress::{ProgresTrait, Progress};
+use crate::Event;
 use color_eyre::eyre::Result;
 use reqwest::blocking::Client;
 extern crate std;
@@ -10,34 +10,75 @@ use std::{
 extern crate alloc;
 use alloc::string::String;
 
+pub struct DownloadSingleThreadOptions {
+    pub url: String,
+    pub file: File,
+    pub client: Client,
+    pub get_chunk_size: usize,
+    pub write_chunk_size: usize,
+}
+
 pub fn download_single_thread(
-    url: String,
-    file: File,
-    client: Client,
-) -> Result<(crossbeam_channel::Receiver<Progress>, JoinHandle<()>)> {
+    options: DownloadSingleThreadOptions,
+) -> Result<(crossbeam_channel::Receiver<Event>, JoinHandle<()>)> {
     let (tx, rx) = crossbeam_channel::unbounded();
     let (tx_write, rx_write) = crossbeam_channel::unbounded();
+    let tx_clone = tx.clone();
     thread::spawn(move || {
         let mut downloaded = 0;
-        let mut response = client.get(url).send().unwrap();
-        let mut buffer = [0u8; 8 * 1024];
+        tx_clone.send(Event::Connecting(0)).unwrap();
+        let mut response = loop {
+            match options.client.get(&options.url).send() {
+                Ok(response) => break response,
+                Err(e) => {
+                    tx_clone.send(Event::ConnectError(0, e.into())).unwrap();
+                }
+            }
+        };
+        tx_clone.send(Event::Downloading(0)).unwrap();
+        let mut buffer = Vec::with_capacity(options.get_chunk_size);
         loop {
-            let len = response.read(&mut buffer).unwrap();
+            let len = loop {
+                match response.read(&mut buffer) {
+                    Ok(len) => break len,
+                    Err(e) => {
+                        tx_clone.send(Event::DownloadError(0, e.into())).unwrap();
+                    }
+                }
+            };
             if len == 0 {
                 break;
             }
-            tx.send(Progress::new(downloaded, downloaded + len))
+            tx_clone
+                .send(Event::DownloadProgress(downloaded..(downloaded + len)))
                 .unwrap();
+            tx_write.send((downloaded, buffer[..len].to_vec())).unwrap();
             downloaded += len;
-            tx_write.send(buffer[..len].to_vec()).unwrap();
         }
+        tx_clone.send(Event::Finished(0)).unwrap();
     });
     let handle = thread::spawn(move || {
-        let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
-        for bytes in rx_write {
-            writer.write_all(&bytes).unwrap();
+        let mut writer = BufWriter::with_capacity(options.write_chunk_size, options.file);
+        for (start, bytes) in rx_write {
+            loop {
+                match writer.write_all(&bytes) {
+                    Ok(_) => break,
+                    Err(e) => {
+                        tx.send(Event::WriteError(e.into())).unwrap();
+                    }
+                }
+            }
+            tx.send(Event::WriteProgress(start..(start + bytes.len())))
+                .unwrap();
         }
-        writer.flush().unwrap();
+        loop {
+            match writer.flush() {
+                Ok(_) => break,
+                Err(e) => {
+                    tx.send(Event::WriteError(e.into())).unwrap();
+                }
+            }
+        }
     });
     Ok((rx, handle))
 }
@@ -68,7 +109,14 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download_single_thread(server.url(), file, client).unwrap();
+        let (rx, handle) = download_single_thread(DownloadSingleThreadOptions {
+            url: server.url(),
+            file: file,
+            client: client,
+            get_chunk_size: 8 * 1024,
+            write_chunk_size: 8 * 1024 * 1024,
+        })
+        .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();
         handle.join().unwrap();
@@ -80,9 +128,28 @@ mod tests {
             .unwrap();
         assert_eq!(file_content, mock_body);
 
-        assert_eq!(progress_events.len(), 1);
-        assert_eq!(progress_events[0].start, 0);
-        assert_eq!(progress_events[0].end, mock_body.len());
+        assert_eq!(
+            progress_events
+                .iter()
+                .map(|m| if let Event::DownloadProgress(p) = m {
+                    p.total()
+                } else {
+                    0
+                })
+                .sum::<usize>(),
+            mock_body.len()
+        );
+        assert_eq!(
+            progress_events
+                .iter()
+                .map(|m| if let Event::WriteProgress(p) = m {
+                    p.total()
+                } else {
+                    0
+                })
+                .sum::<usize>(),
+            mock_body.len()
+        );
         mock.assert();
     }
 
@@ -101,7 +168,14 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download_single_thread(server.url(), file, client).unwrap();
+        let (rx, handle) = download_single_thread(DownloadSingleThreadOptions {
+            url: server.url(),
+            file: file,
+            client: client,
+            get_chunk_size: 8 * 1024,
+            write_chunk_size: 8 * 1024 * 1024,
+        })
+        .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();
         handle.join().unwrap();
@@ -115,7 +189,28 @@ mod tests {
         assert!(file_content.is_empty());
 
         // 验证无进度事件
-        assert!(progress_events.is_empty());
+        assert_eq!(
+            progress_events
+                .iter()
+                .map(|m| if let Event::DownloadProgress(p) = m {
+                    p.total()
+                } else {
+                    0
+                })
+                .sum::<usize>(),
+            mock_body.len()
+        );
+        assert_eq!(
+            progress_events
+                .iter()
+                .map(|m| if let Event::WriteProgress(p) = m {
+                    p.total()
+                } else {
+                    0
+                })
+                .sum::<usize>(),
+            mock_body.len()
+        );
         mock.assert();
     }
 
@@ -133,7 +228,14 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download_single_thread(server.url(), file, client).unwrap();
+        let (rx, handle) = download_single_thread(DownloadSingleThreadOptions {
+            url: server.url(),
+            file: file,
+            client: client,
+            get_chunk_size: 8 * 1024,
+            write_chunk_size: 8 * 1024 * 1024,
+        })
+        .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();
         handle.join().unwrap();
@@ -147,10 +249,28 @@ mod tests {
         assert_eq!(file_content, mock_body);
 
         // 验证进度事件总和
-        let total_downloaded = progress_events.total();
-        assert_eq!(total_downloaded, mock_body.len());
-        assert_eq!(progress_events[0].start, 0);
-        assert_eq!(progress_events.last().unwrap().end, mock_body.len());
+        assert_eq!(
+            progress_events
+                .iter()
+                .map(|m| if let Event::DownloadProgress(p) = m {
+                    p.total()
+                } else {
+                    0
+                })
+                .sum::<usize>(),
+            mock_body.len()
+        );
+        assert_eq!(
+            progress_events
+                .iter()
+                .map(|m| if let Event::WriteProgress(p) = m {
+                    p.total()
+                } else {
+                    0
+                })
+                .sum::<usize>(),
+            mock_body.len()
+        );
         mock.assert();
     }
 
@@ -168,7 +288,14 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download_single_thread(server.url(), file, client).unwrap();
+        let (rx, handle) = download_single_thread(DownloadSingleThreadOptions {
+            url: server.url(),
+            file: file,
+            client: client,
+            get_chunk_size: 8 * 1024,
+            write_chunk_size: 8 * 1024 * 1024,
+        })
+        .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();
         handle.join().unwrap();
@@ -182,10 +309,28 @@ mod tests {
         assert_eq!(file_content, mock_body);
 
         // 验证进度事件完整性
-        let total_downloaded = progress_events.total();
-        assert_eq!(total_downloaded, mock_body.len());
-        assert_eq!(progress_events[0].start, 0);
-        assert_eq!(progress_events.last().unwrap().end, mock_body.len());
+        assert_eq!(
+            progress_events
+                .iter()
+                .map(|m| if let Event::DownloadProgress(p) = m {
+                    p.total()
+                } else {
+                    0
+                })
+                .sum::<usize>(),
+            mock_body.len()
+        );
+        assert_eq!(
+            progress_events
+                .iter()
+                .map(|m| if let Event::WriteProgress(p) = m {
+                    p.total()
+                } else {
+                    0
+                })
+                .sum::<usize>(),
+            mock_body.len()
+        );
         mock.assert();
     }
 }

@@ -17,7 +17,7 @@ mod tests {
 
     #[test]
     fn test_display_progress() {
-        let progress = vec![Progress::new(0, 10), Progress::new(20, 30)];
+        let progress = vec![0..10, 20..30];
         assert_eq!(display_progress(&progress), "0-9,20-29");
     }
 
@@ -29,7 +29,7 @@ mod tests {
 
     #[test]
     fn test_display_progress_single() {
-        let progress = vec![Progress::new(5, 15)];
+        let progress = vec![5..15];
         assert_eq!(display_progress(&progress), "5-14");
     }
 }

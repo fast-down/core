@@ -1,6 +1,6 @@
 use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
-use fast_down_lib::{DownloadOptions, MergeProgress, Progress, Total};
+use fast_down_lib::{DownloadOptions, Event, MergeProgress, Progress, Total};
 use reqwest::{
     blocking::Client,
     header::{HeaderMap, HeaderName, HeaderValue},
@@ -39,6 +39,14 @@ pub struct Args {
     /// 自定义请求头 (格式: "Key: Value"，可多次使用)
     #[arg(short = 'H', long, value_name = "HEADER")]
     pub headers: Vec<String>,
+
+    /// 下载分块大小 (单位: B)
+    #[arg(long, default_value_t = 8 * 1024)]
+    pub get_chunk_size: usize,
+
+    /// 写入分块大小 (单位: B)
+    #[arg(long, default_value_t = 8 * 1024 * 1024)]
+    pub write_chunk_size: usize,
 }
 
 fn build_headers(headers: &[String]) -> Result<HeaderMap> {
@@ -69,7 +77,7 @@ fn main() -> Result<()> {
     let threads = if info.can_fast_download {
         args.threads
     } else {
-        0
+        1
     };
     let save_path =
         Path::new(&args.save_folder).join(args.file_name.as_ref().unwrap_or(&info.file_name));
@@ -90,7 +98,7 @@ fn main() -> Result<()> {
         std::io::stdin().read_line(&mut input)?;
         match input.trim().to_lowercase().as_str() {
             "y" => {}
-            "n" | "N" | "" => {
+            "n" | "" => {
                 println!("下载取消");
                 return Ok(());
             }
@@ -98,21 +106,28 @@ fn main() -> Result<()> {
         }
     }
 
-    let r = fast_down_lib::download(DownloadOptions {
+    let (rx, handle) = fast_down_lib::download(DownloadOptions {
         url: info.final_url,
         threads: args.threads,
         save_path: &save_path,
         can_fast_download: info.can_fast_download,
         file_size: info.file_size,
         client,
+        get_chunk_size: args.get_chunk_size,
+        write_chunk_size: args.write_chunk_size,
     })?;
 
     let mut progress: Vec<Progress> = Vec::new();
-    for e in r.rx {
-        progress.merge_progress(e);
-        draw_progress(info.file_size, &progress);
+    for e in rx {
+        match e {
+            Event::DownloadProgress(p) => {
+                progress.merge_progress(p);
+                draw_progress(info.file_size, &progress);
+            }
+            _ => {}
+        }
     }
-    r.handle.join().unwrap();
+    handle.join().unwrap();
     assert_eq!(progress, vec![0..info.file_size]);
 
     Ok(())
