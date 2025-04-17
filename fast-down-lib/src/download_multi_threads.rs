@@ -100,7 +100,7 @@ pub fn download_multi_threads(
                     range_str
                 );
             }
-            let mut buffer = Vec::with_capacity(options.get_chunk_size);
+            let mut buffer = vec![0u8; options.get_chunk_size];
             loop {
                 task.fetch_add_start(options.get_chunk_size);
                 let end = task.end();

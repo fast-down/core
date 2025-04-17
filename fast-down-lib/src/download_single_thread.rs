@@ -30,20 +30,16 @@ pub fn download_single_thread(
         let mut response = loop {
             match options.client.get(&options.url).send() {
                 Ok(response) => break response,
-                Err(e) => {
-                    tx_clone.send(Event::ConnectError(0, e.into())).unwrap();
-                }
+                Err(e) => tx_clone.send(Event::ConnectError(0, e.into())).unwrap(),
             }
         };
         tx_clone.send(Event::Downloading(0)).unwrap();
-        let mut buffer = Vec::with_capacity(options.get_chunk_size);
+        let mut buffer = vec![0u8; options.get_chunk_size];
         loop {
             let len = loop {
                 match response.read(&mut buffer) {
                     Ok(len) => break len,
-                    Err(e) => {
-                        tx_clone.send(Event::DownloadError(0, e.into())).unwrap();
-                    }
+                    Err(e) => tx_clone.send(Event::DownloadError(0, e.into())).unwrap(),
                 }
             };
             if len == 0 {
@@ -63,9 +59,7 @@ pub fn download_single_thread(
             loop {
                 match writer.write_all(&bytes) {
                     Ok(_) => break,
-                    Err(e) => {
-                        tx.send(Event::WriteError(e.into())).unwrap();
-                    }
+                    Err(e) => tx.send(Event::WriteError(e.into())).unwrap(),
                 }
             }
             tx.send(Event::WriteProgress(start..(start + bytes.len())))
@@ -74,9 +68,7 @@ pub fn download_single_thread(
         loop {
             match writer.flush() {
                 Ok(_) => break,
-                Err(e) => {
-                    tx.send(Event::WriteError(e.into())).unwrap();
-                }
+                Err(e) => tx.send(Event::WriteError(e.into())).unwrap(),
             }
         }
     });
@@ -111,14 +103,15 @@ mod tests {
         let client = Client::new();
         let (rx, handle) = download_single_thread(DownloadSingleThreadOptions {
             url: server.url(),
-            file: file,
-            client: client,
+            file,
+            client,
             get_chunk_size: 8 * 1024,
             write_chunk_size: 8 * 1024 * 1024,
         })
         .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();
+        dbg!(&progress_events);
         handle.join().unwrap();
 
         let mut file_content = Vec::new();
@@ -170,8 +163,8 @@ mod tests {
         let client = Client::new();
         let (rx, handle) = download_single_thread(DownloadSingleThreadOptions {
             url: server.url(),
-            file: file,
-            client: client,
+            file,
+            client,
             get_chunk_size: 8 * 1024,
             write_chunk_size: 8 * 1024 * 1024,
         })
@@ -230,8 +223,8 @@ mod tests {
         let client = Client::new();
         let (rx, handle) = download_single_thread(DownloadSingleThreadOptions {
             url: server.url(),
-            file: file,
-            client: client,
+            file,
+            client,
             get_chunk_size: 8 * 1024,
             write_chunk_size: 8 * 1024 * 1024,
         })
@@ -290,8 +283,8 @@ mod tests {
         let client = Client::new();
         let (rx, handle) = download_single_thread(DownloadSingleThreadOptions {
             url: server.url(),
-            file: file,
-            client: client,
+            file,
+            client,
             get_chunk_size: 8 * 1024,
             write_chunk_size: 8 * 1024 * 1024,
         })

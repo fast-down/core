@@ -1,6 +1,7 @@
 use crate::Progress;
 use color_eyre::eyre::Error;
 
+#[derive(Debug)]
 pub enum Event {
     Connecting(usize),
     ConnectError(usize, Error),
