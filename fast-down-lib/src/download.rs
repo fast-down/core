@@ -33,6 +33,7 @@ pub fn download<'a>(
     }
     let file = OpenOptions::new()
         .write(true)
+        .read(true)
         .create(true)
         .open(&options.save_path)?;
     file.set_len(options.file_size as u64)?;

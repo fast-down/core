@@ -3,6 +3,7 @@ use crate::Event;
 use crate::{display_progress, download_single_thread};
 use color_eyre::{eyre::eyre, Result};
 use fast_steal::{Spawn, TaskList};
+use memmap2::MmapMut;
 use reqwest::{blocking::Client, header, StatusCode};
 extern crate alloc;
 use alloc::format;
@@ -12,7 +13,7 @@ extern crate std;
 use alloc::string::String;
 use std::{
     fs::File,
-    io::{BufWriter, Read, Seek, SeekFrom, Write},
+    io::Read,
     thread::{self, JoinHandle},
 };
 
@@ -51,20 +52,33 @@ pub fn download_multi_threads(
     let tasks_clone = tasks.clone();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
-        let mut writer = BufWriter::with_capacity(options.write_chunk_size, options.file);
-        for (start, data) in rx_write {
-            loop {
-                match writer.seek(SeekFrom::Start(start as u64)) {
-                    Ok(_) => break,
-                    Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
-                }
+        let mut mmap = loop {
+            match unsafe { MmapMut::map_mut(&options.file) } {
+                Ok(mmap) => break mmap,
+                Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
             }
-            writer.write_all(&data).unwrap();
+        };
+        let mut downloaded = 0usize;
+        for (start, data) in rx_write {
+            let len = data.len();
+            mmap[start..(start + len)].copy_from_slice(&data);
+            downloaded += len;
+            if downloaded >= options.write_chunk_size {
+                if let Err(e) = mmap.flush() {
+                    tx_clone.send(Event::WriteError(e.into())).unwrap()
+                }
+                downloaded = 0;
+            }
             tx_clone
-                .send(Event::WriteProgress(start..(start + data.len())))
+                .send(Event::WriteProgress(start..(start + len)))
                 .unwrap();
         }
-        writer.flush().unwrap();
+        loop {
+            match mmap.flush() {
+                Ok(_) => break,
+                Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
+            }
+        }
     });
     tasks.spawn(
         options.threads,
@@ -163,6 +177,7 @@ mod tests {
 
         let temp_file = NamedTempFile::new().unwrap();
         let file = temp_file.reopen().unwrap();
+        file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
         let (rx, handle) = download_multi_threads(DownloadMultiThreadsOptions {
