@@ -11,6 +11,7 @@ fast-down-lib = { path = "../fast-down-lib" }
 clap = { version = "4.5.36", features = ["derive"] }
 color-eyre = { workspace = true }
 reqwest = { workspace = true }
+sha2 = "0.10.8"
 
 [[bin]]
 name = "fast-down"

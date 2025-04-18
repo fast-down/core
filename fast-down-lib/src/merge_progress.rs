@@ -11,7 +11,7 @@ impl MergeProgress for Vec<Progress> {
         let i = self.partition_point(|old| old.start < new.start);
         if i == self.len() {
             match self.last_mut() {
-                Some(last) if last.end >= new.start => {
+                Some(last) if last.end == new.start => {
                     last.end = new.end;
                 }
                 _ => self.push(new),
