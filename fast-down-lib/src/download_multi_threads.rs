@@ -116,23 +116,21 @@ pub fn download_multi_threads(
             }
             let mut buffer = vec![0u8; options.get_chunk_size];
             loop {
-                task.fetch_add_start(options.get_chunk_size);
                 let end = task.end();
                 if start >= end {
                     break;
                 }
                 let remain = end - start;
-                if remain < options.get_chunk_size {
-                    task.fetch_sub_start(options.get_chunk_size - remain);
-                }
+                task.fetch_add_start(remain.min(options.get_chunk_size));
                 let len = loop {
                     match response.read(&mut buffer) {
                         Ok(len) => break len,
                         Err(e) => tx.send(Event::DownloadError(id, e.into())).unwrap(),
                     }
                 };
-                tx.send(Event::DownloadProgress(start..(start + len)))
-                    .unwrap();
+                let chunk_end = (start + len).min(task.end());
+                let len = chunk_end - start;
+                tx.send(Event::DownloadProgress(start..chunk_end)).unwrap();
                 tx_write.send((start, buffer[..len].to_vec())).unwrap();
                 start += len;
             }
