@@ -11,7 +11,7 @@ description = "超级快的下载器命令行界面"
 documentation = "https://docs.rs/fast-down-cli"
 homepage = "https://github.com/share121/fast-down"
 keywords = ["downloader", "parallel", "thread", "concurrency", "performance"]
-categories = ["downloader", "concurrency"]
+categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
 fast-down = { path = "../fast-down" }

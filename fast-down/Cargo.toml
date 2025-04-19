@@ -11,7 +11,7 @@ description = "超级快的下载器核心库"
 documentation = "https://docs.rs/fast-down"
 homepage = "https://github.com/share121/fast-down"
 keywords = ["downloader", "parallel", "thread", "concurrency", "performance"]
-categories = ["downloader", "concurrency"]
+categories = ["network-programming", "concurrency"]
 
 [dependencies]
 color-eyre = { workspace = true }
