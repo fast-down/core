@@ -401,22 +401,6 @@ dependencies = [
 
 [[package]]
 name = "fast-down"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a4d61c21894d6549240a5060cc44182b2e1b9d7013341e23b68ba6a73d3f2ad"
-dependencies = [
- "color-eyre",
- "content_disposition",
- "crossbeam-channel",
- "fast-steal",
- "memmap2",
- "reqwest",
- "sanitize-filename",
- "urlencoding",
-]
-
-[[package]]
-name = "fast-down"
 version = "0.1.2"
 dependencies = [
  "color-eyre",
@@ -431,12 +415,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast-down"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5a86de1f448780313da55addfca1da17451d519fd94862c26a3d200f28dba74"
+dependencies = [
+ "color-eyre",
+ "content_disposition",
+ "crossbeam-channel",
+ "fast-steal",
+ "reqwest",
+ "sanitize-filename",
+ "urlencoding",
+]
+
+[[package]]
 name = "fast-down-cli"
 version = "0.1.1"
 dependencies = [
  "clap",
  "color-eyre",
- "fast-down 0.1.0",
+ "fast-down 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "reqwest",
 ]
 
@@ -960,15 +959,6 @@ name = "memchr"
 version = "2.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
-
-[[package]]
-name = "memmap2"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd3f7eed9d3848f8b98834af67102b720745c4ec028fcd0aa0239277e7de374f"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "mime"

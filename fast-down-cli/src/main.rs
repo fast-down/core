@@ -6,7 +6,7 @@ use reqwest::{blocking::Client, Proxy};
 use std::{
     io::{self, Write},
     path::Path,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 /// 超级快的下载器
@@ -52,6 +52,10 @@ pub struct Args {
     /// 进度条显示宽度
     #[arg(long, default_value_t = 50)]
     pub progress_width: usize,
+
+    /// 重试间隔 (单位: ms)
+    #[arg(long, default_value_t = 500)]
+    pub retry_gap: u64,
 }
 
 fn main() -> Result<()> {
@@ -108,6 +112,7 @@ fn main() -> Result<()> {
         get_chunk_size: args.get_chunk_size,
         write_chunk_size: args.write_chunk_size,
         download_chunks: vec![0..info.file_size],
+        retry_gap: Duration::from_millis(args.retry_gap),
     })?;
 
     let mut get_progress: Vec<Progress> = Vec::new();

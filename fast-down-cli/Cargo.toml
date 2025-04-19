@@ -14,7 +14,7 @@ keywords = ["downloader", "parallel", "thread", "concurrency", "performance"]
 categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
-fast-down = "0.1.0"
+fast-down = "0.1.1"
 clap = { version = "4.5.36", features = ["derive"] }
 color-eyre = { workspace = true }
 reqwest = { workspace = true }

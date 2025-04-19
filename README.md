@@ -42,6 +42,7 @@ Options:
       --get-chunk-size <GET_CHUNK_SIZE>      下载分块大小 (单位: B) [default: 8192]
       --write-chunk-size <WRITE_CHUNK_SIZE>  写入分块大小 (单位: B) [default: 8388608]
       --progress-width <PROGRESS_WIDTH>      进度条显示宽度 [default: 50]
+      --retry-gap <RETRY_GAP>                重试间隔 (单位: ms) [default: 500]
   -h, --help                                 Print help
   -V, --version                              Print version
 ```
