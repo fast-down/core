@@ -6,6 +6,9 @@ resolver = "2"
 edition = "2021"
 license = "MIT"
 authors = ["share121 <2854631158@qq.com>"]
+repository = "https://github.com/share121/fast-down"
+readme = "README.md"
+exclude = ["/.github"]
 
 [workspace.dependencies]
 color-eyre = "0.6.3"

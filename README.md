@@ -6,17 +6,24 @@
 [![Documentation](https://docs.rs/fast-down/badge.svg)](https://docs.rs/fast-down)
 ![License](https://img.shields.io/crates/l/fast-down.svg)
 
-`fast-down` 是一个特别快的多线程库，支持超细颗粒度的任务窃取。
+`fast-down` 全网最快多线程下载库
 
 ## 优势
 
-1. 无锁
-2. 安全的 Rust 代码
-3. 跨平台，Windows、Linux、Mac OS 都支持
+1. 全网最快多线程下载库
+2. 无锁
+3. 安全的 Rust 代码
+4. 超强任务调度算法：自研 [fast-steal](https://github.com/share121/fast-steal) 任务窃取算法
+5. 跨平台，Windows、Linux、Mac OS 都支持
+6. 错误自动重试
+7. 进度跟踪
+8. 性能优化：高效的内存使用，可配置缓冲区大小
+9. 完整性验证：支持多种哈希算法的文件完整性校验
+10. 高度可配置：支持自定义线程数、缓冲区大小等
 
 ```powershell
 > ./fast-down.exe -h
-超级快的下载器
+超级快的下载器命令行界面
 
 Usage: fast-down.exe [OPTIONS] <URL>
 
@@ -24,12 +31,15 @@ Arguments:
   <URL>  要下载的URL
 
 Options:
-  -f, --force                      强制覆盖已有文件
-  -d, --save-folder <SAVE_FOLDER>  保存目录 [default: .]
-  -t, --threads <THREADS>          下载线程数 [default: 32]
-  -n, --file-name <FILE_NAME>      自定义文件名
-  -x, --proxy <PROXY>              代理地址 (格式: http://proxy:port 或 socks5://proxy:port)
-  -H, --headers <HEADER>           自定义请求头 (格式: "Key: Value"，可多次使用)
-  -h, --help                       Print help
-  -V, --version                    Print version
+  -f, --allow-overwrite                      强制覆盖已有文件
+  -d, --dir <SAVE_FOLDER>                    保存目录 [default: .]
+  -t, --threads <THREADS>                    下载线程数 [default: 32]
+  -o, --out <FILE_NAME>                      自定义文件名
+  -p, --all-proxy <PROXY>                    代理地址 (格式: http://proxy:port 或 socks5://proxy:port)
+  -H, --header <Key: Value>                  自定义请求头 (可多次使用)
+      --get-chunk-size <GET_CHUNK_SIZE>      下载分块大小 (单位: B) [default: 8192]
+      --write-chunk-size <WRITE_CHUNK_SIZE>  写入分块大小 (单位: B) [default: 8388608]
+      --sha256 <SHA256>                      校验文件 sha256 校验和
+  -h, --help                                 Print help
+  -V, --version                              Print version
 ```
