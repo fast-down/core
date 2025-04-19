@@ -1,14 +1,16 @@
-use crate::Event;
-use color_eyre::eyre::Result;
-use reqwest::blocking::Client;
+extern crate alloc;
 extern crate std;
+use crate::Event;
+use alloc::string::String;
+use alloc::vec;
+use color_eyre::eyre::Result;
+use core::time::Duration;
+use reqwest::blocking::Client;
 use std::{
     fs::File,
     io::{BufWriter, Read, Write},
     thread::{self, JoinHandle},
 };
-extern crate alloc;
-use alloc::string::String;
 
 pub struct DownloadSingleThreadOptions {
     pub url: String,
@@ -26,12 +28,13 @@ pub fn download_single_thread(
     let tx_clone = tx.clone();
     thread::spawn(move || {
         let mut downloaded = 0;
-        tx_clone.send(Event::Connecting(0)).unwrap();
         let mut response = loop {
+            tx_clone.send(Event::Connecting(0)).unwrap();
             match options.client.get(&options.url).send() {
                 Ok(response) => break response,
                 Err(e) => tx_clone.send(Event::ConnectError(0, e.into())).unwrap(),
             }
+            thread::sleep(Duration::from_secs(1));
         };
         tx_clone.send(Event::Downloading(0)).unwrap();
         let mut buffer = vec![0u8; options.get_chunk_size];
@@ -41,6 +44,7 @@ pub fn download_single_thread(
                     Ok(len) => break len,
                     Err(e) => tx_clone.send(Event::DownloadError(0, e.into())).unwrap(),
                 }
+                thread::sleep(Duration::from_secs(1));
             };
             if len == 0 {
                 break;
@@ -61,6 +65,7 @@ pub fn download_single_thread(
                     Ok(_) => break,
                     Err(e) => tx.send(Event::WriteError(e.into())).unwrap(),
                 }
+                thread::sleep(Duration::from_secs(1));
             }
             tx.send(Event::WriteProgress(start..(start + bytes.len())))
                 .unwrap();
@@ -70,6 +75,7 @@ pub fn download_single_thread(
                 Ok(_) => break,
                 Err(e) => tx.send(Event::WriteError(e.into())).unwrap(),
             }
+            thread::sleep(Duration::from_secs(1));
         }
     });
     Ok((rx, handle))
@@ -78,12 +84,11 @@ pub fn download_single_thread(
 #[cfg(test)]
 mod tests {
     use crate::total::Total;
-    extern crate alloc;
     extern crate std;
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
-    use std::io::Read;
+    use std::{dbg, io::Read};
     use tempfile::NamedTempFile;
 
     #[test]

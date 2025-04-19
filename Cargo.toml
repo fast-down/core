@@ -1,8 +1,5 @@
 [workspace]
-members = [
-    "fast-down-lib",
-    "fast-down-cli"
-]
+members = ["fast-down", "fast-down-cli"]
 resolver = "2"
 
 [workspace.package]

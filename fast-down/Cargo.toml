@@ -1,5 +1,5 @@
 [package]
-name = "fast-down-lib"
+name = "fast-down"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

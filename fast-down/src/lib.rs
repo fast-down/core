@@ -1,3 +1,5 @@
+#![no_std]
+
 mod display_progress;
 mod download;
 mod download_multi_threads;

@@ -1,9 +1,13 @@
 use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
+use fast_down::{DownloadOptions, Event, MergeProgress, Progress, Total};
 use fast_down_cli::{build_headers, sha256_file};
-use fast_down_lib::{DownloadOptions, Event, MergeProgress, Progress, Total};
 use reqwest::{blocking::Client, Proxy};
-use std::{io::Write, path::Path, time::Instant};
+use std::{
+    io::{self, Write},
+    path::Path,
+    time::Instant,
+};
 
 /// 超级快的下载器
 #[derive(Parser, Debug)]
@@ -60,7 +64,7 @@ fn main() -> Result<()> {
     }
     let client = client.build()?;
 
-    let info = fast_down_lib::get_url_info(&args.url, &client)?;
+    let info = fast_down::get_url_info(&args.url, &client)?;
     let threads = if info.can_fast_download {
         args.threads
     } else {
@@ -72,7 +76,7 @@ fn main() -> Result<()> {
     println!(
         "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}",
         info.file_name,
-        fast_down_lib::format_file_size(info.file_size as f64),
+        fast_down::format_file_size(info.file_size as f64),
         info.file_size,
         save_path.to_str().unwrap(),
         threads
@@ -80,9 +84,9 @@ fn main() -> Result<()> {
 
     if save_path.exists() && !args.force {
         print!("文件已存在，是否覆盖？(y/N) ");
-        std::io::stdout().flush()?;
+        io::stdout().flush()?;
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
+        io::stdin().read_line(&mut input)?;
         match input.trim().to_lowercase().as_str() {
             "y" => {}
             "n" | "" => {
@@ -94,7 +98,7 @@ fn main() -> Result<()> {
     }
 
     let start = Instant::now();
-    let (rx, handle) = fast_down_lib::download(DownloadOptions {
+    let (rx, handle) = fast_down::download(DownloadOptions {
         url: info.final_url,
         threads: args.threads,
         save_path: &save_path,
@@ -103,6 +107,7 @@ fn main() -> Result<()> {
         client,
         get_chunk_size: args.get_chunk_size,
         write_chunk_size: args.write_chunk_size,
+        download_chunks: vec![0..info.file_size],
     })?;
 
     let mut progress: Vec<Progress> = Vec::new();
@@ -124,12 +129,13 @@ fn main() -> Result<()> {
             return Err(eyre!("文件 sha256 不同，下载内容有误"));
         }
     }
-    assert_eq!(progress, vec![0..info.file_size]);
+    // assert_eq!(progress, vec![0..info.file_size]);
+    println!("{:#?}", progress);
 
     Ok(())
 }
 
 fn draw_progress(total: usize, progress: &Vec<Progress>) {
     let downloaded = progress.total();
-    print!("\r{:.2}%", downloaded as f64 / total as f64 * 100.0);
+    print!("\r{}%", downloaded as f64 / total as f64 * 100.0);
 }

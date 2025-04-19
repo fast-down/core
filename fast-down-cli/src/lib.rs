@@ -1,11 +1,13 @@
 use color_eyre::eyre::{eyre, Result};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
-use std::fs::File;
-use std::io::{BufReader, Read};
-use std::str::FromStr;
+use std::{
+    fs::File,
+    io::{self, BufReader, Read},
+    str::FromStr,
+};
 
-pub fn sha256_file(file_path: &str) -> std::io::Result<String> {
+pub fn sha256_file(file_path: &str) -> io::Result<String> {
     let file = File::open(file_path)?;
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();

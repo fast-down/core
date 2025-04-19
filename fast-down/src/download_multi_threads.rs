@@ -1,54 +1,40 @@
-use crate::download_single_thread::DownloadSingleThreadOptions;
+extern crate alloc;
+extern crate std;
+use crate::display_progress;
 use crate::Event;
-use crate::{display_progress, download_single_thread};
-use color_eyre::{eyre::eyre, Result};
+use alloc::format;
+use alloc::string::String;
+use alloc::{sync::Arc, vec};
+use color_eyre::eyre::eyre;
+use color_eyre::Result;
+use core::ops::Range;
+use core::time::Duration;
 use fast_steal::{Spawn, TaskList};
 use memmap2::MmapMut;
 use reqwest::{blocking::Client, header, StatusCode};
-extern crate alloc;
-use alloc::format;
-use alloc::{sync::Arc, vec};
-use vec::Vec;
-extern crate std;
-use alloc::string::String;
 use std::{
     fs::File,
     io::Read,
     thread::{self, JoinHandle},
 };
+use vec::Vec;
 
 pub struct DownloadMultiThreadsOptions {
     pub url: String,
     pub threads: usize,
-    pub file_size: usize,
     pub file: File,
     pub client: Client,
     pub get_chunk_size: usize,
     pub write_chunk_size: usize,
+    pub download_chunks: Vec<Range<usize>>,
 }
 
 pub fn download_multi_threads(
     options: DownloadMultiThreadsOptions,
 ) -> Result<(crossbeam_channel::Receiver<Event>, JoinHandle<()>)> {
-    let download_chunk = vec![0..options.file_size];
-    if download_chunk.is_empty() {
-        return Err(eyre!("Download completed"));
-    } else if options.threads < 2
-        && download_chunk.len() == 1
-        && download_chunk[0].start == 0
-        && download_chunk[0].end == options.file_size
-    {
-        return download_single_thread::download_single_thread(DownloadSingleThreadOptions {
-            url: options.url,
-            file: options.file,
-            client: options.client,
-            get_chunk_size: options.get_chunk_size,
-            write_chunk_size: options.write_chunk_size,
-        });
-    }
     let (tx, rx) = crossbeam_channel::unbounded();
     let (tx_write, rx_write) = crossbeam_channel::unbounded::<(usize, Vec<u8>)>();
-    let tasks: Arc<TaskList> = Arc::new(download_chunk.into());
+    let tasks: Arc<TaskList> = Arc::new(options.download_chunks.into());
     let tasks_clone = tasks.clone();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
@@ -57,6 +43,7 @@ pub fn download_multi_threads(
                 Ok(mmap) => break mmap,
                 Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
             }
+            thread::sleep(Duration::from_secs(1));
         };
         let mut downloaded = 0usize;
         for (start, data) in rx_write {
@@ -78,6 +65,7 @@ pub fn download_multi_threads(
                 Ok(_) => break,
                 Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
             }
+            thread::sleep(Duration::from_secs(1));
         }
     });
     tasks.spawn(
@@ -94,26 +82,28 @@ pub fn download_multi_threads(
                 break;
             }
             let range_str = display_progress::display_progress(&tasks_clone.get_range(start..end));
-            tx.send(Event::Connecting(id)).unwrap();
             let mut response = loop {
+                tx.send(Event::Connecting(id)).unwrap();
                 match options
                     .client
                     .get(&options.url)
                     .header(header::RANGE, format!("bytes={}", range_str))
                     .send()
                 {
-                    Ok(response) => break response,
+                    Ok(response) if response.status() == StatusCode::PARTIAL_CONTENT => {
+                        break response
+                    }
+                    Ok(response) => tx
+                        .send(Event::ConnectError(
+                            id,
+                            eyre!("Expect to get 206, but got {}", response.status()),
+                        ))
+                        .unwrap(),
                     Err(e) => tx.send(Event::ConnectError(id, e.into())).unwrap(),
                 }
+                thread::sleep(Duration::from_secs(1));
             };
             tx.send(Event::Downloading(id)).unwrap();
-            if response.status() != StatusCode::PARTIAL_CONTENT {
-                panic!(
-                    "Error: response code is {}, not 206\n{}",
-                    response.status(),
-                    range_str
-                );
-            }
             let mut buffer = vec![0u8; options.get_chunk_size];
             loop {
                 let end = task.end();
@@ -127,6 +117,7 @@ pub fn download_multi_threads(
                         Ok(len) => break len,
                         Err(e) => tx.send(Event::DownloadError(id, e.into())).unwrap(),
                     }
+                    thread::sleep(Duration::from_secs(1));
                 };
                 let chunk_end = (start + len).min(task.end());
                 let len = chunk_end - start;
@@ -142,8 +133,8 @@ pub fn download_multi_threads(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Total;
-    use std::io::Read;
+    use crate::{MergeProgress, Progress, Total};
+    use std::{io::Read, println};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -182,14 +173,13 @@ mod tests {
             client,
             url: server.url(),
             file,
-            file_size: mock_body.len(),
             threads: 4,
             get_chunk_size: 8 * 1024,
             write_chunk_size: 8 * 1024 * 1024,
+            download_chunks: vec![0..mock_body.len()],
         })
         .unwrap();
 
-        let progress_events: Vec<_> = rx.iter().collect();
         handle.join().unwrap();
 
         let mut file_content = Vec::new();
@@ -198,27 +188,20 @@ mod tests {
             .read_to_end(&mut file_content)
             .unwrap();
         assert_eq!(file_content, mock_body);
-        assert_eq!(
-            progress_events
-                .iter()
-                .map(|m| if let Event::DownloadProgress(p) = m {
-                    p.total()
-                } else {
-                    0
-                })
-                .sum::<usize>(),
-            mock_body.len()
-        );
-        assert_eq!(
-            progress_events
-                .iter()
-                .map(|m| if let Event::WriteProgress(p) = m {
-                    p.total()
-                } else {
-                    0
-                })
-                .sum::<usize>(),
-            mock_body.len()
-        );
+        let mut download_progress: Vec<Progress> = Vec::new();
+        let mut write_progress: Vec<Progress> = Vec::new();
+        for e in rx {
+            match e {
+                Event::DownloadProgress(p) => {
+                    download_progress.merge_progress(p);
+                }
+                Event::WriteProgress(p) => {
+                    write_progress.merge_progress(p);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(download_progress.total(), mock_body.len());
+        assert_eq!(write_progress.total(), mock_body.len());
     }
 }
