@@ -26,6 +26,7 @@ pub struct DownloadMultiThreadsOptions {
     pub get_chunk_size: usize,
     pub write_chunk_size: usize,
     pub download_chunks: Vec<Range<usize>>,
+    pub retry_gap: Duration,
 }
 
 pub fn download_multi_threads(
@@ -44,14 +45,14 @@ pub fn download_multi_threads(
                     Ok(_) => break,
                     Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
                 }
-                thread::sleep(Duration::from_secs(1));
+                thread::sleep(options.retry_gap);
             }
             loop {
                 match writer.write_all(&data) {
                     Ok(_) => break,
                     Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
                 }
-                thread::sleep(Duration::from_secs(1));
+                thread::sleep(options.retry_gap);
             }
             tx_clone
                 .send(Event::WriteProgress(start..(start + data.len())))
@@ -62,7 +63,7 @@ pub fn download_multi_threads(
                 Ok(_) => break,
                 Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
             }
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(options.retry_gap);
         }
     });
     tasks.spawn(
@@ -98,7 +99,7 @@ pub fn download_multi_threads(
                         .unwrap(),
                     Err(e) => tx.send(Event::ConnectError(id, e.into())).unwrap(),
                 }
-                thread::sleep(Duration::from_secs(1));
+                thread::sleep(options.retry_gap);
             };
             tx.send(Event::Downloading(id)).unwrap();
             let mut buffer = vec![0u8; options.get_chunk_size];
@@ -114,7 +115,7 @@ pub fn download_multi_threads(
                         Ok(len) => break len,
                         Err(e) => tx.send(Event::DownloadError(id, e.into())).unwrap(),
                     }
-                    thread::sleep(Duration::from_secs(1));
+                    thread::sleep(options.retry_gap);
                 };
                 let chunk_end = (start + len).min(task.end());
                 let len = chunk_end - start;
@@ -174,6 +175,7 @@ mod tests {
             get_chunk_size: 8 * 1024,
             write_chunk_size: 8 * 1024 * 1024,
             download_chunks: vec![0..mock_body.len()],
+            retry_gap: Duration::from_secs(1),
         })
         .unwrap();
 

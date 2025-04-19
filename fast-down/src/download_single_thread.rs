@@ -18,6 +18,7 @@ pub struct DownloadSingleThreadOptions {
     pub client: Client,
     pub get_chunk_size: usize,
     pub write_chunk_size: usize,
+    pub retry_gap: Duration,
 }
 
 pub fn download_single_thread(
@@ -34,7 +35,7 @@ pub fn download_single_thread(
                 Ok(response) => break response,
                 Err(e) => tx_clone.send(Event::ConnectError(0, e.into())).unwrap(),
             }
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(options.retry_gap);
         };
         tx_clone.send(Event::Downloading(0)).unwrap();
         let mut buffer = vec![0u8; options.get_chunk_size];
@@ -44,7 +45,7 @@ pub fn download_single_thread(
                     Ok(len) => break len,
                     Err(e) => tx_clone.send(Event::DownloadError(0, e.into())).unwrap(),
                 }
-                thread::sleep(Duration::from_secs(1));
+                thread::sleep(options.retry_gap);
             };
             if len == 0 {
                 break;
@@ -65,7 +66,7 @@ pub fn download_single_thread(
                     Ok(_) => break,
                     Err(e) => tx.send(Event::WriteError(e.into())).unwrap(),
                 }
-                thread::sleep(Duration::from_secs(1));
+                thread::sleep(options.retry_gap);
             }
             tx.send(Event::WriteProgress(start..(start + bytes.len())))
                 .unwrap();
@@ -75,7 +76,7 @@ pub fn download_single_thread(
                 Ok(_) => break,
                 Err(e) => tx.send(Event::WriteError(e.into())).unwrap(),
             }
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(options.retry_gap);
         }
     });
     Ok((rx, handle))
@@ -112,6 +113,7 @@ mod tests {
             client,
             get_chunk_size: 8 * 1024,
             write_chunk_size: 8 * 1024 * 1024,
+            retry_gap: Duration::from_secs(1),
         })
         .unwrap();
 
@@ -172,6 +174,7 @@ mod tests {
             client,
             get_chunk_size: 8 * 1024,
             write_chunk_size: 8 * 1024 * 1024,
+            retry_gap: Duration::from_secs(1),
         })
         .unwrap();
 
@@ -232,6 +235,7 @@ mod tests {
             client,
             get_chunk_size: 8 * 1024,
             write_chunk_size: 8 * 1024 * 1024,
+            retry_gap: Duration::from_secs(1),
         })
         .unwrap();
 
@@ -292,6 +296,7 @@ mod tests {
             client,
             get_chunk_size: 8 * 1024,
             write_chunk_size: 8 * 1024 * 1024,
+            retry_gap: Duration::from_secs(1),
         })
         .unwrap();
 

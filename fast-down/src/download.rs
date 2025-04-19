@@ -4,7 +4,7 @@ use crate::{
     download_single_thread::{download_single_thread, DownloadSingleThreadOptions},
     Event,
 };
-use core::ops::Range;
+use core::{ops::Range, time::Duration};
 use std::{fs, io::ErrorKind, path::Path, thread::JoinHandle};
 extern crate alloc;
 use alloc::string::String;
@@ -23,6 +23,7 @@ pub struct DownloadOptions<'a> {
     pub get_chunk_size: usize,
     pub write_chunk_size: usize,
     pub download_chunks: Vec<Range<usize>>,
+    pub retry_gap: Duration,
 }
 
 pub fn download<'a>(
@@ -52,6 +53,7 @@ pub fn download<'a>(
             client: options.client,
             get_chunk_size: options.get_chunk_size,
             write_chunk_size: options.write_chunk_size,
+            retry_gap: options.retry_gap,
         })
     } else {
         download_multi_threads(DownloadMultiThreadsOptions {
@@ -62,6 +64,7 @@ pub fn download<'a>(
             get_chunk_size: options.get_chunk_size,
             write_chunk_size: options.write_chunk_size,
             download_chunks: options.download_chunks,
+            retry_gap: options.retry_gap,
         })
     }
 }

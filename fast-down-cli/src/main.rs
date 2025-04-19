@@ -141,19 +141,19 @@ fn main() -> Result<()> {
             }
             Event::ConnectError(id, err) => {
                 print!(
-                    "\x1b[1A\x1b[1A\r\x1B[K线程 {} 连接失败, 错误原因: {:?}\n\x1B\n",
+                    "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 连接失败, 错误原因: {:?}\n\n",
                     id, err
                 );
             }
             Event::DownloadError(id, err) => {
                 print!(
-                    "\x1b[1A\x1b[1A\r\x1B[K线程 {} 下载失败, 错误原因: {:?}\n\x1B\n",
+                    "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 下载失败, 错误原因: {:?}\n\n",
                     id, err
                 );
             }
             Event::WriteError(err) => {
                 print!(
-                    "\x1b[1A\x1b[1A\r\x1B[K写入文件失败, 错误原因: {:?}\n\x1B\n",
+                    "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K写入文件失败, 错误原因: {:?}\n\n",
                     err
                 );
             }
