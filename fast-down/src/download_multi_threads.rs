@@ -10,11 +10,10 @@ use color_eyre::Result;
 use core::ops::Range;
 use core::time::Duration;
 use fast_steal::{Spawn, TaskList};
-use memmap2::MmapMut;
 use reqwest::{blocking::Client, header, StatusCode};
 use std::{
     fs::File,
-    io::Read,
+    io::{BufWriter, Read, Seek, SeekFrom, Write},
     thread::{self, JoinHandle},
 };
 use vec::Vec;
@@ -38,30 +37,28 @@ pub fn download_multi_threads(
     let tasks_clone = tasks.clone();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
-        let mut mmap = loop {
-            match unsafe { MmapMut::map_mut(&options.file) } {
-                Ok(mmap) => break mmap,
-                Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
-            }
-            thread::sleep(Duration::from_secs(1));
-        };
-        let mut downloaded = 0usize;
+        let mut writer = BufWriter::with_capacity(options.write_chunk_size, options.file);
         for (start, data) in rx_write {
-            let len = data.len();
-            mmap[start..(start + len)].copy_from_slice(&data);
-            downloaded += len;
-            if downloaded >= options.write_chunk_size {
-                if let Err(e) = mmap.flush() {
-                    tx_clone.send(Event::WriteError(e.into())).unwrap()
+            loop {
+                match writer.seek(SeekFrom::Start(start as u64)) {
+                    Ok(_) => break,
+                    Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
                 }
-                downloaded = 0;
+                thread::sleep(Duration::from_secs(1));
+            }
+            loop {
+                match writer.write_all(&data) {
+                    Ok(_) => break,
+                    Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
+                }
+                thread::sleep(Duration::from_secs(1));
             }
             tx_clone
-                .send(Event::WriteProgress(start..(start + len)))
+                .send(Event::WriteProgress(start..(start + data.len())))
                 .unwrap();
         }
         loop {
-            match mmap.flush() {
+            match writer.flush() {
                 Ok(_) => break,
                 Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
             }

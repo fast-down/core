@@ -1,7 +1,7 @@
 use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
 use fast_down::{DownloadOptions, Event, MergeProgress, Progress, Total};
-use fast_down_cli::{build_headers, sha256_file};
+use fast_down_cli::{build_headers, format_time};
 use reqwest::{blocking::Client, Proxy};
 use std::{
     io::{self, Write},
@@ -49,9 +49,9 @@ pub struct Args {
     #[arg(long, default_value_t = 8 * 1024 * 1024)]
     pub write_chunk_size: usize,
 
-    /// 校验文件 sha256 校验和
-    #[arg(long)]
-    pub sha256: Option<String>,
+    /// 进度条显示宽度
+    #[arg(long, default_value_t = 50)]
+    pub progress_width: usize,
 }
 
 fn main() -> Result<()> {
@@ -110,32 +110,153 @@ fn main() -> Result<()> {
         download_chunks: vec![0..info.file_size],
     })?;
 
-    let mut progress: Vec<Progress> = Vec::new();
+    let mut get_progress: Vec<Progress> = Vec::new();
+    let mut last_get_size = 0;
+    let mut last_get_time = Instant::now();
+    let mut avg_get_speed = 0.0;
+
+    let mut last_progress_update = Instant::now();
+
+    print!("\n\n");
     for e in rx {
         match e {
             Event::DownloadProgress(p) => {
-                progress.merge_progress(p);
-                draw_progress(info.file_size, &progress);
+                get_progress.merge_progress(p);
+                if last_progress_update.elapsed().as_millis() > 50 {
+                    last_progress_update = Instant::now();
+                    let get_size = get_progress.total();
+                    draw_progress(
+                        start,
+                        info.file_size,
+                        &get_progress,
+                        last_get_size,
+                        last_get_time,
+                        args.progress_width,
+                        get_size,
+                        &mut avg_get_speed,
+                    );
+                    last_get_size = get_size;
+                    last_get_time = Instant::now();
+                }
+            }
+            Event::ConnectError(id, err) => {
+                print!(
+                    "\x1b[1A\x1b[1A\r\x1B[K线程 {} 连接失败, 错误原因: {:?}\n\x1B\n",
+                    id, err
+                );
+            }
+            Event::DownloadError(id, err) => {
+                print!(
+                    "\x1b[1A\x1b[1A\r\x1B[K线程 {} 下载失败, 错误原因: {:?}\n\x1B\n",
+                    id, err
+                );
+            }
+            Event::WriteError(err) => {
+                print!(
+                    "\x1b[1A\x1b[1A\r\x1B[K写入文件失败, 错误原因: {:?}\n\x1B\n",
+                    err
+                );
             }
             _ => {}
         }
     }
     handle.join().unwrap();
-    println!("下载完成，用时 {:?}", start.elapsed());
-
-    if let Some(target) = args.sha256 {
-        let sha256 = sha256_file(save_path.to_str().unwrap())?;
-        if sha256 != target {
-            return Err(eyre!("文件 sha256 不同，下载内容有误"));
-        }
-    }
-    // assert_eq!(progress, vec![0..info.file_size]);
-    println!("{:#?}", progress);
 
     Ok(())
 }
 
-fn draw_progress(total: usize, progress: &Vec<Progress>) {
-    let downloaded = progress.total();
-    print!("\r{}%", downloaded as f64 / total as f64 * 100.0);
+fn draw_progress(
+    start: Instant,
+    total: usize,
+    get_progress: &Vec<Progress>,
+    last_get_size: usize,
+    last_get_time: Instant,
+    progress_width: usize,
+    get_size: usize,
+    avg_get_speed: &mut f64,
+) {
+    // 计算瞬时速度
+    let get_elapsed_ms = last_get_time.elapsed().as_millis();
+    let get_speed = if get_elapsed_ms > 0 {
+        (get_size - last_get_size) as f64 * 1e3 / get_elapsed_ms as f64
+    } else {
+        0.0
+    };
+
+    // 更新下载速度队列
+    const ALPHA: f64 = 0.9;
+    *avg_get_speed = *avg_get_speed * ALPHA + get_speed * (1.0 - ALPHA);
+
+    // 计算百分比
+    let get_percent = (get_size as f64 / total as f64) * 1e2;
+
+    // 计算已用时间
+    let elapsed = start.elapsed();
+
+    // 下载剩余时间
+    let get_remaining = if *avg_get_speed > 0.0 {
+        (total as f64 - get_size as f64) / *avg_get_speed
+    } else {
+        0.0
+    };
+
+    // 格式化文件大小
+    let formatted_get_size = fast_down::format_file_size(get_size as f64);
+    let formatted_total_size = fast_down::format_file_size(total as f64);
+    let formatted_get_speed = fast_down::format_file_size(*avg_get_speed);
+    let formatted_get_remaining = format_time(get_remaining as u64);
+    let formatted_elapsed = format_time(elapsed.as_secs());
+
+    // 创建合并的进度条
+    const BLOCK_CHARS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+
+    // 构建进度条字符串
+    let mut bar_str = String::with_capacity(progress_width);
+
+    // 计算每个位置对应的字节范围
+    let bytes_per_position = total as f64 / progress_width as f64;
+
+    // 对于每个进度条位置，计算其对应的字节范围
+    for pos in 0..progress_width {
+        let pos_start = (pos as f64 * bytes_per_position) as usize;
+        let pos_end = ((pos + 1) as f64 * bytes_per_position) as usize;
+
+        // 计算这个位置有多少字节已经被下载/写入
+        let mut get_completed_bytes = 0;
+
+        // 计算下载完成的字节
+        for p in get_progress {
+            // 如果进度块与当前位置没有重叠，跳过
+            if p.end <= pos_start || p.start >= pos_end {
+                continue;
+            }
+
+            // 计算重叠部分
+            let overlap_start = p.start.max(pos_start);
+            let overlap_end = p.end.min(pos_end);
+            get_completed_bytes += overlap_end - overlap_start;
+        }
+
+        // 计算这个位置的完成度（0-8）
+        let position_total = pos_end - pos_start;
+        if position_total > 0 && get_completed_bytes > 0 {
+            // 计算完成度
+            let get_ratio = get_completed_bytes as f64 / position_total as f64;
+            let fill_level = (get_ratio * 8.0).round() as usize;
+            bar_str.push(BLOCK_CHARS[fill_level]);
+        } else {
+            bar_str.push(BLOCK_CHARS[0]);
+        }
+    }
+
+    print!(
+        "\x1b[1A\x1b[1A\r\x1B[K|{}| {:>6.2}% ({:>8}/{})\n\x1B[K已用时间: {} | 速度: {:>8}/s | 剩余: {}\n",
+        bar_str,
+        get_percent,
+        formatted_get_size,
+        formatted_total_size,
+        formatted_elapsed,
+        formatted_get_speed,
+        formatted_get_remaining
+    );
 }

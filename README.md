@@ -8,6 +8,8 @@
 
 `fast-down` 全网最快多线程下载库
 
+![cli界面](cli.png)
+
 ## 优势
 
 1. 全网最快多线程下载库
@@ -39,7 +41,7 @@ Options:
   -H, --header <Key: Value>                  自定义请求头 (可多次使用)
       --get-chunk-size <GET_CHUNK_SIZE>      下载分块大小 (单位: B) [default: 8192]
       --write-chunk-size <WRITE_CHUNK_SIZE>  写入分块大小 (单位: B) [default: 8388608]
-      --sha256 <SHA256>                      校验文件 sha256 校验和
+      --progress-width <PROGRESS_WIDTH>      进度条显示宽度 [default: 50]
   -h, --help                                 Print help
   -V, --version                              Print version
 ```
