@@ -3,7 +3,6 @@ members = ["fast-down", "fast-down-cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["share121 <2854631158@qq.com>"]
