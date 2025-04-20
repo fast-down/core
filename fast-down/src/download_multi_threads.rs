@@ -163,7 +163,7 @@ mod tests {
             client,
             url: server.url(),
             file,
-            threads: 4,
+            threads: 100,
             get_chunk_size: 8 * 1024,
             download_chunks: vec![0..mock_body.len()],
             retry_gap: Duration::from_secs(1),
