@@ -10,10 +10,11 @@ use color_eyre::Result;
 use core::ops::Range;
 use core::time::Duration;
 use fast_steal::{Spawn, TaskList};
+use memmap2::MmapMut;
 use reqwest::{blocking::Client, header, StatusCode};
 use std::{
     fs::File,
-    io::{BufWriter, Read, Seek, SeekFrom, Write},
+    io::Read,
     thread::{self, JoinHandle},
 };
 use vec::Vec;
@@ -24,7 +25,6 @@ pub struct DownloadMultiThreadsOptions {
     pub file: File,
     pub client: Client,
     pub get_chunk_size: usize,
-    pub write_chunk_size: usize,
     pub download_chunks: Vec<Range<usize>>,
     pub retry_gap: Duration,
 }
@@ -38,32 +38,24 @@ pub fn download_multi_threads(
     let tasks_clone = tasks.clone();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
-        let mut writer = BufWriter::with_capacity(options.write_chunk_size, options.file);
+        let mut mmap = loop {
+            match unsafe { MmapMut::map_mut(&options.file) } {
+                Ok(mmap) => break mmap,
+                Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
+            }
+        };
         for (start, data) in rx_write {
-            loop {
-                match writer.seek(SeekFrom::Start(start as u64)) {
-                    Ok(_) => break,
-                    Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
-                }
-                thread::sleep(options.retry_gap);
-            }
-            loop {
-                match writer.write_all(&data) {
-                    Ok(_) => break,
-                    Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
-                }
-                thread::sleep(options.retry_gap);
-            }
+            let len = data.len();
+            mmap[start..(start + len)].copy_from_slice(&data);
             tx_clone
-                .send(Event::WriteProgress(start..(start + data.len())))
+                .send(Event::WriteProgress(start..(start + len)))
                 .unwrap();
         }
         loop {
-            match writer.flush() {
+            match mmap.flush() {
                 Ok(_) => break,
                 Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
             }
-            thread::sleep(options.retry_gap);
         }
     });
     tasks.spawn(
@@ -173,7 +165,6 @@ mod tests {
             file,
             threads: 4,
             get_chunk_size: 8 * 1024,
-            write_chunk_size: 8 * 1024 * 1024,
             download_chunks: vec![0..mock_body.len()],
             retry_gap: Duration::from_secs(1),
         })

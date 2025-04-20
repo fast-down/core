@@ -36,6 +36,7 @@ pub fn download<'a>(
         }
     }
     let file = OpenOptions::new()
+        .read(true)
         .write(true)
         .create(true)
         .open(&options.save_path)?;
@@ -62,7 +63,6 @@ pub fn download<'a>(
             client: options.client,
             threads: options.threads,
             get_chunk_size: options.get_chunk_size,
-            write_chunk_size: options.write_chunk_size,
             download_chunks: options.download_chunks,
             retry_gap: options.retry_gap,
         })
