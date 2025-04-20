@@ -401,21 +401,6 @@ dependencies = [
 
 [[package]]
 name = "fast-down"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5a86de1f448780313da55addfca1da17451d519fd94862c26a3d200f28dba74"
-dependencies = [
- "color-eyre",
- "content_disposition",
- "crossbeam-channel",
- "fast-steal",
- "reqwest",
- "sanitize-filename",
- "urlencoding",
-]
-
-[[package]]
-name = "fast-down"
 version = "1.1.0"
 dependencies = [
  "color-eyre",
@@ -436,7 +421,7 @@ version = "1.1.0"
 dependencies = [
  "clap",
  "color-eyre",
- "fast-down 0.1.2",
+ "fast-down",
  "reqwest",
 ]
 
