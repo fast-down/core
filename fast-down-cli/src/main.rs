@@ -1,7 +1,8 @@
 use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
 use fast_down::{DownloadOptions, Event, MergeProgress, Progress, Total};
-use fast_down_cli::{build_headers, format_time};
+use fast_down_cli::{build_headers, format_time, database::{init_db, save_progress, WriteProgress}};
+mod database;
 use reqwest::{blocking::Client, Proxy};
 use std::{
     io::{self, Write},
@@ -56,6 +57,10 @@ pub struct Args {
     /// 重试间隔 (单位: ms)
     #[arg(long, default_value_t = 500)]
     pub retry_gap: u64,
+
+    /// 数据库存储路径
+    #[arg(long, default_value = "downloads.db")]
+    pub db_path: String,
 }
 
 fn main() -> Result<()> {
@@ -67,6 +72,7 @@ fn main() -> Result<()> {
         client = client.proxy(Proxy::all(proxy)?);
     }
     let client = client.build()?;
+    let conn = init_db(&args.db_path)?;
 
     let info = fast_down::get_url_info(&args.url, &client)?;
     let threads = if info.can_fast_download {
@@ -115,6 +121,7 @@ fn main() -> Result<()> {
         retry_gap: Duration::from_millis(args.retry_gap),
     })?;
 
+    let mut write_progress: Vec<Progress> = Vec::new();
     let mut get_progress: Vec<Progress> = Vec::new();
     let mut last_get_size = 0;
     let mut last_get_time = Instant::now();
@@ -161,6 +168,17 @@ fn main() -> Result<()> {
                     "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K写入文件失败, 错误原因: {:?}\n\n",
                     err
                 );
+            }
+            Event::WriteProgress(p) => {
+                write_progress.merge_progress(p);
+                let progress = WriteProgress {
+                url: info.final_url.clone(),
+                file_path: save_path.to_str().unwrap().to_string(),
+                total_size: info.file_size,
+                downloaded: p.total(),
+                timestamp: start.elapsed().as_secs() as i64,
+            };
+            save_progress(&conn, &progress)?;
             }
             _ => {}
         }

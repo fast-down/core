@@ -18,6 +18,8 @@ fast-down = "1.1.0"
 clap = { version = "4.5.36", features = ["derive"] }
 color-eyre = { workspace = true }
 reqwest = { workspace = true }
+rusqlite = { version = "0.31.0", features = ["bundled"] }
+serde = { version = "1.0.197", features = ["derive"] }
 
 [[bin]]
 name = "fast-down"
