@@ -4,6 +4,7 @@ pub mod write;
 #[cfg(feature = "file")]
 pub mod file_writer;
 mod block_lock;
+mod read_response;
 
 #[cfg(feature = "file")]
 pub mod download_file {

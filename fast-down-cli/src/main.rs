@@ -1,6 +1,6 @@
 use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
-use fast_down::{DownloadOptions, Event, MergeProgress, Progress, Total};
+use fast_down::{DownloadOptions, DownloadResult, Event, MergeProgress, Progress, Total};
 use fast_down_cli::{build_headers, format_time};
 use reqwest::{blocking::Client, Proxy};
 use std::{
@@ -44,11 +44,6 @@ pub struct Args {
     /// 下载分块大小 (单位: B)
     #[arg(long, default_value_t = 8 * 1024)]
     pub get_chunk_size: usize,
-
-    /// 写入分块大小 (单位: B)
-    #[arg(long, default_value_t = 8 * 1024 * 1024)]
-    pub write_chunk_size: usize,
-
     /// 进度条显示宽度
     #[arg(long, default_value_t = 50)]
     pub progress_width: usize,
@@ -102,7 +97,7 @@ fn main() -> Result<()> {
     }
 
     let start = Instant::now();
-    let (rx, handle) = fast_down::download(DownloadOptions {
+    let result = fast_down::download(DownloadOptions {
         url: info.final_url,
         threads: args.threads,
         save_path: &save_path,
@@ -110,7 +105,6 @@ fn main() -> Result<()> {
         file_size: info.file_size,
         client,
         get_chunk_size: args.get_chunk_size,
-        write_chunk_size: args.write_chunk_size,
         download_chunks: vec![0..info.file_size],
         retry_gap: Duration::from_millis(args.retry_gap),
     })?;
@@ -121,6 +115,8 @@ fn main() -> Result<()> {
     let mut avg_get_speed = 0.0;
 
     let mut last_progress_update = Instant::now();
+
+    let DownloadResult { event_chan: rx, handler } = result;
 
     print!("\n\n");
     for e in rx {
@@ -165,7 +161,8 @@ fn main() -> Result<()> {
             _ => {}
         }
     }
-    handle.join().unwrap();
+
+    handler.unwrap().join();
 
     Ok(())
 }

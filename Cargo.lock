@@ -430,6 +430,7 @@ dependencies = [
  "fast-steal",
  "memmap2",
  "mockito",
+ "num-traits",
  "reqwest",
  "sanitize-filename",
  "tempfile",
@@ -448,9 +449,9 @@ dependencies = [
 
 [[package]]
 name = "fast-steal"
-version = "2.5.0"
+version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "940c8942367bc8a89420c456ec18cafbd0f695270ed68002abbb6a01bb3f61b7"
+checksum = "e411b9a2f816cf8444402ccb3dc3b416f507819dcaac949777f35d21fc73a2ff"
 
 [[package]]
 name = "fastrand"
@@ -1050,6 +1051,15 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "num-traits"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
+dependencies = [
+ "autocfg",
 ]
 
 [[package]]

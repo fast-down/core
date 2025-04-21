@@ -1,16 +1,23 @@
 use core::ops::Range;
+use core::iter::Step;
 use core::cmp::min;
+use core::ops::{Sub, Div};
+use num_traits::{Zero, One, SaturatingSub};
 
-pub fn overlaps(range: Range<u64>, block_size: u64, count: u64) -> impl Iterator<Item = u64> {
-    if block_size == 0 || count == 0 || range.start >= range.end {
-        return 1..=0;
+pub fn overlaps<T: Clone + Zero + One + Ord + Div<Output=T> + Sub + SaturatingSub + Step>(
+    range: Range<T>,
+    block_size: T,
+    count: T
+) -> impl Iterator<Item = T> {
+    if block_size == T::zero() || count == T::zero() || range.start >= range.end {
+        return T::one()..=T::zero();
     }
 
-    let first_overlapping_block = range.start / block_size;
+    let first_overlapping_block = range.start / block_size.clone();
 
-    let last_overlapping_block_by_range = (range.end.saturating_sub(1)) / block_size;
+    let last_overlapping_block_by_range = (range.end.saturating_sub(&T::one())) / block_size.clone();
 
-    let last_valid_block_by_count = (count.saturating_sub(1)) / block_size;
+    let last_valid_block_by_count = (count.saturating_sub(&T::one())) / block_size;
 
     let end_block = min(last_overlapping_block_by_range, last_valid_block_by_count);
 

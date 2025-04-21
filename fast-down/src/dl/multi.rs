@@ -3,7 +3,6 @@ extern crate std;
 use crate::Event;
 use crate::fmt::progress;
 use alloc::format;
-use alloc::string::String;
 use alloc::{sync::Arc, vec};
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
@@ -11,13 +10,10 @@ use core::ops::Range;
 use core::time::Duration;
 use fast_steal::{Spawn, TaskList};
 use reqwest::{blocking::Client, header, IntoUrl, StatusCode};
-use std::{
-    fs::File,
-    io::{BufWriter, Read, Seek, SeekFrom, Write},
-    thread::{self, JoinHandle},
-};
+use std::thread::{self, JoinHandle};
 use vec::Vec;
 use bytes::BytesMut;
+use super::read_response::read_response;
 use super::write::DownloadWriter;
 
 pub struct DownloadOptions {
@@ -37,7 +33,6 @@ pub fn download<Writer: DownloadWriter + 'static>(
     let (tx, rx) = crossbeam_channel::unbounded();
     let tasks: Arc<TaskList> = Arc::new(options.download_chunks.into());
     let tasks_clone = tasks.clone();
-    let tx_clone = tx.clone();
     let handles = tasks.spawn(
         options.threads,
         |closure| thread::spawn(move || closure()),
@@ -82,18 +77,21 @@ pub fn download<Writer: DownloadWriter + 'static>(
                 }
                 let remain = end - start;
                 task.fetch_add_start(remain.min(options.get_chunk_size));
-                let len = loop {
-                    match response.read(&mut buffer) {
-                        Ok(len) => break len,
-                        Err(e) => tx.send(Event::DownloadError(id, e.into())).unwrap(),
-                    }
-                    thread::sleep(options.retry_gap);
-                };
+                let len = read_response(&mut response, &mut buffer, options.retry_gap, |err| {
+                    tx.send(Event::DownloadError(0, err.into())).unwrap();
+                });
                 let chunk_end = (start + len).min(task.end());
                 let len = chunk_end - start;
-                tx.send(Event::DownloadProgress(start..chunk_end)).unwrap();
-                match writer.write_part(start..(start + len), buffer.clone().split_to(len).freeze()) {
-                    Ok(_) => {},
+                let span = start..chunk_end;
+                tx.send(Event::DownloadProgress(span.clone())).unwrap();
+
+                // SAFETY: fast-steal 2.6.0 guarantee it won't write the same place twice
+                match unsafe { writer.write_part_unchecked(span.clone(), buffer.clone().split_to(len).freeze()) } {
+                    Ok(_) => {
+                        tx
+                            .send(Event::WriteProgress(span))
+                            .unwrap();
+                    },
                     Err(e) => tx.send(Event::WriteError(e)).unwrap(),
                 }
                 start += len;
@@ -109,6 +107,7 @@ mod tests {
     use super::*;
     use crate::{MergeProgress, Progress, Total};
     use std::{io::Read, println};
+    use std::fs::File;
     use tempfile::NamedTempFile;
     use crate::dl::file_writer::FileWriter;
 

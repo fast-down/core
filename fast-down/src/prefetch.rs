@@ -9,7 +9,7 @@ use reqwest::{
 };
 use sanitize_filename;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct UrlInfo {
     pub file_size: usize,
@@ -74,17 +74,10 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
 }
 
 pub fn get_url_info(url: &str, client: &Client) -> Result<UrlInfo> {
-    let resp = client.get(url).header(header::RANGE, "bytes=0-").send()?;
+    let resp = client.get(url).header(header::RANGE, "bytes=0-").send()?.error_for_status()?;
     let status = resp.status();
     let final_url = resp.url();
     let final_url_str = final_url.to_string();
-    if !status.is_success() {
-        return Err(eyre::eyre!(
-            "Request failed with status {} for URL: {}",
-            status,
-            final_url_str
-        ));
-    }
 
     let resp_headers = resp.headers();
     let file_size = get_file_size(resp_headers, &status);
@@ -190,13 +183,20 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Request failed with status 404 Not Found for URL:")]
     fn test_error_handling() {
         let mut server = mockito::Server::new();
         let mock1 = server.mock("GET", "/404").with_status(404).create();
 
         let client = Client::new();
-        get_url_info(&format!("{}/404", server.url()), &client).unwrap();
+
+        match get_url_info(&format!("{}/404", server.url()), &client) {
+            Ok(info) => assert!(false, "404 status code should not success: {:?}", info),
+            Err(err) => {
+                let err = err.downcast::<reqwest::Error>().expect("reqwest error");
+                assert!(err.is_status(), "should be error about status code");
+                assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
+            }
+        }
 
         mock1.assert();
     }

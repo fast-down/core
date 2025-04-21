@@ -4,10 +4,9 @@ use crate::Event;
 use bytes::BytesMut;
 use color_eyre::eyre::Result;
 use core::{time::Duration};
-use std::io::Read;
 use reqwest::{blocking::Client, IntoUrl};
 use std::thread::{self, JoinHandle};
-
+use super::read_response::read_response;
 use super::write::DownloadWriter;
 
 pub struct DownloadOptions {
@@ -25,7 +24,7 @@ pub fn download<Writer: DownloadWriter + 'static>(
     let (tx, rx) = crossbeam_channel::unbounded();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
-        let mut downloaded = 0;
+        let mut downloaded: usize = 0;
         let mut response = loop {
             tx_clone.send(Event::Connecting(0)).unwrap();
             match options.client.get(url.clone()).send() {
@@ -35,25 +34,33 @@ pub fn download<Writer: DownloadWriter + 'static>(
             thread::sleep(options.retry_gap);
         };
         tx_clone.send(Event::Downloading(0)).unwrap();
+        // dbg!("Response: {:?}", response);
+        // dbg!("@status: {:?}", response.status());
+        // dbg!("@length: {:?}", response.headers().get("content-length").unwrap());
         let mut buffer = BytesMut::with_capacity(options.get_chunk_size);
         loop {
-            let len = loop {
-                match response.read(&mut buffer) {
-                    Ok(len) => break len,
-                    Err(e) => tx_clone.send(Event::DownloadError(0, e.into())).unwrap(),
-                }
-                thread::sleep(options.retry_gap);
-            };
+            let len = read_response(&mut response, &mut buffer, options.retry_gap, |err| {
+                tx_clone.send(Event::DownloadError(0, err.into())).unwrap();
+            });
+            // dbg!("@read: {:?}", len);
             if len == 0 {
                 break;
             }
+            let span = downloaded..(downloaded + len);
             tx_clone
-                .send(Event::DownloadProgress(downloaded..(downloaded + len)))
+                .send(Event::DownloadProgress(span.clone()))
                 .unwrap();
-            match writer.write_part(downloaded..(downloaded + len), buffer.clone().split_to(len).freeze()) {
-                Ok(_) => {},
+
+            // SAFETY: single thread
+            match unsafe { writer.write_part_unchecked(span.clone(), buffer.clone().split_to(len).freeze()) } {
+                Ok(_) => {
+                    tx_clone
+                        .send(Event::WriteProgress(span))
+                        .unwrap();
+                },
                 Err(e) => tx_clone.send(Event::DownloadError(0, e.into())).unwrap(),
             }
+
             downloaded += len;
         }
         tx_clone.send(Event::Finished(0)).unwrap();
@@ -86,6 +93,7 @@ mod tests {
 
         let temp_file = NamedTempFile::new().unwrap();
         let file = temp_file.reopen().unwrap();
+        file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
         let (rx, handle) = download(server.url(), FileWriter::new::<4>(file).unwrap(), DownloadOptions {
@@ -202,6 +210,7 @@ mod tests {
 
         let temp_file = NamedTempFile::new().unwrap();
         let file = temp_file.reopen().unwrap();
+        file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
         let (rx, handle) = download(server.url(), FileWriter::new::<4>(file).unwrap(), DownloadOptions {
@@ -260,6 +269,8 @@ mod tests {
 
         let temp_file = NamedTempFile::new().unwrap();
         let file = temp_file.reopen().unwrap();
+
+        file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
         let (rx, handle) = download(server.url(), FileWriter::new::<4>(file).unwrap(), DownloadOptions {
