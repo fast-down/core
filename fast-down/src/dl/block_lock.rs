@@ -1,14 +1,14 @@
 use core::cmp::min;
-use core::iter::Step;
 use core::ops::Range;
 use core::ops::{Div, Sub};
-use num_traits::{One, SaturatingSub, Zero};
+use core::ops::RangeInclusive;
+use num_traits::{One, SaturatingSub, Zero, };
 
-pub fn overlaps<T: Clone + Zero + One + Ord + Div<Output = T> + Sub + SaturatingSub + Step>(
+pub fn overlaps<T: Clone + Zero + One + Ord + Div<Output = T> + Sub + SaturatingSub>(
     range: Range<T>,
     block_size: T,
     count: T,
-) -> impl Iterator<Item = T> {
+) -> impl Iterator<Item = T> where RangeInclusive<T> : Iterator<Item = T> {
     if block_size == T::zero() || count == T::zero() || range.start >= range.end {
         return T::one()..=T::zero();
     }
