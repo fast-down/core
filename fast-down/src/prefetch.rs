@@ -74,7 +74,18 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
 }
 
 pub fn get_url_info(url: &str, client: &Client) -> Result<UrlInfo> {
-    let resp = client.head(url).send()?.error_for_status()?;
+    let resp = client.head(url).send()?;
+
+    let resp = match resp.error_for_status() {
+        Ok(resp) => resp,
+        Err(err) => {
+            return match err.status() {
+                Some(StatusCode::NOT_IMPLEMENTED) => get_url_info_fallback(url, client),
+                _ => Err(err.into()),
+            };
+        }
+    };
+
     let status = resp.status();
     let final_url = resp.url();
     let final_url_str = final_url.to_string();
