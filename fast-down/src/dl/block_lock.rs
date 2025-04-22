@@ -1,13 +1,13 @@
-use core::ops::Range;
-use core::iter::Step;
 use core::cmp::min;
-use core::ops::{Sub, Div};
-use num_traits::{Zero, One, SaturatingSub};
+use core::iter::Step;
+use core::ops::Range;
+use core::ops::{Div, Sub};
+use num_traits::{One, SaturatingSub, Zero};
 
-pub fn overlaps<T: Clone + Zero + One + Ord + Div<Output=T> + Sub + SaturatingSub + Step>(
+pub fn overlaps<T: Clone + Zero + One + Ord + Div<Output = T> + Sub + SaturatingSub + Step>(
     range: Range<T>,
     block_size: T,
-    count: T
+    count: T,
 ) -> impl Iterator<Item = T> {
     if block_size == T::zero() || count == T::zero() || range.start >= range.end {
         return T::one()..=T::zero();
@@ -15,7 +15,8 @@ pub fn overlaps<T: Clone + Zero + One + Ord + Div<Output=T> + Sub + SaturatingSu
 
     let first_overlapping_block = range.start / block_size.clone();
 
-    let last_overlapping_block_by_range = (range.end.saturating_sub(&T::one())) / block_size.clone();
+    let last_overlapping_block_by_range =
+        (range.end.saturating_sub(&T::one())) / block_size.clone();
 
     let last_valid_block_by_count = (count.saturating_sub(&T::one())) / block_size;
 
@@ -26,18 +27,9 @@ pub fn overlaps<T: Clone + Zero + One + Ord + Div<Output=T> + Sub + SaturatingSu
 
 #[test]
 fn test_overlaps() {
-    assert_eq!(
-        overlaps(0..20, 10, 30).collect::<Vec<_>>(),
-        vec![0, 1]
-    );
+    assert_eq!(overlaps(0..20, 10, 30).collect::<Vec<_>>(), vec![0, 1]);
 
-    assert_eq!(
-        overlaps(0..30, 10, 50).collect::<Vec<_>>(),
-        vec![0, 1, 2]
-    );
+    assert_eq!(overlaps(0..30, 10, 50).collect::<Vec<_>>(), vec![0, 1, 2]);
 
-    assert_eq!(
-        overlaps(10..30, 10, 50).collect::<Vec<_>>(),
-        vec![1, 2]
-    );
+    assert_eq!(overlaps(10..30, 10, 50).collect::<Vec<_>>(), vec![1, 2]);
 }

@@ -74,7 +74,41 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
 }
 
 pub fn get_url_info(url: &str, client: &Client) -> Result<UrlInfo> {
-    let resp = client.get(url).header(header::RANGE, "bytes=0-").send()?.error_for_status()?;
+    let resp = client.head(url).send()?.error_for_status()?;
+    let status = resp.status();
+    let final_url = resp.url();
+    let final_url_str = final_url.to_string();
+
+    let resp_headers = resp.headers();
+    let file_size = get_file_size(resp_headers, &status);
+
+    let supports_range = match resp.headers().get(header::ACCEPT_RANGES) {
+        Some(accept_ranges) => accept_ranges
+            .to_str()
+            .ok()
+            .map(|v| v.split(' '))
+            .and_then(|supports| supports.into_iter().find(|&ty| ty == "bytes"))
+            .is_some(),
+        None => return get_url_info_fallback(url, client),
+    };
+
+    Ok(UrlInfo {
+        final_url: final_url_str,
+        file_name: get_filename(resp_headers, &final_url),
+        file_size,
+        supports_range,
+        can_fast_download: file_size > 0 && supports_range,
+        etag: get_header_str(resp_headers, &header::ETAG),
+        last_modified: get_header_str(resp_headers, &header::LAST_MODIFIED),
+    })
+}
+
+pub fn get_url_info_fallback(url: &str, client: &Client) -> Result<UrlInfo> {
+    let resp = client
+        .get(url)
+        .header(header::RANGE, "bytes=0-")
+        .send()?
+        .error_for_status()?;
     let status = resp.status();
     let final_url = resp.url();
     let final_url_str = final_url.to_string();

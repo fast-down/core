@@ -1,9 +1,12 @@
 extern crate alloc;
 extern crate std;
-use crate::Event;
+use super::read_response::read_response;
+use super::write::DownloadWriter;
 use crate::fmt::progress;
+use crate::Event;
 use alloc::format;
 use alloc::{sync::Arc, vec};
+use bytes::BytesMut;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use core::ops::Range;
@@ -12,9 +15,6 @@ use fast_steal::{Spawn, TaskList};
 use reqwest::{blocking::Client, header, IntoUrl, StatusCode};
 use std::thread::{self, JoinHandle};
 use vec::Vec;
-use bytes::BytesMut;
-use super::read_response::read_response;
-use super::write::DownloadWriter;
 
 pub struct DownloadOptions {
     pub threads: usize,
@@ -86,12 +86,12 @@ pub fn download<Writer: DownloadWriter + 'static>(
                 tx.send(Event::DownloadProgress(span.clone())).unwrap();
 
                 // SAFETY: fast-steal 2.6.0 guarantee it won't write the same place twice
-                match unsafe { writer.write_part_unchecked(span.clone(), buffer.clone().split_to(len).freeze()) } {
+                match unsafe {
+                    writer.write_part_unchecked(span.clone(), buffer.clone().split_to(len).freeze())
+                } {
                     Ok(_) => {
-                        tx
-                            .send(Event::WriteProgress(span))
-                            .unwrap();
-                    },
+                        tx.send(Event::WriteProgress(span)).unwrap();
+                    }
                     Err(e) => tx.send(Event::WriteError(e)).unwrap(),
                 }
                 start += len;
@@ -105,11 +105,11 @@ pub fn download<Writer: DownloadWriter + 'static>(
 #[cfg(feature = "file")]
 mod tests {
     use super::*;
-    use crate::{MergeProgress, Progress, Total};
-    use std::{io::Read, println};
-    use std::fs::File;
-    use tempfile::NamedTempFile;
     use crate::dl::file_writer::FileWriter;
+    use crate::{MergeProgress, Progress, Total};
+    use std::fs::File;
+    use std::{io::Read, println};
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_multi_thread_regular_download() {
@@ -143,13 +143,17 @@ mod tests {
         file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
-        let (rx, handles) = download(server.url(), FileWriter::new::<4>(file).unwrap(), DownloadOptions {
-            client,
-            threads: 4,
-            get_chunk_size: 8 * 1024,
-            download_chunks: vec![0..mock_body.len()],
-            retry_gap: Duration::from_secs(1),
-        })
+        let (rx, handles) = download(
+            server.url(),
+            FileWriter::new::<4>(file).unwrap(),
+            DownloadOptions {
+                client,
+                threads: 8,
+                get_chunk_size: 8 * 1024,
+                download_chunks: vec![0..mock_body.len()],
+                retry_gap: Duration::from_secs(1),
+            },
+        )
         .unwrap();
 
         for handle in handles {

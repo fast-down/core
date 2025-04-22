@@ -1,18 +1,18 @@
 extern crate alloc;
 extern crate std;
 
-use alloc::sync::Arc;
-use core::cell::UnsafeCell;
-use std::io::Write;
-use core::sync::atomic::AtomicBool;
-use core::sync::atomic::Ordering;
-use bytes::Bytes;
-use color_eyre::eyre::Result;
-use crossbeam_skiplist::SkipMap;
-use memmap2::MmapMut;
+use super::write::DownloadWriter;
 use crate::dl::block_lock::overlaps;
 use crate::Progress;
-use super::write::DownloadWriter;
+use alloc::sync::Arc;
+use bytes::Bytes;
+use color_eyre::eyre::Result;
+use core::cell::UnsafeCell;
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::Ordering;
+use crossbeam_skiplist::SkipMap;
+use memmap2::MmapMut;
+use std::io::Write;
 
 struct Inner {
     mmap: UnsafeCell<MmapMut>,
@@ -39,7 +39,7 @@ impl FileWriter {
         Ok(FileWriter(Arc::new(Inner {
             mmap: UnsafeCell::new(mmap),
             block_locks: locks,
-            map_size
+            map_size,
         })))
     }
 
@@ -71,11 +71,21 @@ fn spin(lock: &AtomicBool, current: bool, new: bool) {
     let mut spin: usize = 0;
     loop {
         // Attempt to set the flag to true only if it's currently false.
-        if lock.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        if lock
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
             // The compare-and-swap operation succeeded, the flag is now true.
             break;
         } else {
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "arm", target_arch = "aarch64", target_arch = "riscv32", target_arch = "riscv64"))]
+            #[cfg(any(
+                target_arch = "x86",
+                target_arch = "x86_64",
+                target_arch = "arm",
+                target_arch = "aarch64",
+                target_arch = "riscv32",
+                target_arch = "riscv64"
+            ))]
             unsafe {
                 core::arch::asm!("nop");
             }
@@ -93,37 +103,38 @@ impl DownloadWriter for FileWriter {
     fn write_part(&self, progress: Progress, bytes: Bytes) -> Result<()> {
         let blk_sz = self.0.map_size.div_ceil(self.0.block_locks.len());
 
-        for lock_id in overlaps(progress.start..progress.end, blk_sz, self.0.map_size) { // spin set lock
+        for lock_id in overlaps(progress.start..progress.end, blk_sz, self.0.map_size) {
+            // spin set lock
             match self.0.block_locks.get(&(lock_id as usize)) {
                 Some(entry) => {
                     let lock = entry.value();
                     spin(lock, false, true);
-                },
-                None => continue
+                }
+                None => continue,
             };
         }
 
-        let result = unsafe {
-            self.write_part_unchecked(progress.clone(), bytes)
-        };
+        let result = unsafe { self.write_part_unchecked(progress.clone(), bytes) };
 
-        for lock_id in overlaps(progress.start..progress.end, blk_sz, self.0.map_size) { // spin to unset the lock
+        for lock_id in overlaps(progress.start..progress.end, blk_sz, self.0.map_size) {
+            // spin to unset the lock
             match self.0.block_locks.get(&(lock_id)) {
                 Some(entry) => {
                     let lock = entry.value();
 
                     spin(lock, true, false);
-                },
-                None => continue
+                }
+                None => continue,
             };
         }
 
         result
     }
 
+    /// SAFETY:
+    /// make sure no two thread writes on the same part in the same time
     unsafe fn write_part_unchecked(&self, progress: Progress, bytes: Bytes) -> Result<()> {
         unsafe { &mut (*self.0.mmap.get())[progress.start..progress.end] }.write_all(&*bytes)?;
         Ok(())
     }
 }
-

@@ -1,13 +1,13 @@
 extern crate std;
 
+use super::read_response::read_response;
+use super::write::DownloadWriter;
 use crate::Event;
 use bytes::BytesMut;
 use color_eyre::eyre::Result;
-use core::{time::Duration};
+use core::time::Duration;
 use reqwest::{blocking::Client, IntoUrl};
 use std::thread::{self, JoinHandle};
-use super::read_response::read_response;
-use super::write::DownloadWriter;
 
 pub struct DownloadOptions {
     pub client: Client,
@@ -52,12 +52,12 @@ pub fn download<Writer: DownloadWriter + 'static>(
                 .unwrap();
 
             // SAFETY: single thread
-            match unsafe { writer.write_part_unchecked(span.clone(), buffer.clone().split_to(len).freeze()) } {
+            match unsafe {
+                writer.write_part_unchecked(span.clone(), buffer.clone().split_to(len).freeze())
+            } {
                 Ok(_) => {
-                    tx_clone
-                        .send(Event::WriteProgress(span))
-                        .unwrap();
-                },
+                    tx_clone.send(Event::WriteProgress(span)).unwrap();
+                }
                 Err(e) => tx_clone.send(Event::DownloadError(0, e.into())).unwrap(),
             }
 
@@ -74,11 +74,11 @@ mod tests {
     use crate::total::Total;
     extern crate std;
     use super::*;
+    use crate::dl::file_writer::FileWriter;
+    use std::fs::File;
     use std::vec::Vec;
     use std::{dbg, io::Read};
-    use std::fs::File;
     use tempfile::NamedTempFile;
-    use crate::dl::file_writer::FileWriter;
 
     #[test]
     fn test_downloads_small_file_correctly() {
@@ -96,11 +96,15 @@ mod tests {
         file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download(server.url(), FileWriter::new::<4>(file).unwrap(), DownloadOptions {
-            client,
-            get_chunk_size: 8 * 1024,
-            retry_gap: Duration::from_secs(1),
-        })
+        let (rx, handle) = download(
+            server.url(),
+            FileWriter::new::<4>(file).unwrap(),
+            DownloadOptions {
+                client,
+                get_chunk_size: 8 * 1024,
+                retry_gap: Duration::from_secs(1),
+            },
+        )
         .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();
@@ -154,11 +158,15 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download(server.url(), FileWriter::new::<4>(file).unwrap(), DownloadOptions {
-            client,
-            get_chunk_size: 8 * 1024,
-            retry_gap: Duration::from_secs(1),
-        })
+        let (rx, handle) = download(
+            server.url(),
+            FileWriter::new::<4>(file).unwrap(),
+            DownloadOptions {
+                client,
+                get_chunk_size: 8 * 1024,
+                retry_gap: Duration::from_secs(1),
+            },
+        )
         .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();
@@ -213,11 +221,15 @@ mod tests {
         file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download(server.url(), FileWriter::new::<4>(file).unwrap(), DownloadOptions {
-            client,
-            get_chunk_size: 8 * 1024,
-            retry_gap: Duration::from_secs(1),
-        })
+        let (rx, handle) = download(
+            server.url(),
+            FileWriter::new::<4>(file).unwrap(),
+            DownloadOptions {
+                client,
+                get_chunk_size: 8 * 1024,
+                retry_gap: Duration::from_secs(1),
+            },
+        )
         .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();
@@ -273,11 +285,15 @@ mod tests {
         file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download(server.url(), FileWriter::new::<4>(file).unwrap(), DownloadOptions {
-            client,
-            get_chunk_size: 8 * 1024,
-            retry_gap: Duration::from_secs(1),
-        })
+        let (rx, handle) = download(
+            server.url(),
+            FileWriter::new::<4>(file).unwrap(),
+            DownloadOptions {
+                client,
+                get_chunk_size: 8 * 1024,
+                retry_gap: Duration::from_secs(1),
+            },
+        )
         .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();

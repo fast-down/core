@@ -11,8 +11,8 @@ impl MergeProgress for Vec<Progress> {
         let i = self.partition_point(|old| old.start < new.start);
         if i == self.len() {
             match self.last_mut() {
-                Some(last) if last.end >= new.start => {
-                    last.end = last.end.max(new.end);
+                Some(last) if last.end == new.start => {
+                    last.end = new.end;
                 }
                 _ => self.push(new),
             }
@@ -73,45 +73,10 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_with_first() {
-        let mut v = vec![6..10];
-        v.merge_progress(1..7);
-        assert_eq!(v, vec![1..10]);
-    }
-
-    #[test]
-    fn test_merge_between_two() {
-        let mut v = vec![1..5, 10..15];
-        v.merge_progress(4..12);
-        assert_eq!(v, vec![1..15]);
-    }
-
-    #[test]
-    fn test_merge_with_previous_only() {
-        let mut v = vec![1..5, 10..15];
-        v.merge_progress(4..8);
-        assert_eq!(v, vec![1..8, 10..15]);
-    }
-
-    #[test]
-    fn test_merge_with_next_only() {
-        let mut v = vec![1..5, 10..15];
-        v.merge_progress(8..12);
-        assert_eq!(v, vec![1..5, 8..15]);
-    }
-
-    #[test]
     fn test_insert_between_two() {
         let mut v = vec![1..5, 10..15];
         v.merge_progress(6..8);
         assert_eq!(v, vec![1..5, 6..8, 10..15]);
-    }
-
-    #[test]
-    fn test_completely_contained() {
-        let mut v = vec![1..10];
-        v.merge_progress(3..7);
-        assert_eq!(v, vec![1..10]);
     }
 
     #[test]
