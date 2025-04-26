@@ -18,8 +18,8 @@ reqwest = { version = "0.12.12", features = [
   "zstd",
   "deflate",
   "http2",
-  "blocking",
 ] }
+tokio = { version = "1.44.2", features = ["full"] }
 
 [profile.dev]
 incremental = true

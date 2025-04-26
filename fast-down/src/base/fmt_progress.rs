@@ -1,6 +1,4 @@
-use crate::progress::{ProgresTrait, Progress};
-extern crate alloc;
-use alloc::{string::String, vec::Vec};
+use crate::{ProgresTrait, Progress};
 
 pub fn fmt_progress(progress: &[Progress]) -> String {
     progress
@@ -13,7 +11,6 @@ pub fn fmt_progress(progress: &[Progress]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     #[test]
     fn test_display_progress() {

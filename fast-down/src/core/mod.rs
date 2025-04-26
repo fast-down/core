@@ -2,9 +2,10 @@ mod block_lock;
 #[cfg(feature = "file")]
 pub mod file_writer;
 pub mod multi;
+pub mod prefetch;
 mod read_response;
 pub mod single;
-pub mod write;
+pub mod writer;
 
 #[cfg(feature = "file")]
 pub mod download_file {
@@ -12,7 +13,7 @@ pub mod download_file {
     extern crate std;
 
     use super::{multi, single};
-    use crate::dl::file_writer::FileWriter;
+    use crate::core::file_writer::FileWriter;
     use crate::Event;
     use alloc::string::String;
     use alloc::vec::Vec;

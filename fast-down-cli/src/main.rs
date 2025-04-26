@@ -2,6 +2,7 @@ use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
 use fast_down::{DownloadOptions, DownloadResult, Event, MergeProgress, Progress, Total};
 use reqwest::{blocking::Client, Proxy};
+use size::format_file_size;
 use std::{
     io::{self, Write},
     path::Path,
@@ -10,6 +11,7 @@ use std::{
 
 mod fmt;
 mod persist;
+mod size;
 
 use fmt::{build_headers, format_time};
 use persist::{init_db, store_progress, WriteProgress};
@@ -86,7 +88,7 @@ fn main() -> Result<()> {
     println!(
         "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}",
         info.file_name,
-        fast_down::format_file_size(info.file_size as f64),
+        format_file_size(info.file_size as f64),
         info.file_size,
         save_path.to_str().unwrap(),
         threads
@@ -227,10 +229,10 @@ fn draw_progress(
                 .to_string()
                 .repeat(progress_width), // 全满进度条
             100.0,
-            fast_down::format_file_size(get_size as f64),
-            fast_down::format_file_size(0.0),
+            format_file_size(get_size as f64),
+            format_file_size(0.0),
             format_time(start.elapsed().as_secs()),
-            fast_down::format_file_size(*avg_get_speed),
+            format_file_size(*avg_get_speed),
             format_time(0)
         );
         return; // 不需要复杂的计算
@@ -250,9 +252,9 @@ fn draw_progress(
     };
 
     // 格式化文件大小
-    let formatted_get_size = fast_down::format_file_size(get_size as f64);
-    let formatted_total_size = fast_down::format_file_size(total as f64);
-    let formatted_get_speed = fast_down::format_file_size(*avg_get_speed);
+    let formatted_get_size = format_file_size(get_size as f64);
+    let formatted_total_size = format_file_size(total as f64);
+    let formatted_get_speed = format_file_size(*avg_get_speed);
     let formatted_get_remaining = format_time(get_remaining as u64);
     let formatted_elapsed = format_time(elapsed.as_secs());
 

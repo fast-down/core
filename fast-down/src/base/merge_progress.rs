@@ -1,6 +1,4 @@
-extern crate alloc;
-use crate::progress::{ProgresTrait, Progress};
-use alloc::vec::Vec;
+use crate::{ProgresTrait, Progress};
 
 pub trait MergeProgress {
     fn merge_progress(&mut self, new: Progress);
@@ -40,8 +38,6 @@ impl MergeProgress for Vec<Progress> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::progress::Progress;
-    use alloc::vec;
 
     #[test]
     fn test_merge_into_empty_vec() {

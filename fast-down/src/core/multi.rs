@@ -1,9 +1,8 @@
 extern crate alloc;
 extern crate std;
 use super::read_response::read_response;
-use super::write::DownloadWriter;
-use crate::fmt::progress;
-use crate::Event;
+use super::writer::DownloadWriter;
+use crate::{fmt_progress, Event};
 use alloc::format;
 use alloc::{sync::Arc, vec};
 use bytes::BytesMut;
@@ -46,7 +45,7 @@ pub fn download<Writer: DownloadWriter + 'static>(
                 tx.send(Event::Finished(id)).unwrap();
                 break;
             }
-            let range_str = progress::fmt_progress(&tasks_clone.get_range(start..end));
+            let range_str = fmt_progress::fmt_progress(&tasks_clone.get_range(start..end));
             let mut response = loop {
                 tx.send(Event::Connecting(id)).unwrap();
                 match options
@@ -105,7 +104,7 @@ pub fn download<Writer: DownloadWriter + 'static>(
 #[cfg(feature = "file")]
 mod tests {
     use super::*;
-    use crate::dl::file_writer::FileWriter;
+    use crate::core::file_writer::FileWriter;
     use crate::{MergeProgress, Progress, Total};
     use std::fs::File;
     use std::{io::Read, println};

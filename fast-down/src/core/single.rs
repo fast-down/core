@@ -1,7 +1,7 @@
 extern crate std;
 
 use super::read_response::read_response;
-use super::write::DownloadWriter;
+use super::writer::DownloadWriter;
 use crate::Event;
 use bytes::BytesMut;
 use color_eyre::eyre::Result;
@@ -74,7 +74,7 @@ mod tests {
     use crate::total::Total;
     extern crate std;
     use super::*;
-    use crate::dl::file_writer::FileWriter;
+    use crate::core::file_writer::FileWriter;
     use std::fs::File;
     use std::vec::Vec;
     use std::{dbg, io::Read};

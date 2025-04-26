@@ -1,7 +1,5 @@
-extern crate alloc;
-use alloc::format;
-use alloc::string::String;
-use core::ops::Range;
+use std::ops::Range;
+
 pub type Progress = Range<usize>;
 
 pub trait ProgresTrait {
