@@ -1,94 +1,82 @@
-extern crate alloc;
 extern crate std;
+
+use super::read_response::read_response;
+use super::write::DownloadWriter;
 use crate::Event;
-use alloc::string::String;
-use alloc::vec;
+use bytes::BytesMut;
 use color_eyre::eyre::Result;
 use core::time::Duration;
-use reqwest::blocking::Client;
-use std::{
-    fs::File,
-    io::{BufWriter, Read, Write},
-    thread::{self, JoinHandle},
-};
+use reqwest::{blocking::Client, IntoUrl};
+use std::thread::{self, JoinHandle};
 
-pub struct DownloadSingleThreadOptions {
-    pub url: String,
-    pub file: File,
+pub struct DownloadOptions {
     pub client: Client,
     pub get_chunk_size: usize,
-    pub write_chunk_size: usize,
     pub retry_gap: Duration,
 }
 
-pub fn download_single_thread(
-    options: DownloadSingleThreadOptions,
+pub fn download<Writer: DownloadWriter + 'static>(
+    url: impl IntoUrl,
+    writer: Writer,
+    options: DownloadOptions,
 ) -> Result<(crossbeam_channel::Receiver<Event>, JoinHandle<()>)> {
+    let url = url.into_url()?;
     let (tx, rx) = crossbeam_channel::unbounded();
-    let (tx_write, rx_write) = crossbeam_channel::unbounded();
     let tx_clone = tx.clone();
-    thread::spawn(move || {
-        let mut downloaded = 0;
+    let handle = thread::spawn(move || {
+        let mut downloaded: usize = 0;
         let mut response = loop {
             tx_clone.send(Event::Connecting(0)).unwrap();
-            match options.client.get(&options.url).send() {
+            match options.client.get(url.clone()).send() {
                 Ok(response) => break response,
                 Err(e) => tx_clone.send(Event::ConnectError(0, e.into())).unwrap(),
             }
             thread::sleep(options.retry_gap);
         };
         tx_clone.send(Event::Downloading(0)).unwrap();
-        let mut buffer = vec![0u8; options.get_chunk_size];
+        // dbg!("Response: {:?}", response);
+        // dbg!("@status: {:?}", response.status());
+        // dbg!("@length: {:?}", response.headers().get("content-length").unwrap());
+        let mut buffer = BytesMut::with_capacity(options.get_chunk_size);
         loop {
-            let len = loop {
-                match response.read(&mut buffer) {
-                    Ok(len) => break len,
-                    Err(e) => tx_clone.send(Event::DownloadError(0, e.into())).unwrap(),
-                }
-                thread::sleep(options.retry_gap);
-            };
+            let len = read_response(&mut response, &mut buffer, options.retry_gap, |err| {
+                tx_clone.send(Event::DownloadError(0, err.into())).unwrap();
+            });
+            // dbg!("@read: {:?}", len);
             if len == 0 {
                 break;
             }
+            let span = downloaded..(downloaded + len);
             tx_clone
-                .send(Event::DownloadProgress(downloaded..(downloaded + len)))
+                .send(Event::DownloadProgress(span.clone()))
                 .unwrap();
-            tx_write.send((downloaded, buffer[..len].to_vec())).unwrap();
+
+            // SAFETY: single thread
+            match unsafe {
+                writer.write_part_unchecked(span.clone(), buffer.clone().split_to(len).freeze())
+            } {
+                Ok(_) => {
+                    tx_clone.send(Event::WriteProgress(span)).unwrap();
+                }
+                Err(e) => tx_clone.send(Event::DownloadError(0, e.into())).unwrap(),
+            }
+
             downloaded += len;
         }
         tx_clone.send(Event::Finished(0)).unwrap();
-    });
-    let handle = thread::spawn(move || {
-        let mut writer = BufWriter::with_capacity(options.write_chunk_size, options.file);
-        for (start, bytes) in rx_write {
-            loop {
-                match writer.write_all(&bytes) {
-                    Ok(_) => break,
-                    Err(e) => tx.send(Event::WriteError(e.into())).unwrap(),
-                }
-                thread::sleep(options.retry_gap);
-            }
-            tx.send(Event::WriteProgress(start..(start + bytes.len())))
-                .unwrap();
-        }
-        loop {
-            match writer.flush() {
-                Ok(_) => break,
-                Err(e) => tx.send(Event::WriteError(e.into())).unwrap(),
-            }
-            thread::sleep(options.retry_gap);
-        }
     });
     Ok((rx, handle))
 }
 
 #[cfg(test)]
+#[cfg(feature = "file")]
 mod tests {
     use crate::total::Total;
     extern crate std;
     use super::*;
-    use alloc::vec;
-    use alloc::vec::Vec;
+    use crate::dl::file_writer::FileWriter;
+    use std::fs::File;
+    use std::vec::Vec;
     use std::{dbg, io::Read};
     use tempfile::NamedTempFile;
 
@@ -105,16 +93,18 @@ mod tests {
 
         let temp_file = NamedTempFile::new().unwrap();
         let file = temp_file.reopen().unwrap();
+        file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download_single_thread(DownloadSingleThreadOptions {
-            url: server.url(),
-            file,
-            client,
-            get_chunk_size: 8 * 1024,
-            write_chunk_size: 8 * 1024 * 1024,
-            retry_gap: Duration::from_secs(1),
-        })
+        let (rx, handle) = download(
+            server.url(),
+            FileWriter::new::<4>(file).unwrap(),
+            DownloadOptions {
+                client,
+                get_chunk_size: 8 * 1024,
+                retry_gap: Duration::from_secs(1),
+            },
+        )
         .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();
@@ -168,14 +158,15 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download_single_thread(DownloadSingleThreadOptions {
-            url: server.url(),
-            file,
-            client,
-            get_chunk_size: 8 * 1024,
-            write_chunk_size: 8 * 1024 * 1024,
-            retry_gap: Duration::from_secs(1),
-        })
+        let (rx, handle) = download(
+            server.url(),
+            FileWriter::new::<4>(file).unwrap(),
+            DownloadOptions {
+                client,
+                get_chunk_size: 8 * 1024,
+                retry_gap: Duration::from_secs(1),
+            },
+        )
         .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();
@@ -227,16 +218,18 @@ mod tests {
 
         let temp_file = NamedTempFile::new().unwrap();
         let file = temp_file.reopen().unwrap();
+        file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download_single_thread(DownloadSingleThreadOptions {
-            url: server.url(),
-            file,
-            client,
-            get_chunk_size: 8 * 1024,
-            write_chunk_size: 8 * 1024 * 1024,
-            retry_gap: Duration::from_secs(1),
-        })
+        let (rx, handle) = download(
+            server.url(),
+            FileWriter::new::<4>(file).unwrap(),
+            DownloadOptions {
+                client,
+                get_chunk_size: 8 * 1024,
+                retry_gap: Duration::from_secs(1),
+            },
+        )
         .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();
@@ -289,15 +282,18 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let file = temp_file.reopen().unwrap();
 
+        file.set_len(mock_body.len() as u64).unwrap();
+
         let client = Client::new();
-        let (rx, handle) = download_single_thread(DownloadSingleThreadOptions {
-            url: server.url(),
-            file,
-            client,
-            get_chunk_size: 8 * 1024,
-            write_chunk_size: 8 * 1024 * 1024,
-            retry_gap: Duration::from_secs(1),
-        })
+        let (rx, handle) = download(
+            server.url(),
+            FileWriter::new::<4>(file).unwrap(),
+            DownloadOptions {
+                client,
+                get_chunk_size: 8 * 1024,
+                retry_gap: Duration::from_secs(1),
+            },
+        )
         .unwrap();
 
         let progress_events: Vec<_> = rx.iter().collect();

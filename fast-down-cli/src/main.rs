@@ -1,14 +1,18 @@
 use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
-use fast_down::{DownloadOptions, Event, MergeProgress, Progress, Total};
-use fast_down_cli::{build_headers, format_time, database::{init_db, save_progress, WriteProgress}};
-mod database;
+use fast_down::{DownloadOptions, DownloadResult, Event, MergeProgress, Progress, Total};
 use reqwest::{blocking::Client, Proxy};
 use std::{
     io::{self, Write},
     path::Path,
     time::{Duration, Instant},
 };
+
+mod fmt;
+mod persist;
+
+use fmt::{build_headers, format_time};
+use persist::{init_db, store_progress, WriteProgress};
 
 /// 超级快的下载器
 #[derive(Parser, Debug)]
@@ -27,8 +31,8 @@ pub struct Args {
     pub save_folder: String,
 
     /// 下载线程数
-    #[arg(short, long, default_value_t = 32)]
-    pub threads: usize,
+    #[arg(short, long)]
+    pub threads: Option<usize>,
 
     /// 自定义文件名
     #[arg(short = 'o', long = "out")]
@@ -45,11 +49,6 @@ pub struct Args {
     /// 下载分块大小 (单位: B)
     #[arg(long, default_value_t = 8 * 1024)]
     pub get_chunk_size: usize,
-
-    /// 写入分块大小 (单位: B)
-    #[arg(long, default_value_t = 8 * 1024 * 1024)]
-    pub write_chunk_size: usize,
-
     /// 进度条显示宽度
     #[arg(long, default_value_t = 50)]
     pub progress_width: usize,
@@ -59,7 +58,7 @@ pub struct Args {
     pub retry_gap: u64,
 
     /// 数据库存储路径
-    #[arg(long, default_value = "downloads.db")]
+    #[arg(long, default_value = "state.db")]
     pub db_path: String,
 }
 
@@ -77,6 +76,7 @@ fn main() -> Result<()> {
     let info = fast_down::get_url_info(&args.url, &client)?;
     let threads = if info.can_fast_download {
         args.threads
+            .unwrap_or_else(|| info.file_size.checked_div(2 * 1024 * 1024).unwrap_or(4))
     } else {
         1
     };
@@ -108,15 +108,14 @@ fn main() -> Result<()> {
     }
 
     let start = Instant::now();
-    let (rx, handle) = fast_down::download(DownloadOptions {
-        url: info.final_url,
-        threads: args.threads,
+    let result = fast_down::download(DownloadOptions {
+        url: info.final_url.clone(),
+        threads,
         save_path: &save_path,
         can_fast_download: info.can_fast_download,
         file_size: info.file_size,
         client,
         get_chunk_size: args.get_chunk_size,
-        write_chunk_size: args.write_chunk_size,
         download_chunks: vec![0..info.file_size],
         retry_gap: Duration::from_millis(args.retry_gap),
     })?;
@@ -128,6 +127,11 @@ fn main() -> Result<()> {
     let mut avg_get_speed = 0.0;
 
     let mut last_progress_update = Instant::now();
+
+    let DownloadResult {
+        event_chan: rx,
+        handler,
+    } = result;
 
     print!("\n\n");
     for e in rx {
@@ -170,20 +174,22 @@ fn main() -> Result<()> {
                 );
             }
             Event::WriteProgress(p) => {
+                let downloaded = p.total();
                 write_progress.merge_progress(p);
                 let progress = WriteProgress {
-                url: info.final_url.clone(),
-                file_path: save_path.to_str().unwrap().to_string(),
-                total_size: info.file_size,
-                downloaded: p.total(),
-                timestamp: start.elapsed().as_secs() as i64,
-            };
-            save_progress(&conn, &progress)?;
+                    url: info.final_url.clone(),
+                    file_path: save_path.to_str().unwrap().to_string(),
+                    total_size: info.file_size,
+                    downloaded,
+                    timestamp: start.elapsed().as_secs() as i64,
+                };
+                store_progress(&conn, &progress)?;
             }
             _ => {}
         }
     }
-    handle.join().unwrap();
+
+    handler.unwrap().join();
 
     Ok(())
 }

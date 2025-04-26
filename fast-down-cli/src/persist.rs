@@ -4,11 +4,11 @@ use serde::Serialize;
 
 #[derive(Serialize)]
 pub struct WriteProgress {
-    url: String,
-    file_path: String,
-    total_size: usize,
-    downloaded: usize,
-    timestamp: i64,
+    pub url: String,
+    pub file_path: String,
+    pub total_size: usize,
+    pub downloaded: usize,
+    pub timestamp: i64,
 }
 
 pub fn init_db(db_path: &str) -> Result<Connection> {
@@ -27,9 +27,9 @@ pub fn init_db(db_path: &str) -> Result<Connection> {
     Ok(conn)
 }
 
-pub fn save_progress(conn: &Connection, progress: &WriteProgress) -> Result<()> {
+pub fn store_progress(conn: &Connection, progress: &WriteProgress) -> Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO write_progress 
+        "INSERT OR REPLACE INTO write_progress
         (url, file_path, total_size, downloaded, timestamp)
         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
@@ -45,7 +45,7 @@ pub fn save_progress(conn: &Connection, progress: &WriteProgress) -> Result<()> 
 
 pub fn get_progress(conn: &Connection, file_path: &str) -> Result<Option<WriteProgress>> {
     conn.query_row(
-        "SELECT url, file_path, total_size, downloaded, timestamp 
+        "SELECT url, file_path, total_size, downloaded, timestamp
         FROM write_progress WHERE file_path = ?1",
         [file_path],
         |row| {

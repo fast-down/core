@@ -1,20 +1,16 @@
-#![no_std]
-
-mod display_progress;
-mod download;
-mod download_multi_threads;
-mod download_single_thread;
+pub mod dl;
 mod event;
-mod format_file_size;
-mod get_url_info;
+mod fmt;
 mod merge_progress;
+mod prefetch;
 mod progress;
 mod total;
 
-pub use download::{download, DownloadOptions};
+#[cfg(feature = "file")]
+pub use dl::download_file::{download, DownloadOptions, DownloadResult};
 pub use event::Event;
-pub use format_file_size::format_file_size;
-pub use get_url_info::{get_url_info, UrlInfo};
+pub use fmt::size::format_file_size;
 pub use merge_progress::MergeProgress;
+pub use prefetch::{get_url_info, UrlInfo};
 pub use progress::Progress;
 pub use total::Total;

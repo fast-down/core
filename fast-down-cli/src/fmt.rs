@@ -7,7 +7,7 @@ pub fn build_headers(headers: &[String]) -> Result<HeaderMap> {
     for header in headers {
         let parts: Vec<&str> = header.splitn(2, ':').map(|t| t.trim()).collect();
         if parts.len() != 2 {
-            return Err(eyre!("Header格式应为 'Key: Value'"));
+            return Err(eyre!("header should have a format of 'Header: Value'"));
         }
         let key = parts[0];
         let value = parts[1];

@@ -1,64 +1,39 @@
 extern crate alloc;
 extern crate std;
-use crate::display_progress;
+use super::read_response::read_response;
+use super::write::DownloadWriter;
+use crate::fmt::progress;
 use crate::Event;
 use alloc::format;
-use alloc::string::String;
 use alloc::{sync::Arc, vec};
+use bytes::BytesMut;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use core::ops::Range;
 use core::time::Duration;
 use fast_steal::{Spawn, TaskList};
-use memmap2::MmapMut;
-use reqwest::{blocking::Client, header, StatusCode};
-use std::{
-    fs::File,
-    io::Read,
-    thread::{self, JoinHandle},
-};
+use reqwest::{blocking::Client, header, IntoUrl, StatusCode};
+use std::thread::{self, JoinHandle};
 use vec::Vec;
 
-pub struct DownloadMultiThreadsOptions {
-    pub url: String,
+pub struct DownloadOptions {
     pub threads: usize,
-    pub file: File,
     pub client: Client,
     pub get_chunk_size: usize,
     pub download_chunks: Vec<Range<usize>>,
     pub retry_gap: Duration,
 }
 
-pub fn download_multi_threads(
-    options: DownloadMultiThreadsOptions,
-) -> Result<(crossbeam_channel::Receiver<Event>, JoinHandle<()>)> {
+pub fn download<Writer: DownloadWriter + 'static>(
+    url: impl IntoUrl,
+    writer: Writer,
+    options: DownloadOptions,
+) -> Result<(crossbeam_channel::Receiver<Event>, Vec<JoinHandle<()>>)> {
+    let url = url.into_url()?;
     let (tx, rx) = crossbeam_channel::unbounded();
-    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(usize, Vec<u8>)>();
     let tasks: Arc<TaskList> = Arc::new(options.download_chunks.into());
     let tasks_clone = tasks.clone();
-    let tx_clone = tx.clone();
-    let handle = thread::spawn(move || {
-        let mut mmap = loop {
-            match unsafe { MmapMut::map_mut(&options.file) } {
-                Ok(mmap) => break mmap,
-                Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
-            }
-        };
-        for (start, data) in rx_write {
-            let len = data.len();
-            mmap[start..(start + len)].copy_from_slice(&data);
-            tx_clone
-                .send(Event::WriteProgress(start..(start + len)))
-                .unwrap();
-        }
-        loop {
-            match mmap.flush() {
-                Ok(_) => break,
-                Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
-            }
-        }
-    });
-    tasks.spawn(
+    let handles = tasks.spawn(
         options.threads,
         |closure| thread::spawn(move || closure()),
         move |id, task, get_task| loop {
@@ -71,12 +46,12 @@ pub fn download_multi_threads(
                 tx.send(Event::Finished(id)).unwrap();
                 break;
             }
-            let range_str = display_progress::display_progress(&tasks_clone.get_range(start..end));
+            let range_str = progress::fmt_progress(&tasks_clone.get_range(start..end));
             let mut response = loop {
                 tx.send(Event::Connecting(id)).unwrap();
                 match options
                     .client
-                    .get(&options.url)
+                    .get(url.clone())
                     .header(header::RANGE, format!("bytes={}", range_str))
                     .send()
                 {
@@ -94,7 +69,7 @@ pub fn download_multi_threads(
                 thread::sleep(options.retry_gap);
             };
             tx.send(Event::Downloading(id)).unwrap();
-            let mut buffer = vec![0u8; options.get_chunk_size];
+            let mut buffer = BytesMut::with_capacity(options.get_chunk_size);
             loop {
                 let end = task.end();
                 if start >= end {
@@ -102,28 +77,37 @@ pub fn download_multi_threads(
                 }
                 let remain = end - start;
                 task.fetch_add_start(remain.min(options.get_chunk_size));
-                let len = loop {
-                    match response.read(&mut buffer) {
-                        Ok(len) => break len,
-                        Err(e) => tx.send(Event::DownloadError(id, e.into())).unwrap(),
-                    }
-                    thread::sleep(options.retry_gap);
-                };
+                let len = read_response(&mut response, &mut buffer, options.retry_gap, |err| {
+                    tx.send(Event::DownloadError(0, err.into())).unwrap();
+                });
                 let chunk_end = (start + len).min(task.end());
                 let len = chunk_end - start;
-                tx.send(Event::DownloadProgress(start..chunk_end)).unwrap();
-                tx_write.send((start, buffer[..len].to_vec())).unwrap();
+                let span = start..chunk_end;
+                tx.send(Event::DownloadProgress(span.clone())).unwrap();
+
+                // SAFETY: fast-steal 2.6.0 guarantee it won't write the same place twice
+                match unsafe {
+                    writer.write_part_unchecked(span.clone(), buffer.clone().split_to(len).freeze())
+                } {
+                    Ok(_) => {
+                        tx.send(Event::WriteProgress(span)).unwrap();
+                    }
+                    Err(e) => tx.send(Event::WriteError(e)).unwrap(),
+                }
                 start += len;
             }
         },
     );
-    Ok((rx, handle))
+    Ok((rx, handles))
 }
 
 #[cfg(test)]
+#[cfg(feature = "file")]
 mod tests {
     use super::*;
+    use crate::dl::file_writer::FileWriter;
     use crate::{MergeProgress, Progress, Total};
+    use std::fs::File;
     use std::{io::Read, println};
     use tempfile::NamedTempFile;
 
@@ -159,18 +143,22 @@ mod tests {
         file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download_multi_threads(DownloadMultiThreadsOptions {
-            client,
-            url: server.url(),
-            file,
-            threads: 100,
-            get_chunk_size: 8 * 1024,
-            download_chunks: vec![0..mock_body.len()],
-            retry_gap: Duration::from_secs(1),
-        })
+        let (rx, handles) = download(
+            server.url(),
+            FileWriter::new::<4>(file).unwrap(),
+            DownloadOptions {
+                client,
+                threads: 8,
+                get_chunk_size: 8 * 1024,
+                download_chunks: vec![0..mock_body.len()],
+                retry_gap: Duration::from_secs(1),
+            },
+        )
         .unwrap();
 
-        handle.join().unwrap();
+        for handle in handles {
+            handle.join().unwrap();
+        }
 
         let mut file_content = Vec::new();
         File::open(temp_file.path())
