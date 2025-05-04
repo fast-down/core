@@ -16,3 +16,4 @@ pub use core::multi;
 pub use core::prefetch::*;
 pub use core::single;
 pub use core::writer::*;
+pub use core::*;

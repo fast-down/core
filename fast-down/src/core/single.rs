@@ -1,12 +1,14 @@
+use super::DownloadResult;
 use crate::Event;
 use crate::SeqWriter;
 use bytes::BytesMut;
 use color_eyre::eyre::Result;
-use crossbeam_channel::Receiver;
 use reqwest::{blocking::Client, IntoUrl};
 use std::io::Read;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread;
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub struct DownloadOptions {
@@ -19,9 +21,9 @@ pub fn download(
     url: impl IntoUrl,
     mut writer: impl SeqWriter + 'static,
     options: DownloadOptions,
-) -> Result<(Receiver<Event>, JoinHandle<()>)> {
+) -> Result<DownloadResult> {
     let url = url.into_url()?;
-    let (tx, rx) = crossbeam_channel::unbounded();
+    let (tx, event_chain) = crossbeam_channel::unbounded();
     let (tx_write, rx_write) = crossbeam_channel::unbounded();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
@@ -33,9 +35,14 @@ pub fn download(
             .unwrap()
         }
     });
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
     thread::spawn(move || {
         let mut downloaded: usize = 0;
         let mut response = loop {
+            if !running.load(Ordering::Relaxed) {
+                return;
+            }
             tx.send(Event::Connecting(0)).unwrap();
             match options.client.get(url.clone()).send() {
                 Ok(response) => break response,
@@ -45,14 +52,14 @@ pub fn download(
         };
         tx.send(Event::Downloading(0)).unwrap();
         let mut buffer = BytesMut::with_capacity(options.download_buffer_size);
+        unsafe { buffer.set_len(options.download_buffer_size) };
         loop {
             let len = loop {
-                unsafe { buffer.set_len(options.download_buffer_size) };
+                if !running.load(Ordering::Relaxed) {
+                    return;
+                }
                 match response.read(&mut buffer) {
-                    Ok(len) => {
-                        unsafe { buffer.set_len(len) };
-                        break len;
-                    }
+                    Ok(len) => break len,
                     Err(e) => tx.send(Event::DownloadError(0, e.into())).unwrap(),
                 };
                 thread::sleep(options.retry_gap);
@@ -60,14 +67,22 @@ pub fn download(
             if len == 0 {
                 break;
             }
-            let span = downloaded..(downloaded + len);
+            let span = vec![downloaded..(downloaded + len)];
             tx.send(Event::DownloadProgress(span.clone())).unwrap();
-            tx_write.send((span, buffer.clone().freeze())).unwrap();
+            tx_write
+                .send((span, buffer.clone().split_to(len).freeze()))
+                .unwrap();
             downloaded += len;
         }
         tx.send(Event::Finished(0)).unwrap();
     });
-    Ok((rx, handle))
+    Ok(DownloadResult {
+        event_chain,
+        handle,
+        cancel_fn: Box::new(move || {
+            running_clone.store(false, Ordering::Relaxed);
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -94,7 +109,11 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download(
+        let DownloadResult {
+            event_chain,
+            handle,
+            cancel_fn: _,
+        } = download(
             format!("{}/small", server.url()),
             SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
@@ -105,7 +124,7 @@ mod tests {
         )
         .unwrap();
 
-        let progress_events: Vec<_> = rx.iter().collect();
+        let progress_events: Vec<_> = event_chain.iter().collect();
         dbg!(&progress_events);
         handle.join().unwrap();
 
@@ -156,7 +175,11 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download(
+        let DownloadResult {
+            event_chain,
+            handle,
+            cancel_fn: _,
+        } = download(
             format!("{}/empty", server.url()),
             SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
@@ -167,7 +190,7 @@ mod tests {
         )
         .unwrap();
 
-        let progress_events: Vec<_> = rx.iter().collect();
+        let progress_events: Vec<_> = event_chain.iter().collect();
         handle.join().unwrap();
 
         // 验证空文件
@@ -218,7 +241,11 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download(
+        let DownloadResult {
+            event_chain,
+            handle,
+            cancel_fn: _,
+        } = download(
             format!("{}/large", server.url()),
             SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
@@ -229,7 +256,7 @@ mod tests {
         )
         .unwrap();
 
-        let progress_events: Vec<_> = rx.iter().collect();
+        let progress_events: Vec<_> = event_chain.iter().collect();
         handle.join().unwrap();
 
         // 验证文件内容
@@ -280,7 +307,11 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download(
+        let DownloadResult {
+            event_chain,
+            handle,
+            cancel_fn: _,
+        } = download(
             format!("{}/exact_buffer_size_file", server.url()),
             SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
@@ -291,7 +322,7 @@ mod tests {
         )
         .unwrap();
 
-        let progress_events: Vec<_> = rx.iter().collect();
+        let progress_events: Vec<_> = event_chain.iter().collect();
         handle.join().unwrap();
 
         // 验证文件内容

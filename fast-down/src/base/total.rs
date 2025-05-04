@@ -1,10 +1,10 @@
-use std::ops::Range;
+use crate::Progress;
 
 pub trait Total {
     fn total(&self) -> usize;
 }
 
-impl Total for Range<usize> {
+impl Total for Progress {
     fn total(&self) -> usize {
         self.end - self.start
     }
@@ -40,7 +40,7 @@ mod tests {
 
     #[test]
     fn test_empty_vec() {
-        let ranges: Vec<Range<usize>> = vec![];
+        let ranges: Vec<Progress> = vec![];
         assert_eq!(ranges.total(), 0);
     }
 }

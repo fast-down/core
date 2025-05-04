@@ -4,7 +4,7 @@ pub fn reverse_progress(progress: &[Progress], total_size: usize) -> Vec<Progres
     if progress.is_empty() {
         return vec![0..total_size];
     }
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(progress.len());
     let mut prev_end = 0;
     for range in progress {
         if range.start > prev_end {

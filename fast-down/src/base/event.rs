@@ -9,8 +9,8 @@ pub enum Event {
     ConnectError(WorkerId, Error),
     Downloading(WorkerId),
     DownloadError(WorkerId, Error),
-    DownloadProgress(Progress),
+    DownloadProgress(Vec<Progress>),
     WriteError(Error),
-    WriteProgress(Progress),
+    WriteProgress(Vec<Progress>),
     Finished(WorkerId),
 }

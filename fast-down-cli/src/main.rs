@@ -9,14 +9,17 @@ mod str_to_progress;
 use build_headers::build_headers;
 use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
-use fast_down::{DownloadOptions, Event, MergeProgress, Progress, Total};
+use fast_down::{DownloadOptions, DownloadResult, Event, MergeProgress, Progress, Total};
 use fmt_size::format_file_size;
-use persist::{get_progress, init_db, init_progress, update_progress, WriteProgress};
+use path_clean::clean;
+use persist::{init_db, init_progress, update_progress};
 use reqwest::{blocking::Client, Proxy};
 use reverse_progress::reverse_progress;
 use std::{
+    env,
     io::{self, Write},
     path::Path,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -93,7 +96,7 @@ fn main() -> Result<()> {
         match fast_down::get_url_info(&args.url, &client) {
             Ok(info) => break info,
             Err(err) => {
-                eprintln!("获取文件信息失败: {}", err);
+                println!("获取文件信息失败: {}", err);
                 thread::sleep(Duration::from_millis(args.retry_gap));
             }
         }
@@ -104,8 +107,12 @@ fn main() -> Result<()> {
     } else {
         1
     };
-    let save_path =
+    let mut save_path =
         Path::new(&args.save_folder).join(args.file_name.as_ref().unwrap_or(&info.file_name));
+    if save_path.is_relative() {
+        save_path = env::current_dir()?.join(save_path);
+    }
+    save_path = clean(save_path);
     let save_path_str = save_path.to_str().unwrap().to_string();
 
     println!(
@@ -120,25 +127,29 @@ fn main() -> Result<()> {
     // 检查是否有未完成的下载
     let mut download_chunks = vec![0..info.file_size];
     let mut resume_download = false;
+    let mut write_progress: Vec<Progress> = Vec::new();
+    let mut get_progress: Vec<Progress> = Vec::new();
 
-    if save_path.exists() {
-        if args.resume {
-            // 检查是否有未完成的下载任务
-            if let Ok(Some(progress)) = get_progress(&conn, &save_path_str) {
-                if progress.url == info.final_url
-                    && progress.total_size == info.file_size
-                    && progress.downloaded < info.file_size
-                    && !progress.progress.is_empty()
-                {
-                    download_chunks = reverse_progress(&progress.progress, progress.total_size);
-                    resume_download = true;
-                    println!("发现未完成的下载，将继续下载剩余部分");
-                    println!(
-                        "已下载: {} / {} ({}%)",
-                        format_file_size(progress.downloaded as f64),
-                        format_file_size(info.file_size as f64),
-                        progress.downloaded * 100 / info.file_size
-                    );
+    if save_path.try_exists()? {
+        if args.resume && info.can_fast_download {
+            if let Ok(Some(progress)) = persist::get_progress(&conn, &save_path_str) {
+                if progress.total_size == info.file_size {
+                    let downloaded = progress.progress.total();
+                    if downloaded < info.file_size {
+                        download_chunks = reverse_progress(&progress.progress, progress.total_size);
+                        write_progress = progress.progress.clone();
+                        get_progress = progress.progress;
+                        if !download_chunks.is_empty() {
+                            resume_download = true;
+                            println!("发现未完成的下载，将继续下载剩余部分");
+                            println!(
+                                "已下载: {} / {} ({}%)",
+                                format_file_size(downloaded as f64),
+                                format_file_size(info.file_size as f64),
+                                downloaded * 100 / info.file_size
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -159,7 +170,11 @@ fn main() -> Result<()> {
     }
 
     let start = Instant::now();
-    let (rx, handler) = fast_down::download_file(
+    let DownloadResult {
+        event_chain,
+        handle,
+        cancel_fn,
+    } = fast_down::download_file(
         &info.final_url,
         &save_path,
         DownloadOptions {
@@ -174,32 +189,32 @@ fn main() -> Result<()> {
         },
     )?;
 
-    let mut write_progress: Vec<Progress> = Vec::new();
-    let mut get_progress: Vec<Progress> = Vec::new();
+    let cancel_fn = Arc::new(Mutex::new(Some(cancel_fn)));
+    ctrlc::set_handler(move || {
+        if let Some(f) = cancel_fn.lock().unwrap().take() {
+            f();
+        }
+    })
+    .expect("Error setting Ctrl-C handler");
+
     let mut last_get_size = 0;
     let mut last_get_time = Instant::now();
     let mut avg_get_speed = 0.0;
 
     let mut last_progress_update = Instant::now();
+    let mut last_db_update = Instant::now();
 
     if !resume_download {
-        init_progress(
-            &conn,
-            &WriteProgress {
-                url: info.final_url.clone(),
-                file_path: save_path.to_str().unwrap().to_string(),
-                total_size: info.file_size,
-                downloaded: 0,
-                progress: vec![],
-            },
-        )?;
+        init_progress(&conn, &save_path_str, info.file_size)?;
     }
 
     eprint!("\n\n");
-    for e in rx {
+    for e in event_chain {
         match e {
-            Event::DownloadProgress(p) => {
-                get_progress.merge_progress(p);
+            Event::DownloadProgress(ps) => {
+                for p in ps {
+                    get_progress.merge_progress(p);
+                }
                 if last_progress_update.elapsed().as_millis() > 50 {
                     last_progress_update = Instant::now();
                     let get_size = get_progress.total();
@@ -217,24 +232,29 @@ fn main() -> Result<()> {
                     last_get_time = Instant::now();
                 }
             }
-            Event::WriteProgress(p) => {
-                write_progress.merge_progress(p);
-                update_progress(&conn, &save_path_str, &write_progress)?;
+            Event::WriteProgress(ps) => {
+                for p in ps {
+                    write_progress.merge_progress(p);
+                }
+                if last_db_update.elapsed().as_secs() >= 1 {
+                    last_db_update = Instant::now();
+                    update_progress(&conn, &save_path_str, &write_progress)?;
+                }
             }
             Event::ConnectError(id, err) => {
-                eprint!(
+                print!(
                     "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 连接失败, 错误原因: {:?}\n\n",
                     id, err
                 );
             }
             Event::DownloadError(id, err) => {
-                eprint!(
+                print!(
                     "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 下载失败, 错误原因: {:?}\n\n",
                     id, err
                 );
             }
             Event::WriteError(err) => {
-                eprint!(
+                print!(
                     "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K写入文件失败, 错误原因: {:?}\n\n",
                     err
                 );
@@ -242,6 +262,17 @@ fn main() -> Result<()> {
             _ => {}
         }
     }
-    handler.join().unwrap();
+    handle.join().unwrap();
+    update_progress(&conn, &save_path_str, &write_progress)?;
+    draw_progress::draw_progress(
+        start,
+        info.file_size,
+        &get_progress,
+        last_get_size,
+        last_get_time,
+        args.progress_width,
+        get_progress.total(),
+        &mut avg_get_speed,
+    );
     Ok(())
 }

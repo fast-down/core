@@ -20,6 +20,8 @@ color-eyre = { workspace = true }
 reqwest = { workspace = true }
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 serde = { version = "1.0.197", features = ["derive"] }
+path-clean = "1.0.1"
+ctrlc = "3.4.6"
 
 [[bin]]
 name = "fast-down"

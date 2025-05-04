@@ -1,27 +1,25 @@
-use super::{multi, single};
-use crate::{Event, RandWriter, SeqWriter};
+use super::{multi, single, DownloadResult};
+use crate::{Flush, Progress, RandWriter, SeqWriter};
 use color_eyre::eyre::Result;
-use core::{ops::Range, time::Duration};
-use crossbeam_channel::Receiver;
+use core::time::Duration;
 use reqwest::{blocking::Client, IntoUrl};
-use std::thread::JoinHandle;
 
 pub struct DownloadOptions {
     pub threads: usize,
     pub client: Client,
     pub can_fast_download: bool,
     pub download_buffer_size: usize,
-    pub download_chunks: Vec<Range<usize>>,
+    pub download_chunks: Vec<Progress>,
     pub retry_gap: Duration,
     pub file_size: usize,
 }
 
 pub fn download(
     url: impl IntoUrl,
-    seq_writer: impl SeqWriter + 'static,
-    rand_writer: impl RandWriter + 'static,
+    seq_writer: impl SeqWriter + Flush + 'static,
+    rand_writer: impl RandWriter + Flush + 'static,
     options: DownloadOptions,
-) -> Result<(Receiver<Event>, JoinHandle<()>)> {
+) -> Result<DownloadResult> {
     if !options.can_fast_download
         || options.threads < 2
             && options.download_chunks.len() == 1

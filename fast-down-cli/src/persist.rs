@@ -5,10 +5,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::str_to_progress::str_to_progress;
 
 pub struct WriteProgress {
-    pub url: String,
-    pub file_path: String,
     pub total_size: usize,
-    pub downloaded: usize,
     pub progress: Vec<Progress>,
 }
 
@@ -17,10 +14,8 @@ pub fn init_db(db_path: &str) -> Result<Connection> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS write_progress (
             id INTEGER PRIMARY KEY,
-            url TEXT NOT NULL,
             file_path TEXT NOT NULL UNIQUE,
             total_size INTEGER NOT NULL,
-            downloaded INTEGER NOT NULL,
             progress TEXT NOT NULL
         )",
         (),
@@ -28,18 +23,12 @@ pub fn init_db(db_path: &str) -> Result<Connection> {
     Ok(conn)
 }
 
-pub fn init_progress(conn: &Connection, progress: &WriteProgress) -> Result<()> {
+pub fn init_progress(conn: &Connection, file_path: &str, total_size: usize) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO write_progress
-        (url, file_path, total_size, downloaded, progress)
-        VALUES (?1, ?2, ?3, ?4, ?5)",
-        (
-            &progress.url,
-            &progress.file_path,
-            progress.total_size as i64,
-            progress.downloaded as i64,
-            fmt_progress(&progress.progress),
-        ),
+        (file_path, total_size, progress)
+        VALUES (?1, ?2, ?3)",
+        (file_path, total_size, ""),
     )?;
     Ok(())
 }
@@ -54,16 +43,13 @@ pub fn update_progress(conn: &Connection, file_path: &str, progress: &[Progress]
 
 pub fn get_progress(conn: &Connection, file_path: &str) -> Result<Option<WriteProgress>> {
     conn.query_row(
-        "SELECT url, file_path, total_size, downloaded, progress
+        "SELECT total_size, progress
         FROM write_progress WHERE file_path = ?1",
         [file_path],
         |row| {
             Ok(WriteProgress {
-                url: row.get(0)?,
-                file_path: row.get(1)?,
-                total_size: row.get(2)?,
-                downloaded: row.get(3)?,
-                progress: str_to_progress(row.get(4)?),
+                total_size: row.get(0)?,
+                progress: str_to_progress(row.get(1)?),
             })
         },
     )

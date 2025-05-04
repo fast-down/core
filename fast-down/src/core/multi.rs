@@ -1,21 +1,21 @@
+use super::DownloadResult;
 use crate::base::fmt_progress;
-use crate::{Event, RandWriter};
+use crate::{Event, Progress, RandWriter};
 use bytes::{Bytes, BytesMut};
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
-use crossbeam_channel::Receiver;
 use fast_steal::{sync::action, sync::Spawn, TaskList};
 use reqwest::{blocking::Client, header, IntoUrl, StatusCode};
 use std::io::Read;
-use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::Duration;
 
 pub struct DownloadOptions {
     pub threads: usize,
     pub client: Client,
-    pub download_chunks: Vec<Range<usize>>,
+    pub download_chunks: Vec<Progress>,
     pub retry_gap: Duration,
     pub download_buffer_size: usize,
 }
@@ -24,10 +24,10 @@ pub fn download(
     url: impl IntoUrl,
     mut writer: impl RandWriter + 'static,
     options: DownloadOptions,
-) -> Result<(Receiver<Event>, JoinHandle<()>)> {
+) -> Result<DownloadResult> {
     let url = url.into_url()?;
-    let (tx, rx) = crossbeam_channel::unbounded();
-    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(Range<usize>, Bytes)>();
+    let (tx, event_chain) = crossbeam_channel::unbounded();
+    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(Vec<Progress>, Bytes)>();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
         for (spin, data) in rx_write {
@@ -40,10 +40,15 @@ pub fn download(
     });
     let tasks: Arc<TaskList> = Arc::new(options.download_chunks.into());
     let tasks_clone = tasks.clone();
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
     tasks.spawn(
         options.threads,
         |executor| thread::spawn(move || executor.run()),
         action::from_fn(move |id, task, get_task| 'retry: loop {
+            if !running.load(Ordering::Relaxed) {
+                return;
+            }
             let mut start = task.start();
             let end = task.end();
             if start >= end {
@@ -55,6 +60,9 @@ pub fn download(
             }
             let range_str = fmt_progress::fmt_progress(&tasks_clone.get_range(start..end));
             let mut response = loop {
+                if !running.load(Ordering::Relaxed) {
+                    return;
+                }
                 tx.send(Event::Connecting(id)).unwrap();
                 match options
                     .client
@@ -76,7 +84,11 @@ pub fn download(
             };
             tx.send(Event::Downloading(id)).unwrap();
             let mut buffer = BytesMut::with_capacity(options.download_buffer_size);
+            unsafe { buffer.set_len(options.download_buffer_size) };
             loop {
+                if !running.load(Ordering::Relaxed) {
+                    return;
+                }
                 let end = task.end();
                 if start >= end {
                     break;
@@ -86,12 +98,12 @@ pub fn download(
                 task.fetch_add_start(expect_len);
                 let mut retry_count = 0;
                 let len = loop {
-                    unsafe { buffer.set_len(options.download_buffer_size) };
+                    if !running.load(Ordering::Relaxed) {
+                        task.fetch_sub_start(expect_len);
+                        return;
+                    }
                     match response.read(&mut buffer) {
-                        Ok(len) => {
-                            unsafe { buffer.set_len(len) };
-                            break len;
-                        }
+                        Ok(len) => break len,
                         Err(e) => tx.send(Event::DownloadError(0, e.into())).unwrap(),
                     };
                     thread::sleep(options.retry_gap);
@@ -101,25 +113,29 @@ pub fn download(
                         continue 'retry;
                     }
                 };
-                if expect_len != len {
-                    task.fetch_sub_start(expect_len);
-                    tx.send(Event::DownloadError(
-                        0,
-                        eyre!("Expected to read {expect_len} bytes of data, but actually read {len} bytes"),
-                    ))
-                    .unwrap();
-                    continue 'retry;
+                if expect_len > len {
+                    task.fetch_sub_start(expect_len - len);
+                } else if expect_len < len {
+                    task.fetch_add_start(len - expect_len);
                 }
                 let chunk_end = (start + len).min(task.end());
                 let len = chunk_end - start;
-                let span = start..chunk_end;
+                let span = tasks_clone.get_range(start..chunk_end);
                 tx.send(Event::DownloadProgress(span.clone())).unwrap();
-                tx_write.send((span, buffer.clone().freeze())).unwrap();
+                tx_write
+                    .send((span, buffer.clone().split_to(len).freeze()))
+                    .unwrap();
                 start += len;
             }
         }),
     );
-    Ok((rx, handle))
+    Ok(DownloadResult {
+        event_chain,
+        handle,
+        cancel_fn: Box::new(move || {
+            running_clone.store(false, Ordering::Relaxed);
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -162,7 +178,11 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let (rx, handle) = download(
+        let DownloadResult {
+            event_chain,
+            handle,
+            cancel_fn: _,
+        } = download(
             format!("{}/mutli", server.url()),
             RandFileWriter::new(file, mock_body.len()).unwrap(),
             DownloadOptions {
@@ -184,13 +204,17 @@ mod tests {
         assert_eq!(file_content, mock_body);
         let mut download_progress: Vec<Progress> = Vec::new();
         let mut write_progress: Vec<Progress> = Vec::new();
-        for e in rx {
+        for e in event_chain {
             match e {
-                Event::DownloadProgress(p) => {
-                    download_progress.merge_progress(p);
+                Event::DownloadProgress(ps) => {
+                    for p in ps {
+                        download_progress.merge_progress(p);
+                    }
                 }
-                Event::WriteProgress(p) => {
-                    write_progress.merge_progress(p);
+                Event::WriteProgress(ps) => {
+                    for p in ps {
+                        write_progress.merge_progress(p);
+                    }
                 }
                 _ => {}
             }
