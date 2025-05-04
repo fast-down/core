@@ -104,7 +104,7 @@ pub fn download(
                     }
                     match response.read(&mut buffer) {
                         Ok(len) => break len,
-                        Err(e) => tx.send(Event::DownloadError(0, e.into())).unwrap(),
+                        Err(e) => tx.send(Event::DownloadError(id, e.into())).unwrap(),
                     };
                     thread::sleep(options.retry_gap);
                     retry_count += 1;
