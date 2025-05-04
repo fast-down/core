@@ -1,8 +1,9 @@
 use color_eyre::eyre::Result;
 use content_disposition;
 use reqwest::{
+    blocking::Client,
     header::{self, HeaderMap},
-    Client, StatusCode, Url,
+    StatusCode, Url,
 };
 use sanitize_filename;
 
@@ -69,14 +70,14 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
     )
 }
 
-pub async fn get_url_info(url: &str, client: &Client) -> Result<UrlInfo> {
-    let resp = client.head(url).send().await?;
+pub fn get_url_info(url: &str, client: &Client) -> Result<UrlInfo> {
+    let resp = client.head(url).send()?;
 
     let resp = match resp.error_for_status() {
         Ok(resp) => resp,
         Err(err) => {
             return match err.status() {
-                Some(StatusCode::NOT_IMPLEMENTED) => get_url_info_fallback(url, client).await,
+                Some(StatusCode::NOT_IMPLEMENTED) => get_url_info_fallback(url, client),
                 _ => Err(err.into()),
             };
         }
@@ -96,7 +97,7 @@ pub async fn get_url_info(url: &str, client: &Client) -> Result<UrlInfo> {
             .map(|v| v.split(' '))
             .and_then(|supports| supports.into_iter().find(|&ty| ty == "bytes"))
             .is_some(),
-        None => return get_url_info_fallback(url, client).await,
+        None => return get_url_info_fallback(url, client),
     };
 
     Ok(UrlInfo {
@@ -110,12 +111,11 @@ pub async fn get_url_info(url: &str, client: &Client) -> Result<UrlInfo> {
     })
 }
 
-pub async fn get_url_info_fallback(url: &str, client: &Client) -> Result<UrlInfo> {
+fn get_url_info_fallback(url: &str, client: &Client) -> Result<UrlInfo> {
     let resp = client
         .get(url)
         .header(header::RANGE, "bytes=0-")
-        .send()
-        .await?
+        .send()?
         .error_for_status()?;
     let status = resp.status();
     let final_url = resp.url();
@@ -139,8 +139,8 @@ pub async fn get_url_info_fallback(url: &str, client: &Client) -> Result<UrlInfo
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_redirect_and_content_range() {
+    #[test]
+    fn test_redirect_and_content_range() {
         let mut server = mockito::Server::new();
 
         let mock_redirect = server
@@ -158,7 +158,6 @@ mod tests {
 
         let client = Client::new();
         let url_info = get_url_info(&format!("{}/redirect", server.url()), &client)
-            .await
             .expect("Request should succeed");
 
         assert_eq!(url_info.file_size, 2048);
@@ -173,8 +172,8 @@ mod tests {
         mock_file.assert();
     }
 
-    #[tokio::test]
-    async fn test_content_range_priority() {
+    #[test]
+    fn test_content_range_priority() {
         let mut server = mockito::Server::new();
         let mock = server
             .mock("GET", "/file")
@@ -184,15 +183,14 @@ mod tests {
 
         let client = Client::new();
         let url_info = get_url_info(&format!("{}/file", server.url()), &client)
-            .await
             .expect("Request should succeed");
 
         assert_eq!(url_info.file_size, 2048);
         mock.assert();
     }
 
-    #[tokio::test]
-    async fn test_filename_sources() {
+    #[test]
+    fn test_filename_sources() {
         let mut server = mockito::Server::new();
 
         // Test Content-Disposition source
@@ -200,17 +198,14 @@ mod tests {
             .mock("GET", "/test1")
             .with_header("Content-Disposition", "attachment; filename=\"test.txt\"")
             .create();
-        let url_info = get_url_info(&format!("{}/test1", server.url()), &Client::new())
-            .await
-            .unwrap();
+        let url_info = get_url_info(&format!("{}/test1", server.url()), &Client::new()).unwrap();
         assert_eq!(url_info.file_name, "test.txt");
         mock1.assert();
 
         // Test URL path source
         let mock2 = server.mock("GET", "/test2/file.pdf").create();
-        let url_info = get_url_info(&format!("{}/test2/file.pdf", server.url()), &Client::new())
-            .await
-            .unwrap();
+        let url_info =
+            get_url_info(&format!("{}/test2/file.pdf", server.url()), &Client::new()).unwrap();
         assert_eq!(url_info.file_name, "file.pdf");
         mock2.assert();
 
@@ -222,21 +217,19 @@ mod tests {
                 "attachment; filename*=UTF-8''%E6%82%AA%E3%81%84%3C%3E%E3%83%95%E3%82%A1%E3%82%A4%E3%83%AB%3F%E5%90%8D.txt"
             )
             .create();
-        let url_info = get_url_info(&format!("{}/test3", server.url()), &Client::new())
-            .await
-            .unwrap();
+        let url_info = get_url_info(&format!("{}/test3", server.url()), &Client::new()).unwrap();
         assert_eq!(url_info.file_name, "悪い__ファイル_名.txt");
         mock3.assert();
     }
 
-    #[tokio::test]
-    async fn test_error_handling() {
+    #[test]
+    fn test_error_handling() {
         let mut server = mockito::Server::new();
         let mock1 = server.mock("GET", "/404").with_status(404).create();
 
         let client = Client::new();
 
-        match get_url_info(&format!("{}/404", server.url()), &client).await {
+        match get_url_info(&format!("{}/404", server.url()), &client) {
             Ok(info) => assert!(false, "404 status code should not success: {:?}", info),
             Err(err) => {
                 let err = err.downcast::<reqwest::Error>().expect("reqwest error");

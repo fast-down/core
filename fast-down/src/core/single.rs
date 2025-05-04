@@ -1,69 +1,71 @@
-extern crate std;
-
-use super::read_response::read_response;
-use super::writer::DownloadWriter;
 use crate::Event;
+use crate::SeqWriter;
 use bytes::BytesMut;
 use color_eyre::eyre::Result;
-use core::time::Duration;
+use crossbeam_channel::Receiver;
 use reqwest::{blocking::Client, IntoUrl};
-use std::thread::{self, JoinHandle};
+use std::io::Read;
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 pub struct DownloadOptions {
     pub client: Client,
-    pub get_chunk_size: usize,
     pub retry_gap: Duration,
+    pub download_buffer_size: usize,
 }
 
-pub fn download<Writer: DownloadWriter + 'static>(
+pub fn download(
     url: impl IntoUrl,
-    writer: Writer,
+    mut writer: impl SeqWriter + 'static,
     options: DownloadOptions,
-) -> Result<(crossbeam_channel::Receiver<Event>, JoinHandle<()>)> {
+) -> Result<(Receiver<Event>, JoinHandle<()>)> {
     let url = url.into_url()?;
     let (tx, rx) = crossbeam_channel::unbounded();
+    let (tx_write, rx_write) = crossbeam_channel::unbounded();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
+        for (spin, data) in rx_write {
+            match writer.write_sequentially(data) {
+                Ok(_) => tx_clone.send(Event::WriteProgress(spin)),
+                Err(e) => tx_clone.send(Event::WriteError(e.into())),
+            }
+            .unwrap()
+        }
+    });
+    thread::spawn(move || {
         let mut downloaded: usize = 0;
         let mut response = loop {
-            tx_clone.send(Event::Connecting(0)).unwrap();
+            tx.send(Event::Connecting(0)).unwrap();
             match options.client.get(url.clone()).send() {
                 Ok(response) => break response,
-                Err(e) => tx_clone.send(Event::ConnectError(0, e.into())).unwrap(),
+                Err(e) => tx.send(Event::ConnectError(0, e.into())).unwrap(),
             }
             thread::sleep(options.retry_gap);
         };
-        tx_clone.send(Event::Downloading(0)).unwrap();
-        // dbg!("Response: {:?}", response);
-        // dbg!("@status: {:?}", response.status());
-        // dbg!("@length: {:?}", response.headers().get("content-length").unwrap());
-        let mut buffer = BytesMut::with_capacity(options.get_chunk_size);
+        tx.send(Event::Downloading(0)).unwrap();
+        let mut buffer = BytesMut::with_capacity(options.download_buffer_size);
         loop {
-            let len = read_response(&mut response, &mut buffer, options.retry_gap, |err| {
-                tx_clone.send(Event::DownloadError(0, err.into())).unwrap();
-            });
-            // dbg!("@read: {:?}", len);
+            let len = loop {
+                unsafe { buffer.set_len(options.download_buffer_size) };
+                match response.read(&mut buffer) {
+                    Ok(len) => {
+                        unsafe { buffer.set_len(len) };
+                        break len;
+                    }
+                    Err(e) => tx.send(Event::DownloadError(0, e.into())).unwrap(),
+                };
+                thread::sleep(options.retry_gap);
+            };
             if len == 0 {
                 break;
             }
             let span = downloaded..(downloaded + len);
-            tx_clone
-                .send(Event::DownloadProgress(span.clone()))
-                .unwrap();
-
-            // SAFETY: single thread
-            match unsafe {
-                writer.write_part_unchecked(span.clone(), buffer.clone().split_to(len).freeze())
-            } {
-                Ok(_) => {
-                    tx_clone.send(Event::WriteProgress(span)).unwrap();
-                }
-                Err(e) => tx_clone.send(Event::DownloadError(0, e.into())).unwrap(),
-            }
-
+            tx.send(Event::DownloadProgress(span.clone())).unwrap();
+            tx_write.send((span, buffer.clone().freeze())).unwrap();
             downloaded += len;
         }
-        tx_clone.send(Event::Finished(0)).unwrap();
+        tx.send(Event::Finished(0)).unwrap();
     });
     Ok((rx, handle))
 }
@@ -71,13 +73,10 @@ pub fn download<Writer: DownloadWriter + 'static>(
 #[cfg(test)]
 #[cfg(feature = "file")]
 mod tests {
-    use crate::total::Total;
-    extern crate std;
     use super::*;
-    use crate::core::file_writer::FileWriter;
+    use crate::core::file_writer::SeqFileWriter;
+    use crate::Total;
     use std::fs::File;
-    use std::vec::Vec;
-    use std::{dbg, io::Read};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -86,23 +85,22 @@ mod tests {
         let mock_body = b"test data";
         let mut server = mockito::Server::new();
         let mock = server
-            .mock("GET", "/")
+            .mock("GET", "/small")
             .with_status(200)
             .with_body(mock_body)
             .create();
 
         let temp_file = NamedTempFile::new().unwrap();
         let file = temp_file.reopen().unwrap();
-        file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
         let (rx, handle) = download(
-            server.url(),
-            FileWriter::new::<4>(file).unwrap(),
+            format!("{}/small", server.url()),
+            SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
-                get_chunk_size: 8 * 1024,
                 retry_gap: Duration::from_secs(1),
+                download_buffer_size: 8 * 1024,
             },
         )
         .unwrap();
@@ -149,7 +147,7 @@ mod tests {
         let mock_body = b"";
         let mut server = mockito::Server::new();
         let mock = server
-            .mock("GET", "/")
+            .mock("GET", "/empty")
             .with_status(200)
             .with_body(mock_body)
             .create();
@@ -159,12 +157,12 @@ mod tests {
 
         let client = Client::new();
         let (rx, handle) = download(
-            server.url(),
-            FileWriter::new::<4>(file).unwrap(),
+            format!("{}/empty", server.url()),
+            SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
-                get_chunk_size: 8 * 1024,
                 retry_gap: Duration::from_secs(1),
+                download_buffer_size: 8 * 1024,
             },
         )
         .unwrap();
@@ -211,23 +209,22 @@ mod tests {
         let mock_body = [b'a'; 5000];
         let mut server = mockito::Server::new();
         let mock = server
-            .mock("GET", "/")
+            .mock("GET", "/large")
             .with_status(200)
             .with_body(&mock_body)
             .create();
 
         let temp_file = NamedTempFile::new().unwrap();
         let file = temp_file.reopen().unwrap();
-        file.set_len(mock_body.len() as u64).unwrap();
 
         let client = Client::new();
         let (rx, handle) = download(
-            server.url(),
-            FileWriter::new::<4>(file).unwrap(),
+            format!("{}/large", server.url()),
+            SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
-                get_chunk_size: 8 * 1024,
                 retry_gap: Duration::from_secs(1),
+                download_buffer_size: 8 * 1024,
             },
         )
         .unwrap();
@@ -274,7 +271,7 @@ mod tests {
         let mock_body = vec![b'x'; 4096];
         let mut server = mockito::Server::new();
         let mock = server
-            .mock("GET", "/")
+            .mock("GET", "/exact_buffer_size_file")
             .with_status(200)
             .with_body(&mock_body)
             .create();
@@ -282,16 +279,14 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let file = temp_file.reopen().unwrap();
 
-        file.set_len(mock_body.len() as u64).unwrap();
-
         let client = Client::new();
         let (rx, handle) = download(
-            server.url(),
-            FileWriter::new::<4>(file).unwrap(),
+            format!("{}/exact_buffer_size_file", server.url()),
+            SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
-                get_chunk_size: 8 * 1024,
                 retry_gap: Duration::from_secs(1),
+                download_buffer_size: 8 * 1024,
             },
         )
         .unwrap();

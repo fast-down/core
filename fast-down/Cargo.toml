@@ -1,6 +1,6 @@
 [package]
 name = "fast-down"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -17,19 +17,17 @@ categories = ["network-programming", "concurrency"]
 bytes = "1.10.1"
 color-eyre = { workspace = true }
 content_disposition = "0.4.0"
+fast-steal = "3.0.3"
 crossbeam-channel = "0.5.14"
-fast-steal = "3.0.2"
 memmap2 = { version = "0.9.5", optional = true }
-num-traits = "0.2.19"
 reqwest = { workspace = true }
 sanitize-filename = "0.6.0"
 urlencoding = "2.1.3"
-tokio = { workspace = true }
 
 [dev-dependencies]
 mockito = "1.6.1"
 tempfile = "3.18.0"
 
 [features]
-memmap2 = ["dep:memmap2"]
 file = ["memmap2"]
+memmap2 = ["dep:memmap2"]
