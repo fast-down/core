@@ -45,8 +45,8 @@ pub struct Args {
     pub save_folder: String,
 
     /// 下载线程数
-    #[arg(short, long)]
-    pub threads: Option<usize>,
+    #[arg(short, long, default_value_t = 32)]
+    pub threads: usize,
 
     /// 自定义文件名
     #[arg(short = 'o', long = "out")]
@@ -103,7 +103,6 @@ fn main() -> Result<()> {
     };
     let threads = if info.can_fast_download {
         args.threads
-            .unwrap_or_else(|| info.file_size.checked_div(2 * 1024 * 1024).unwrap_or(4))
     } else {
         1
     };
