@@ -94,6 +94,10 @@ mod tests {
     use std::fs::File;
     use tempfile::NamedTempFile;
 
+    fn build_mock_data(size: usize) -> Vec<u8> {
+        (0..size).map(|i| (i % 256) as u8).collect()
+    }
+
     #[test]
     fn test_downloads_small_file_correctly() {
         // 测试 9B 小文件
@@ -229,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_downloads_large_file_correctly() {
-        let mock_body = [b'a'; 5000];
+        let mock_body = build_mock_data(5000);
         let mut server = mockito::Server::new();
         let mock = server
             .mock("GET", "/large")
@@ -295,7 +299,7 @@ mod tests {
 
     #[test]
     fn test_downloads_exact_buffer_size_file() {
-        let mock_body = vec![b'x'; 4096];
+        let mock_body = build_mock_data(4096);
         let mut server = mockito::Server::new();
         let mock = server
             .mock("GET", "/exact_buffer_size_file")
