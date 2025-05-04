@@ -29,7 +29,7 @@ pub fn draw_progress(
 
     if total == 0 {
         // 处理空文件的情况，例如直接打印完成信息或一个特殊的进度条
-        print!(
+        eprint!(
             "\x1b[1A\x1b[1A\r\x1B[K|{}| {:>6.2}% ({:>8}/{})\n\x1B[K已用时间: {} | 速度: {:>8}/s | 剩余: {}\n",
             BLOCK_CHARS[BLOCK_CHARS.len() - 1]
                 .to_string()
@@ -136,7 +136,7 @@ pub fn draw_progress(
         bar_str.push(BLOCK_CHARS[fill_level]);
     }
 
-    print!(
+    eprint!(
         "\x1b[1A\x1b[1A\r\x1B[K|{}| {:>6.2}% ({:>8}/{})\n\x1B[K已用时间: {} | 速度: {:>8}/s | 剩余: {}\n",
         bar_str,
         get_percent,
