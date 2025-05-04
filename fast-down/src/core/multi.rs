@@ -6,7 +6,7 @@ use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use fast_steal::{sync::action, sync::Spawn, TaskList};
 use reqwest::{blocking::Client, header, IntoUrl, StatusCode};
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -96,7 +96,6 @@ pub fn download(
                 let remain = end - start;
                 let expect_len = remain.min(options.download_buffer_size);
                 task.fetch_add_start(expect_len);
-                let mut retry_count = 0;
                 let len = loop {
                     if !running.load(Ordering::Relaxed) {
                         task.fetch_sub_start(expect_len);
@@ -104,14 +103,15 @@ pub fn download(
                     }
                     match response.read(&mut buffer) {
                         Ok(len) => break len,
-                        Err(e) => tx.send(Event::DownloadError(id, e.into())).unwrap(),
+                        Err(e) => {
+                            let kind = e.kind();
+                            tx.send(Event::DownloadError(id, e.into())).unwrap();
+                            if kind != ErrorKind::Interrupted {
+                                continue 'retry;
+                            }
+                        }
                     };
                     thread::sleep(options.retry_gap);
-                    retry_count += 1;
-                    if retry_count > 3 {
-                        task.fetch_sub_start(expect_len);
-                        continue 'retry;
-                    }
                 };
                 if expect_len > len {
                     task.fetch_sub_start(expect_len - len);

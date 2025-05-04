@@ -258,7 +258,21 @@ fn main() -> Result<()> {
                     err
                 );
             }
-            _ => {}
+            Event::Connecting(id) => {
+                print!(
+                    "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在连接中……\n\n\n",
+                    id
+                );
+            }
+            Event::Finished(id) => {
+                print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 完成任务\n\n\n", id);
+            }
+            Event::Downloading(id) => {
+                print!(
+                    "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在下载中……\n\n\n",
+                    id
+                );
+            }
         }
     }
     handle.join().unwrap();
