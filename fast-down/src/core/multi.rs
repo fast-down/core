@@ -69,89 +69,92 @@ pub fn download(
                 tx.send(Event::Finished(id)).unwrap();
                 break;
             }
-            let range_str = fmt_progress::fmt_progress(&tasks_clone.get_range(start..end));
-            let mut response = loop {
-                if !running.load(Ordering::Relaxed) {
-                    tx.send(Event::Abort(id)).unwrap();
-                    return;
-                }
-                tx.send(Event::Connecting(id)).unwrap();
-                match options
-                    .client
-                    .get(url.clone())
-                    .header(header::RANGE, format!("bytes={}", range_str))
-                    .send()
-                {
-                    Ok(response) if response.status() == StatusCode::PARTIAL_CONTENT => {
-                        break response
-                    }
-                    Ok(response) => tx.send(Event::ConnectError(
-                        id,
-                        eyre!("Expect to get 206, but got {}", response.status()),
-                    )),
-                    Err(e) => tx.send(Event::ConnectError(id, e.into())),
-                }
-                .unwrap();
-                thread::sleep(options.retry_gap);
-            };
-            tx.send(Event::Downloading(id)).unwrap();
-            let mut buffer = BytesMut::with_capacity(options.download_buffer_size);
-            unsafe { buffer.set_len(options.download_buffer_size) };
-            loop {
-                if !running.load(Ordering::Relaxed) {
-                    tx.send(Event::Abort(id)).unwrap();
-                    return;
-                }
-                let end = task.end();
-                if start >= end {
-                    break;
-                }
-                let remain = end - start;
-                let expect_len = remain.min(options.download_buffer_size);
-                task.fetch_add_start(expect_len);
-                let len = loop {
+            let download_ranges = tasks_clone.get_range(start..end);
+            for range in download_ranges {
+                let range_str = fmt_progress::fmt_progress(&[range]);
+                let mut response = loop {
                     if !running.load(Ordering::Relaxed) {
-                        task.fetch_sub_start(expect_len);
                         tx.send(Event::Abort(id)).unwrap();
                         return;
                     }
-                    unsafe { buffer.set_len(expect_len) }
-                    match response.read(&mut buffer) {
-                        Ok(len) => break len,
-                        Err(e) => {
-                            let kind = e.kind();
-                            tx.send(Event::DownloadError(id, e.into())).unwrap();
-                            if kind != ErrorKind::Interrupted {
-                                task.fetch_sub_start(expect_len);
-                                continue 'retry;
-                            }
+                    tx.send(Event::Connecting(id)).unwrap();
+                    match options
+                        .client
+                        .get(url.clone())
+                        .header(header::RANGE, format!("bytes={}", range_str))
+                        .send()
+                    {
+                        Ok(response) if response.status() == StatusCode::PARTIAL_CONTENT => {
+                            break response
                         }
-                    };
+                        Ok(response) => tx.send(Event::ConnectError(
+                            id,
+                            eyre!("Expect to get 206, but got {}", response.status()),
+                        )),
+                        Err(e) => tx.send(Event::ConnectError(id, e.into())),
+                    }
+                    .unwrap();
                     thread::sleep(options.retry_gap);
                 };
-                if expect_len > len {
-                    task.fetch_sub_start(expect_len - len);
-                } else if expect_len < len {
-                    tx.send(Event::DownloadError(
-                        id,
-                        eyre!(
-                            "Downloaded more data than expected: {} > {}",
-                            len,
-                            expect_len
-                        ),
-                    ))
-                    .unwrap();
-                    task.fetch_sub_start(expect_len);
-                    continue 'retry;
+                tx.send(Event::Downloading(id)).unwrap();
+                let mut buffer = BytesMut::with_capacity(options.download_buffer_size);
+                unsafe { buffer.set_len(options.download_buffer_size) };
+                loop {
+                    if !running.load(Ordering::Relaxed) {
+                        tx.send(Event::Abort(id)).unwrap();
+                        return;
+                    }
+                    let end = task.end();
+                    if start >= end {
+                        break;
+                    }
+                    let remain = end - start;
+                    let expect_len = remain.min(options.download_buffer_size);
+                    task.fetch_add_start(expect_len);
+                    let len = loop {
+                        if !running.load(Ordering::Relaxed) {
+                            task.fetch_sub_start(expect_len);
+                            tx.send(Event::Abort(id)).unwrap();
+                            return;
+                        }
+                        unsafe { buffer.set_len(expect_len) }
+                        match response.read(&mut buffer) {
+                            Ok(len) => break len,
+                            Err(e) => {
+                                let kind = e.kind();
+                                tx.send(Event::DownloadError(id, e.into())).unwrap();
+                                if kind != ErrorKind::Interrupted {
+                                    task.fetch_sub_start(expect_len);
+                                    continue 'retry;
+                                }
+                            }
+                        };
+                        thread::sleep(options.retry_gap);
+                    };
+                    if expect_len > len {
+                        task.fetch_sub_start(expect_len - len);
+                    } else if expect_len < len {
+                        tx.send(Event::DownloadError(
+                            id,
+                            eyre!(
+                                "Downloaded more data than expected: {} > {}",
+                                len,
+                                expect_len
+                            ),
+                        ))
+                        .unwrap();
+                        task.fetch_sub_start(expect_len);
+                        continue 'retry;
+                    }
+                    let chunk_end = (start + len).min(task.end());
+                    let len = chunk_end - start;
+                    let span = tasks_clone.get_range(start..chunk_end);
+                    tx.send(Event::DownloadProgress(span.clone())).unwrap();
+                    tx_write
+                        .send((span, buffer.clone().split_to(len).freeze()))
+                        .unwrap();
+                    start += len;
                 }
-                let chunk_end = (start + len).min(task.end());
-                let len = chunk_end - start;
-                let span = tasks_clone.get_range(start..chunk_end);
-                tx.send(Event::DownloadProgress(span.clone())).unwrap();
-                tx_write
-                    .send((span, buffer.clone().split_to(len).freeze()))
-                    .unwrap();
-                start += len;
             }
         }),
     );
