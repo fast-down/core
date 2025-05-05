@@ -207,7 +207,7 @@ mod tests {
         let mock_body_clone = mock_body.clone();
         let mut server = mockito::Server::new();
         server
-            .mock("GET", "/mutli")
+            .mock("GET", "/mutli-2")
             .with_status(206)
             .with_body_from_request(move |request| {
                 if !request.has_header("Range") {
@@ -237,30 +237,24 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
+        let download_chunks = vec![0..mock_body.len()];
         let DownloadResult {
             event_chain,
             handle,
             cancel_fn: _,
         } = download(
-            format!("{}/mutli", server.url()),
+            format!("{}/mutli-2", server.url()),
             RandFileWriter::new(file, mock_body.len()).unwrap(),
             DownloadOptions {
                 client,
-                threads: 1000,
+                threads: 32,
                 download_buffer_size: 8 * 1024,
-                download_chunks: vec![0..mock_body.len()],
+                download_chunks: download_chunks.clone(),
                 retry_gap: Duration::from_secs(1),
             },
         )
         .unwrap();
-        handle.join().unwrap();
 
-        let mut file_content = Vec::new();
-        File::open(temp_file.path())
-            .unwrap()
-            .read_to_end(&mut file_content)
-            .unwrap();
-        assert_eq!(file_content, mock_body);
         let mut download_progress: Vec<Progress> = Vec::new();
         let mut write_progress: Vec<Progress> = Vec::new();
         for e in event_chain {
@@ -278,8 +272,31 @@ mod tests {
                 _ => {}
             }
         }
-        assert_eq!(download_progress.total(), mock_body.len());
-        assert_eq!(write_progress.total(), mock_body.len());
+        dbg!(&download_progress);
+        dbg!(&write_progress);
+        assert_eq!(download_progress, download_chunks);
+        assert_eq!(write_progress, download_chunks);
+
+        handle.join().unwrap();
+
+        let output = {
+            let mut data = Vec::with_capacity(mock_body.len());
+            for _ in 0..mock_body.len() {
+                data.push(0);
+            }
+            for chunk in download_chunks.clone() {
+                for i in chunk {
+                    data[i] = mock_body[i];
+                }
+            }
+            data
+        };
+        let mut file_content = Vec::new();
+        File::open(temp_file.path())
+            .unwrap()
+            .read_to_end(&mut file_content)
+            .unwrap();
+        assert_eq!(file_content, output);
     }
 
     #[test]
@@ -288,7 +305,7 @@ mod tests {
         let mock_body_clone = mock_body.clone();
         let mut server = mockito::Server::new();
         server
-            .mock("GET", "/mutli")
+            .mock("GET", "/mutli-2")
             .with_status(206)
             .with_body_from_request(move |request| {
                 if !request.has_header("Range") {
@@ -324,37 +341,18 @@ mod tests {
             handle,
             cancel_fn: _,
         } = download(
-            format!("{}/mutli", server.url()),
+            format!("{}/mutli-2", server.url()),
             RandFileWriter::new(file, mock_body.len()).unwrap(),
             DownloadOptions {
                 client,
-                threads: 8,
+                threads: 32,
                 download_buffer_size: 8 * 1024,
                 download_chunks: download_chunks.clone(),
                 retry_gap: Duration::from_secs(1),
             },
         )
         .unwrap();
-        handle.join().unwrap();
 
-        let output = {
-            let mut data = Vec::with_capacity(mock_body.len());
-            for _ in 0..mock_body.len() {
-                data.push(0);
-            }
-            for chunk in download_chunks.clone() {
-                for i in chunk {
-                    data[i] = mock_body[i];
-                }
-            }
-            data
-        };
-        let mut file_content = Vec::new();
-        File::open(temp_file.path())
-            .unwrap()
-            .read_to_end(&mut file_content)
-            .unwrap();
-        assert_eq!(file_content, output);
         let mut download_progress: Vec<Progress> = Vec::new();
         let mut write_progress: Vec<Progress> = Vec::new();
         for e in event_chain {
@@ -376,6 +374,27 @@ mod tests {
         dbg!(&write_progress);
         assert_eq!(download_progress, download_chunks);
         assert_eq!(write_progress, download_chunks);
+
+        handle.join().unwrap();
+
+        let output = {
+            let mut data = Vec::with_capacity(mock_body.len());
+            for _ in 0..mock_body.len() {
+                data.push(0);
+            }
+            for chunk in download_chunks.clone() {
+                for i in chunk {
+                    data[i] = mock_body[i];
+                }
+            }
+            data
+        };
+        let mut file_content = Vec::new();
+        File::open(temp_file.path())
+            .unwrap()
+            .read_to_end(&mut file_content)
+            .unwrap();
+        assert_eq!(file_content, output);
     }
 
     #[test]
@@ -384,7 +403,7 @@ mod tests {
         let mock_body_clone = mock_body.clone();
         let mut server = mockito::Server::new();
         server
-            .mock("GET", "/mutli")
+            .mock("GET", "/mutli-3")
             .with_status(206)
             .with_body_from_request(move |request| {
                 if !request.has_header("Range") {
@@ -420,11 +439,11 @@ mod tests {
             handle,
             cancel_fn,
         } = download(
-            format!("{}/mutli", server.url()),
+            format!("{}/mutli-3", server.url()),
             RandFileWriter::new(file, mock_body.len()).unwrap(),
             DownloadOptions {
                 client,
-                threads: 1000,
+                threads: 32,
                 download_buffer_size: 8 * 1024,
                 download_chunks: vec![0..mock_body.len()],
                 retry_gap: Duration::from_secs(1),
@@ -435,8 +454,6 @@ mod tests {
             thread::sleep(Duration::from_secs(1));
             cancel_fn()
         });
-
-        handle.join().unwrap();
 
         let mut download_progress: Vec<Progress> = Vec::new();
         let mut write_progress: Vec<Progress> = Vec::new();
@@ -458,6 +475,8 @@ mod tests {
         dbg!(&download_progress);
         dbg!(&write_progress);
         assert_eq!(download_progress, write_progress);
+
+        handle.join().unwrap();
         let mut file_content = Vec::new();
         File::open(temp_file.path())
             .unwrap()
@@ -487,7 +506,7 @@ mod tests {
             handle,
             cancel_fn: _,
         } = download(
-            format!("{}/mutli", server.url()),
+            format!("{}/mutli-3", server.url()),
             RandFileWriter::new(file, mock_body.len()).unwrap(),
             DownloadOptions {
                 client,
@@ -498,14 +517,7 @@ mod tests {
             },
         )
         .unwrap();
-        handle.join().unwrap();
 
-        let mut file_content = Vec::new();
-        File::open(temp_file.path())
-            .unwrap()
-            .read_to_end(&mut file_content)
-            .unwrap();
-        assert_eq!(file_content, mock_body);
         let mut download_progress: Vec<Progress> = Vec::new();
         let mut write_progress: Vec<Progress> = Vec::new();
         for e in event_chain {
@@ -527,5 +539,14 @@ mod tests {
         dbg!(&write_progress);
         assert_eq!(download_progress, download_chunks);
         assert_eq!(write_progress, download_chunks);
+
+        handle.join().unwrap();
+
+        let mut file_content = Vec::new();
+        File::open(temp_file.path())
+            .unwrap()
+            .read_to_end(&mut file_content)
+            .unwrap();
+        assert_eq!(file_content, mock_body);
     }
 }
