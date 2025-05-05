@@ -1,6 +1,5 @@
 use super::DownloadResult;
-use crate::base::fmt_progress;
-use crate::{Event, Flush, Progress, RandWriter};
+use crate::{Event, Flush, Progress, RandWriter, Total};
 use bytes::{Bytes, BytesMut};
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
@@ -69,9 +68,11 @@ pub fn download(
                 tx.send(Event::Finished(id)).unwrap();
                 break;
             }
-            let download_ranges = tasks_clone.get_range(start..end);
-            for range in download_ranges {
-                let range_str = fmt_progress::fmt_progress(&[range]);
+            let download_range = &tasks_clone.get_range(start..end);
+            let mut range_size = 0;
+            let start_point = start;
+            for range in download_range {
+                range_size += range.total();
                 let mut response = loop {
                     if !running.load(Ordering::Relaxed) {
                         tx.send(Event::Abort(id)).unwrap();
@@ -81,7 +82,10 @@ pub fn download(
                     match options
                         .client
                         .get(url.clone())
-                        .header(header::RANGE, format!("bytes={}", range_str))
+                        .header(
+                            header::RANGE,
+                            format!("bytes={}-{}", range.start, range.end),
+                        )
                         .send()
                     {
                         Ok(response) if response.status() == StatusCode::PARTIAL_CONTENT => {
@@ -98,13 +102,12 @@ pub fn download(
                 };
                 tx.send(Event::Downloading(id)).unwrap();
                 let mut buffer = BytesMut::with_capacity(options.download_buffer_size);
-                unsafe { buffer.set_len(options.download_buffer_size) };
                 loop {
                     if !running.load(Ordering::Relaxed) {
                         tx.send(Event::Abort(id)).unwrap();
                         return;
                     }
-                    let end = task.end();
+                    let end = task.end().min(start_point + range_size);
                     if start >= end {
                         break;
                     }
