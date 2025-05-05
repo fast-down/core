@@ -1,6 +1,8 @@
+use std::path::PathBuf;
+
 use color_eyre::eyre::Result;
 use fast_down::{fmt_progress, Progress};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, ErrorCode, OptionalExtension};
 
 use crate::str_to_progress::str_to_progress;
 
@@ -9,8 +11,17 @@ pub struct WriteProgress {
     pub progress: Vec<Progress>,
 }
 
-pub fn init_db(db_path: &str) -> Result<Connection> {
-    let conn = Connection::open(db_path)?;
+pub fn init_db(db_path: &PathBuf) -> Result<Connection> {
+    let conn = match Connection::open(db_path) {
+        Ok(conn) => conn,
+        Err(e) => {
+            if e.sqlite_error_code() != Some(ErrorCode::CannotOpen) {
+                Err(e)?;
+            }
+            println!("无法打开 {}, 将在当前工作目录创建数据库", db_path.display());
+            Connection::open("./fast-down.db")?
+        }
+    };
     conn.execute(
         "CREATE TABLE IF NOT EXISTS write_progress (
             id INTEGER PRIMARY KEY,

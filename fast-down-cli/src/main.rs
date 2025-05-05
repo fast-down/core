@@ -11,6 +11,7 @@ use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
 use fast_down::{DownloadOptions, DownloadResult, Event, MergeProgress, Progress, Total};
 use fmt_size::format_file_size;
+use home::home_dir;
 use path_clean::clean;
 use persist::{init_db, init_progress, update_progress};
 use reqwest::{blocking::Client, Proxy};
@@ -18,7 +19,7 @@ use reverse_progress::reverse_progress;
 use std::{
     env,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -77,8 +78,22 @@ pub struct Args {
     pub retry_gap: u64,
 
     /// 数据库存储路径
-    #[arg(long, default_value = "state.db")]
-    pub db_path: String,
+    #[arg(long)]
+    pub db_path: Option<String>,
+}
+
+impl Args {
+    pub fn db_path(&self) -> PathBuf {
+        match &self.db_path {
+            Some(path) => PathBuf::from(path),
+            None => {
+                let mut path = home_dir().unwrap_or(PathBuf::from("."));
+                path.push("fast-down");
+                path.push("fast-down.db");
+                path
+            }
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -86,11 +101,11 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let headers = build_headers(&args.headers)?;
     let mut client = Client::builder().default_headers(headers);
-    if let Some(proxy) = args.proxy {
+    if let Some(ref proxy) = args.proxy {
         client = client.proxy(Proxy::all(proxy)?);
     }
     let client = client.build()?;
-    let conn = init_db(&args.db_path)?;
+    let conn = init_db(&args.db_path())?;
 
     let info = loop {
         match fast_down::get_url_info(&args.url, &client) {
@@ -258,24 +273,24 @@ fn main() -> Result<()> {
                     err
                 );
             }
-            Event::Connecting(id) => {
-                print!(
-                    "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在连接中……\n\n\n",
-                    id
-                );
-            }
-            Event::Finished(id) => {
-                print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 完成任务\n\n\n", id);
-            }
-            Event::Abort(id) => {
-                print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 已中断\n\n\n", id);
-            }
-            Event::Downloading(id) => {
-                print!(
-                    "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在下载中……\n\n\n",
-                    id
-                );
-            }
+            _ => {} // Event::Connecting(id) => {
+                    //     print!(
+                    //         "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在连接中……\n\n\n",
+                    //         id
+                    //     );
+                    // }
+                    // Event::Finished(id) => {
+                    //     print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 完成任务\n\n\n", id);
+                    // }
+                    // Event::Abort(id) => {
+                    //     print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 已中断\n\n\n", id);
+                    // }
+                    // Event::Downloading(id) => {
+                    //     print!(
+                    //         "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在下载中……\n\n\n",
+                    //         id
+                    //     );
+                    // }
         }
     }
     update_progress(&conn, &save_path_str, &write_progress)?;
