@@ -1,9 +1,13 @@
 use super::DownloadResult;
 use crate::Event;
+use crate::Flush;
+use crate::Progress;
 use crate::SeqWriter;
+use bytes::Bytes;
 use bytes::BytesMut;
 use color_eyre::eyre::Result;
 use reqwest::{blocking::Client, IntoUrl};
+use std::io::ErrorKind;
 use std::io::Read;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -19,20 +23,30 @@ pub struct DownloadOptions {
 
 pub fn download(
     url: impl IntoUrl,
-    mut writer: impl SeqWriter + 'static,
+    mut writer: impl SeqWriter + Flush + 'static,
     options: DownloadOptions,
 ) -> Result<DownloadResult> {
     let url = url.into_url()?;
     let (tx, event_chain) = crossbeam_channel::unbounded();
-    let (tx_write, rx_write) = crossbeam_channel::unbounded();
+    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(Vec<Progress>, Bytes)>();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
         for (spin, data) in rx_write {
-            match writer.write_sequentially(data) {
-                Ok(_) => tx_clone.send(Event::WriteProgress(spin)),
-                Err(e) => tx_clone.send(Event::WriteError(e.into())),
+            loop {
+                match writer.write_sequentially(data.clone()) {
+                    Ok(_) => break,
+                    Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
+                }
+                thread::sleep(options.retry_gap);
             }
-            .unwrap()
+            tx_clone.send(Event::WriteProgress(spin)).unwrap();
+        }
+        loop {
+            match writer.flush() {
+                Ok(_) => break,
+                Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
+            };
+            thread::sleep(options.retry_gap);
         }
     });
     let running = Arc::new(AtomicBool::new(true));
@@ -41,6 +55,7 @@ pub fn download(
         let mut downloaded: usize = 0;
         let mut response = loop {
             if !running.load(Ordering::Relaxed) {
+                tx.send(Event::Abort(0)).unwrap();
                 return;
             }
             tx.send(Event::Connecting(0)).unwrap();
@@ -56,11 +71,18 @@ pub fn download(
         loop {
             let len = loop {
                 if !running.load(Ordering::Relaxed) {
+                    tx.send(Event::Abort(0)).unwrap();
                     return;
                 }
                 match response.read(&mut buffer) {
                     Ok(len) => break len,
-                    Err(e) => tx.send(Event::DownloadError(0, e.into())).unwrap(),
+                    Err(e) => {
+                        let kind = e.kind();
+                        tx.send(Event::DownloadError(0, e.into())).unwrap();
+                        if kind != ErrorKind::Interrupted {
+                            return;
+                        }
+                    }
                 };
                 thread::sleep(options.retry_gap);
             };

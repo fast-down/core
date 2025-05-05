@@ -267,6 +267,9 @@ fn main() -> Result<()> {
             Event::Finished(id) => {
                 print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 完成任务\n\n\n", id);
             }
+            Event::Abort(id) => {
+                print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 已中断\n\n\n", id);
+            }
             Event::Downloading(id) => {
                 print!(
                     "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在下载中……\n\n\n",
@@ -275,7 +278,6 @@ fn main() -> Result<()> {
             }
         }
     }
-    handle.join().unwrap();
     update_progress(&conn, &save_path_str, &write_progress)?;
     draw_progress::draw_progress(
         start,
@@ -287,5 +289,6 @@ fn main() -> Result<()> {
         get_progress.total(),
         &mut avg_get_speed,
     );
+    handle.join().unwrap();
     Ok(())
 }

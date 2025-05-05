@@ -1,6 +1,6 @@
 use super::DownloadResult;
 use crate::base::fmt_progress;
-use crate::{Event, Progress, RandWriter};
+use crate::{Event, Flush, Progress, RandWriter};
 use bytes::{Bytes, BytesMut};
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
@@ -22,7 +22,7 @@ pub struct DownloadOptions {
 
 pub fn download(
     url: impl IntoUrl,
-    mut writer: impl RandWriter + 'static,
+    mut writer: impl RandWriter + Flush + 'static,
     options: DownloadOptions,
 ) -> Result<DownloadResult> {
     let url = url.into_url()?;
@@ -31,11 +31,21 @@ pub fn download(
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
         for (spin, data) in rx_write {
-            match writer.write_randomly(spin.clone(), data) {
-                Ok(_) => tx_clone.send(Event::WriteProgress(spin)),
-                Err(e) => tx_clone.send(Event::WriteError(e.into())),
+            loop {
+                match writer.write_randomly(spin.clone(), data.clone()) {
+                    Ok(_) => break,
+                    Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
+                }
+                thread::sleep(options.retry_gap);
             }
-            .unwrap()
+            tx_clone.send(Event::WriteProgress(spin)).unwrap();
+        }
+        loop {
+            match writer.flush() {
+                Ok(_) => break,
+                Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
+            };
+            thread::sleep(options.retry_gap);
         }
     });
     let tasks: Arc<TaskList> = Arc::new(options.download_chunks.into());
@@ -47,6 +57,7 @@ pub fn download(
         |executor| thread::spawn(move || executor.run()),
         action::from_fn(move |id, task, get_task| 'retry: loop {
             if !running.load(Ordering::Relaxed) {
+                tx.send(Event::Abort(id)).unwrap();
                 return;
             }
             let mut start = task.start();
@@ -61,6 +72,7 @@ pub fn download(
             let range_str = fmt_progress::fmt_progress(&tasks_clone.get_range(start..end));
             let mut response = loop {
                 if !running.load(Ordering::Relaxed) {
+                    tx.send(Event::Abort(id)).unwrap();
                     return;
                 }
                 tx.send(Event::Connecting(id)).unwrap();
@@ -87,6 +99,7 @@ pub fn download(
             unsafe { buffer.set_len(options.download_buffer_size) };
             loop {
                 if !running.load(Ordering::Relaxed) {
+                    tx.send(Event::Abort(id)).unwrap();
                     return;
                 }
                 let end = task.end();
@@ -99,14 +112,17 @@ pub fn download(
                 let len = loop {
                     if !running.load(Ordering::Relaxed) {
                         task.fetch_sub_start(expect_len);
+                        tx.send(Event::Abort(id)).unwrap();
                         return;
                     }
+                    unsafe { buffer.set_len(expect_len) }
                     match response.read(&mut buffer) {
                         Ok(len) => break len,
                         Err(e) => {
                             let kind = e.kind();
                             tx.send(Event::DownloadError(id, e.into())).unwrap();
                             if kind != ErrorKind::Interrupted {
+                                task.fetch_sub_start(expect_len);
                                 continue 'retry;
                             }
                         }
@@ -116,7 +132,17 @@ pub fn download(
                 if expect_len > len {
                     task.fetch_sub_start(expect_len - len);
                 } else if expect_len < len {
-                    task.fetch_add_start(len - expect_len);
+                    tx.send(Event::DownloadError(
+                        id,
+                        eyre!(
+                            "Downloaded more data than expected: {} > {}",
+                            len,
+                            expect_len
+                        ),
+                    ))
+                    .unwrap();
+                    task.fetch_sub_start(expect_len);
+                    continue 'retry;
                 }
                 let chunk_end = (start + len).min(task.end());
                 let len = chunk_end - start;
@@ -348,7 +374,7 @@ mod tests {
 
     #[test]
     fn test_multi_thread_break_point() {
-        let mock_body = build_mock_data(3 * 1024 * 1024);
+        let mock_body = build_mock_data(200 * 1024 * 1024);
         let mock_body_clone = mock_body.clone();
         let mut server = mockito::Server::new();
         server
@@ -360,7 +386,7 @@ mod tests {
                 }
                 let range = request.header("Range")[0];
                 println!("range: {:?}", range);
-                thread::sleep(Duration::from_millis(500));
+                thread::sleep(Duration::from_millis(20));
                 range
                     .to_str()
                     .unwrap()
@@ -392,7 +418,7 @@ mod tests {
             RandFileWriter::new(file, mock_body.len()).unwrap(),
             DownloadOptions {
                 client,
-                threads: 8,
+                threads: 1000,
                 download_buffer_size: 8 * 1024,
                 download_chunks: vec![0..mock_body.len()],
                 retry_gap: Duration::from_secs(1),
@@ -444,6 +470,7 @@ mod tests {
             data
         };
         assert_eq!(file_content, output);
+        println!("开始续传");
 
         // 开始续传
         let file = temp_file.reopen().unwrap();

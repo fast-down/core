@@ -13,4 +13,5 @@ pub enum Event {
     WriteError(Error),
     WriteProgress(Vec<Progress>),
     Finished(WorkerId),
+    Abort(WorkerId),
 }
