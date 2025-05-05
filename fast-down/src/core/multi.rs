@@ -84,7 +84,7 @@ pub fn download(
                         .get(url.clone())
                         .header(
                             header::RANGE,
-                            format!("bytes={}-{}", range.start, range.end),
+                            format!("bytes={}-{}", range.start, range.end - 1),
                         )
                         .send()
                     {
@@ -174,7 +174,7 @@ pub fn download(
 #[cfg(feature = "file")]
 mod tests {
     use super::*;
-    use crate::{MergeProgress, Progress, RandFileWriter, Total};
+    use crate::{MergeProgress, Progress, RandFileWriter};
     use std::fs::File;
     use std::io::Read;
     use tempfile::NamedTempFile;
