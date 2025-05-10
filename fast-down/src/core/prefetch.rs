@@ -7,7 +7,7 @@ use reqwest::{
 };
 use sanitize_filename;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct UrlInfo {
     pub file_size: usize,
     pub file_name: String,

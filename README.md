@@ -13,13 +13,12 @@
 ## 优势
 
 1. 全网最快多线程下载库
-2. 安全的 Rust 代码
-3. 超强任务调度算法：自研 [fast-steal](https://github.com/share121/fast-steal) 任务窃取算法
-4. 跨平台，Windows、Linux、Mac OS 都支持
-5. 错误自动重试
-6. 进度跟踪
-7. 性能优化：高效的内存使用，可配置缓冲区大小
-8. 高度可配置：支持自定义线程数、缓冲区大小等
+2. 支持断点续传
+3. 安全的 Rust 代码
+4. 超强任务调度算法：自研 [fast-steal](https://github.com/share121/fast-steal) 任务窃取算法
+5. 跨平台，Windows、Linux、Mac OS 都支持
+6. 优秀的错误自动重试，下载过程中随意断网都可以保证文件正确下载
+7. 详细的进度跟踪
 
 ```powershell
 > ./fast-down.exe -h

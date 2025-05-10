@@ -1,9 +1,9 @@
-use crate::{ProgresTrait, Progress};
+use fast_down::Progress;
 
 pub fn fmt_progress(progress: &[Progress]) -> String {
     progress
         .iter()
-        .map(|p| p.format())
+        .map(|p| format!("{}-{}", p.start, p.end - 1))
         .collect::<Vec<_>>()
         .join(",")
 }

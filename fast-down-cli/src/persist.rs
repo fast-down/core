@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::{fs, io::ErrorKind, path::PathBuf};
 
 use color_eyre::eyre::Result;
-use fast_down::{fmt_progress, Progress};
+use fast_down::Progress;
 use rusqlite::{Connection, ErrorCode, OptionalExtension};
 
-use crate::str_to_progress::str_to_progress;
+use crate::{fmt_progress::fmt_progress, str_to_progress::str_to_progress};
 
 pub struct WriteProgress {
     pub total_size: usize,
@@ -12,6 +12,11 @@ pub struct WriteProgress {
 }
 
 pub fn init_db(db_path: &PathBuf) -> Result<Connection> {
+    if let Err(e) = fs::create_dir_all(db_path.parent().unwrap()) {
+        if e.kind() != ErrorKind::AlreadyExists {
+            return Err(e.into());
+        }
+    };
     let conn = match Connection::open(db_path) {
         Ok(conn) => conn,
         Err(e) => {
@@ -48,6 +53,14 @@ pub fn update_progress(conn: &Connection, file_path: &str, progress: &[Progress]
     conn.execute(
         "UPDATE write_progress SET progress = ?1 WHERE file_path = ?2",
         (fmt_progress(progress), file_path),
+    )?;
+    Ok(())
+}
+
+pub fn remove_progress(conn: &Connection, file_path: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM write_progress WHERE file_path = ?1",
+        [file_path],
     )?;
     Ok(())
 }

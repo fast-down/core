@@ -2,7 +2,6 @@ mod base;
 mod core;
 
 pub use base::event::*;
-pub use base::fmt_progress::*;
 pub use base::merge_progress::*;
 pub use base::progress::*;
 pub use base::total::*;

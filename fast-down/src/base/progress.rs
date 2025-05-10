@@ -2,16 +2,11 @@ use std::ops::Range;
 
 pub type Progress = Range<usize>;
 
-pub trait ProgresTrait {
-    fn format(&self) -> String;
+pub trait CanMerge {
     fn can_merge(&self, other: &Self) -> bool;
 }
 
-impl ProgresTrait for Progress {
-    fn format(&self) -> String {
-        format!("{}-{}", self.start, self.end - 1)
-    }
-
+impl CanMerge for Progress {
     fn can_merge(&self, b: &Self) -> bool {
         self.start == b.end || b.start == self.end
     }

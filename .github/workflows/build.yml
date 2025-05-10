@@ -72,10 +72,6 @@ jobs:
         env:
           RUST_BACKTRACE: 1
 
-      - name: Strip binary (linux and macos)
-        if: matrix.build == 'linux' || matrix.build == 'macos'
-        run: strip "target/${{ matrix.target }}/release/fast-down"
-
       - name: Upload archive
         uses: actions/upload-artifact@v4
         with:

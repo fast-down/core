@@ -1,4 +1,4 @@
-use crate::{ProgresTrait, Progress};
+use crate::{CanMerge, Progress};
 
 pub trait MergeProgress {
     fn merge_progress(&mut self, new: Progress);

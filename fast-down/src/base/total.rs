@@ -16,6 +16,12 @@ impl<T: Total> Total for Vec<T> {
     }
 }
 
+impl<T: Total> Total for [T] {
+    fn total(&self) -> usize {
+        self.iter().map(|r| r.total()).sum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -29,6 +35,12 @@ mod tests {
     #[test]
     fn test_vec_total() {
         let ranges = vec![1..5, 10..15, 20..30];
+        assert_eq!(ranges.total(), (5 - 1) + (15 - 10) + (30 - 20));
+    }
+
+    #[test]
+    fn test_slice_total() {
+        let ranges = [1..5, 10..15, 20..30];
         assert_eq!(ranges.total(), (5 - 1) + (15 - 10) + (30 - 20));
     }
 

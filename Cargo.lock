@@ -473,9 +473,9 @@ dependencies = [
 
 [[package]]
 name = "fast-steal"
-version = "3.0.3"
+version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7513951e3639ba414b4dcf612621b36c22c76d9f7ecb8996b23354385b07a82a"
+checksum = "56335db1fb4e3bd5a572b7307c5278615d484f1f2bbf2b1c9305aff0c10cddaa"
 dependencies = [
  "bumpalo",
  "spin",

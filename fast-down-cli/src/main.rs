@@ -1,5 +1,6 @@
 mod build_headers;
 mod draw_progress;
+mod fmt_progress;
 mod fmt_size;
 mod fmt_time;
 mod persist;
@@ -13,7 +14,7 @@ use fast_down::{DownloadOptions, DownloadResult, Event, MergeProgress, Progress,
 use fmt_size::format_file_size;
 use home::home_dir;
 use path_clean::clean;
-use persist::{init_db, init_progress, update_progress};
+use persist::{init_db, init_progress, remove_progress, update_progress};
 use reqwest::{blocking::Client, Proxy};
 use reverse_progress::reverse_progress;
 use std::{
@@ -225,10 +226,8 @@ fn main() -> Result<()> {
     eprint!("\n\n");
     for e in event_chain {
         match e {
-            Event::DownloadProgress(ps) => {
-                for p in ps {
-                    get_progress.merge_progress(p);
-                }
+            Event::DownloadProgress(p) => {
+                get_progress.merge_progress(p);
                 if last_progress_update.elapsed().as_millis() > 50 {
                     last_progress_update = Instant::now();
                     let get_size = get_progress.total();
@@ -246,10 +245,8 @@ fn main() -> Result<()> {
                     last_get_time = Instant::now();
                 }
             }
-            Event::WriteProgress(ps) => {
-                for p in ps {
-                    write_progress.merge_progress(p);
-                }
+            Event::WriteProgress(p) => {
+                write_progress.merge_progress(p);
                 if last_db_update.elapsed().as_secs() >= 1 {
                     last_db_update = Instant::now();
                     update_progress(&conn, &save_path_str, &write_progress)?;
@@ -293,7 +290,14 @@ fn main() -> Result<()> {
                     // }
         }
     }
-    update_progress(&conn, &save_path_str, &write_progress)?;
+    if write_progress.len() == 1
+        && write_progress[0].start == 0
+        && write_progress[0].end == info.file_size
+    {
+        remove_progress(&conn, &save_path_str)?;
+    } else {
+        update_progress(&conn, &save_path_str, &write_progress)?;
+    }
     draw_progress::draw_progress(
         start,
         info.file_size,

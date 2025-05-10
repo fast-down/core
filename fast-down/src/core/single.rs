@@ -28,7 +28,7 @@ pub fn download(
 ) -> Result<DownloadResult> {
     let url = url.into_url()?;
     let (tx, event_chain) = crossbeam_channel::unbounded();
-    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(Vec<Progress>, Bytes)>();
+    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(Progress, Bytes)>();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
         for (spin, data) in rx_write {
@@ -89,7 +89,7 @@ pub fn download(
             if len == 0 {
                 break;
             }
-            let span = vec![downloaded..(downloaded + len)];
+            let span = downloaded..(downloaded + len);
             tx.send(Event::DownloadProgress(span.clone())).unwrap();
             tx_write
                 .send((span, buffer.clone().split_to(len).freeze()))

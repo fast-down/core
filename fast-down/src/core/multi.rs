@@ -26,7 +26,7 @@ pub fn download(
 ) -> Result<DownloadResult> {
     let url = url.into_url()?;
     let (tx, event_chain) = crossbeam_channel::unbounded();
-    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(Vec<Progress>, Bytes)>();
+    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(Progress, Bytes)>();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
         for (spin, data) in rx_write {
@@ -60,19 +60,19 @@ pub fn download(
                 return;
             }
             let mut start = task.start();
-            let end = task.end();
-            if start >= end {
+            if start >= task.end() {
                 if get_task() {
                     continue;
                 }
                 tx.send(Event::Finished(id)).unwrap();
-                break;
+                return;
             }
-            let download_range = &tasks_clone.get_range(start..end);
+            let download_range = &tasks_clone.get_range(start..task.end());
             let mut range_size = 0;
             let start_point = start;
             for range in download_range {
                 range_size += range.total();
+                let header_range_value = format!("bytes={}-{}", range.start, range.end - 1);
                 let mut response = loop {
                     if !running.load(Ordering::Relaxed) {
                         tx.send(Event::Abort(id)).unwrap();
@@ -82,10 +82,7 @@ pub fn download(
                     match options
                         .client
                         .get(url.clone())
-                        .header(
-                            header::RANGE,
-                            format!("bytes={}-{}", range.start, range.end - 1),
-                        )
+                        .header(header::RANGE, &header_range_value)
                         .send()
                     {
                         Ok(response) if response.status() == StatusCode::PARTIAL_CONTENT => {
@@ -111,16 +108,15 @@ pub fn download(
                     if start >= end {
                         break;
                     }
-                    let remain = end - start;
-                    let expect_len = remain.min(options.download_buffer_size);
+                    let expect_len = options.download_buffer_size.min(end - start);
                     task.fetch_add_start(expect_len);
+                    unsafe { buffer.set_len(expect_len) }
                     let len = loop {
                         if !running.load(Ordering::Relaxed) {
                             task.fetch_sub_start(expect_len);
                             tx.send(Event::Abort(id)).unwrap();
                             return;
                         }
-                        unsafe { buffer.set_len(expect_len) }
                         match response.read(&mut buffer) {
                             Ok(len) => break len,
                             Err(e) => {
@@ -136,22 +132,9 @@ pub fn download(
                     };
                     if expect_len > len {
                         task.fetch_sub_start(expect_len - len);
-                    } else if expect_len < len {
-                        tx.send(Event::DownloadError(
-                            id,
-                            eyre!(
-                                "Downloaded more data than expected: {} > {}",
-                                len,
-                                expect_len
-                            ),
-                        ))
-                        .unwrap();
-                        task.fetch_sub_start(expect_len);
-                        continue 'retry;
                     }
-                    let chunk_end = (start + len).min(task.end());
-                    let len = chunk_end - start;
-                    let span = tasks_clone.get_range(start..chunk_end);
+                    todo!("此处逻辑有问题");
+                    let span = range.start..range.start + len;
                     tx.send(Event::DownloadProgress(span.clone())).unwrap();
                     tx_write
                         .send((span, buffer.clone().split_to(len).freeze()))
@@ -259,15 +242,11 @@ mod tests {
         let mut write_progress: Vec<Progress> = Vec::new();
         for e in event_chain {
             match e {
-                Event::DownloadProgress(ps) => {
-                    for p in ps {
-                        download_progress.merge_progress(p);
-                    }
+                Event::DownloadProgress(p) => {
+                    download_progress.merge_progress(p);
                 }
-                Event::WriteProgress(ps) => {
-                    for p in ps {
-                        write_progress.merge_progress(p);
-                    }
+                Event::WriteProgress(p) => {
+                    write_progress.merge_progress(p);
                 }
                 _ => {}
             }
@@ -357,15 +336,11 @@ mod tests {
         let mut write_progress: Vec<Progress> = Vec::new();
         for e in event_chain {
             match e {
-                Event::DownloadProgress(ps) => {
-                    for p in ps {
-                        download_progress.merge_progress(p);
-                    }
+                Event::DownloadProgress(p) => {
+                    download_progress.merge_progress(p);
                 }
-                Event::WriteProgress(ps) => {
-                    for p in ps {
-                        write_progress.merge_progress(p);
-                    }
+                Event::WriteProgress(p) => {
+                    write_progress.merge_progress(p);
                 }
                 _ => {}
             }
@@ -459,15 +434,11 @@ mod tests {
         let mut write_progress: Vec<Progress> = Vec::new();
         for e in event_chain {
             match e {
-                Event::DownloadProgress(ps) => {
-                    for p in ps {
-                        download_progress.merge_progress(p);
-                    }
+                Event::DownloadProgress(p) => {
+                    download_progress.merge_progress(p);
                 }
-                Event::WriteProgress(ps) => {
-                    for p in ps {
-                        write_progress.merge_progress(p);
-                    }
+                Event::WriteProgress(p) => {
+                    write_progress.merge_progress(p);
                 }
                 _ => {}
             }
@@ -522,15 +493,11 @@ mod tests {
         let mut write_progress: Vec<Progress> = Vec::new();
         for e in event_chain {
             match e {
-                Event::DownloadProgress(ps) => {
-                    for p in ps {
-                        download_progress.merge_progress(p);
-                    }
+                Event::DownloadProgress(p) => {
+                    download_progress.merge_progress(p);
                 }
-                Event::WriteProgress(ps) => {
-                    for p in ps {
-                        write_progress.merge_progress(p);
-                    }
+                Event::WriteProgress(p) => {
+                    write_progress.merge_progress(p);
                 }
                 _ => {}
             }

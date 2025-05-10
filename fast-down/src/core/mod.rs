@@ -1,8 +1,6 @@
-use std::thread::JoinHandle;
-
-use crossbeam_channel::Receiver;
-
 use crate::Event;
+use crossbeam_channel::Receiver;
+use std::thread::JoinHandle;
 
 pub mod auto;
 #[cfg(feature = "file")]
