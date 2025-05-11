@@ -1,7 +1,3 @@
-extern crate alloc;
-use alloc::format;
-use alloc::string::String;
-
 pub fn format_file_size(mut size: f64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
     const LEN: usize = UNITS.len();

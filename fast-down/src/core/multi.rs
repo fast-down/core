@@ -68,10 +68,7 @@ pub fn download(
                 return;
             }
             let download_range = &tasks_clone.get_range(start..task.end());
-            let mut range_size = 0;
-            let start_point = start;
             for range in download_range {
-                range_size += range.total();
                 let header_range_value = format!("bytes={}-{}", range.start, range.end - 1);
                 let mut response = loop {
                     if !running.load(Ordering::Relaxed) {
@@ -99,16 +96,14 @@ pub fn download(
                 };
                 tx.send(Event::Downloading(id)).unwrap();
                 let mut buffer = BytesMut::with_capacity(options.download_buffer_size);
+                let total = range.total();
+                let mut downloaded = 0;
                 loop {
                     if !running.load(Ordering::Relaxed) {
                         tx.send(Event::Abort(id)).unwrap();
                         return;
                     }
-                    let end = task.end().min(start_point + range_size);
-                    if start >= end {
-                        break;
-                    }
-                    let expect_len = options.download_buffer_size.min(end - start);
+                    let expect_len = options.download_buffer_size.min(total - downloaded);
                     task.fetch_add_start(expect_len);
                     unsafe { buffer.set_len(expect_len) }
                     let len = loop {
@@ -133,13 +128,26 @@ pub fn download(
                     if expect_len > len {
                         task.fetch_sub_start(expect_len - len);
                     }
-                    todo!("此处逻辑有问题");
-                    let span = range.start..range.start + len;
+                    if len == 0 {
+                        break;
+                    }
+                    let range_start = range.start + downloaded;
+                    downloaded += len;
+                    let range_end = range.start + downloaded;
+                    let span = range_start..range_end.min(tasks_clone.get(task.end()));
+                    let len = span.total();
                     tx.send(Event::DownloadProgress(span.clone())).unwrap();
                     tx_write
                         .send((span, buffer.clone().split_to(len).freeze()))
                         .unwrap();
                     start += len;
+                    if start >= task.end() {
+                        if get_task() {
+                            continue 'retry;
+                        }
+                        tx.send(Event::Finished(id)).unwrap();
+                        return;
+                    }
                 }
             }
         }),

@@ -105,7 +105,7 @@ mod tests {
         let mut writer = RandFileWriter::new(temp_file.reopen()?, 10)?;
 
         // 写入数据
-        let data = Bytes::from("012345");
+        let data = Bytes::from("234");
         let range = 2..5;
         writer.write_randomly(range, data)?;
         writer.flush()?;
@@ -113,7 +113,7 @@ mod tests {
         // 验证文件内容
         let mut file_content = Vec::new();
         File::open(&file_path)?.read_to_end(&mut file_content)?;
-        assert_eq!(file_content, b"\0\0012\0\0\0\0\0");
+        assert_eq!(file_content, b"\0\0234\0\0\0\0\0");
 
         Ok(())
     }
