@@ -15,7 +15,11 @@ use fmt_size::format_file_size;
 use home::home_dir;
 use path_clean::clean;
 use persist::{init_db, init_progress, remove_progress, update_progress};
-use reqwest::{blocking::Client, Proxy};
+use reqwest::{
+    blocking::Client,
+    header::{self, HeaderName, HeaderValue},
+    Proxy,
+};
 use reverse_progress::reverse_progress;
 use std::{
     env,
@@ -25,6 +29,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use url::Url;
 
 /// 超级快的下载器
 #[derive(Parser, Debug)]
@@ -81,6 +86,10 @@ pub struct Args {
     /// 数据库存储路径
     #[arg(long)]
     pub db_path: Option<String>,
+
+    /// 不模拟浏览器行为
+    #[arg(long, default_value_t = false)]
+    pub no_browser: bool,
 }
 
 impl Args {
@@ -100,7 +109,44 @@ impl Args {
 fn main() -> Result<()> {
     color_eyre::install()?;
     let args = Args::parse();
-    let headers = build_headers(&args.headers)?;
+    let mut headers = build_headers(&args.headers)?;
+    if !args.no_browser {
+        let url = Url::parse(&args.url)?;
+        headers
+            .entry(header::ACCEPT)
+            .or_insert(HeaderValue::from_static("*/*"));
+        headers
+            .entry(header::ACCEPT_ENCODING)
+            .or_insert(HeaderValue::from_static("gzip, deflate, br, zstd"));
+        headers
+            .entry(header::CONNECTION)
+            .or_insert(HeaderValue::from_static("keep-alive"));
+        headers
+            .entry(header::HOST)
+            .or_insert(HeaderValue::from_str(url.host_str().unwrap_or(&args.url))?);
+        headers
+            .entry(header::ORIGIN)
+            .or_insert(HeaderValue::from_str(
+                url.origin().ascii_serialization().as_str(),
+            )?);
+        headers
+            .entry(header::REFERER)
+            .or_insert(HeaderValue::from_str(&args.url)?);
+        headers
+            .entry(header::USER_AGENT)
+            .or_insert(HeaderValue::from_static(include_str!("./default_ua.txt")));
+        headers
+            .entry(HeaderName::from_static("sec-ch-ua"))
+            .or_insert(HeaderValue::from_static(
+                "\"Not)A;Brand\";v=\"99\", \"Google Chrome\";v=\"127\", \"Chromium\";v=\"127\"",
+            ));
+        headers
+            .entry(HeaderName::from_static("sec-ch-ua-mobile"))
+            .or_insert(HeaderValue::from_static("?0"));
+        headers
+            .entry(HeaderName::from_static("sec-ch-ua-platform"))
+            .or_insert(HeaderValue::from_static("\"Windows\""));
+    }
     let mut client = Client::builder().default_headers(headers);
     if let Some(ref proxy) = args.proxy {
         client = client.proxy(Proxy::all(proxy)?);
