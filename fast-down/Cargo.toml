@@ -1,6 +1,6 @@
 [package]
 name = "fast-down"
-version = "0.4.0"
+version = "0.5.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -17,7 +17,7 @@ categories = ["network-programming", "concurrency"]
 bytes = "1.10.1"
 color-eyre = { workspace = true }
 content_disposition = "0.4.0"
-fast-steal = "3.0.4"
+fast-steal = "3.1.0"
 crossbeam-channel = "0.5.14"
 memmap2 = { version = "0.9.5", optional = true }
 reqwest = { workspace = true }

@@ -53,6 +53,7 @@ pub fn download(
     let running_clone = running.clone();
     tasks.spawn(
         options.threads,
+        options.download_buffer_size * 2,
         |executor| thread::spawn(move || executor.run()),
         action::from_fn(move |id, task, get_task| 'retry: loop {
             if !running.load(Ordering::Relaxed) {

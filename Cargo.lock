@@ -441,7 +441,7 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fast-down"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "color-eyre",
@@ -474,9 +474,9 @@ dependencies = [
 
 [[package]]
 name = "fast-steal"
-version = "3.0.4"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56335db1fb4e3bd5a572b7307c5278615d484f1f2bbf2b1c9305aff0c10cddaa"
+checksum = "95b3233de295daa4ab1ce302fb739db26028a7cc57ba2d36c58e2ee52bd00090"
 dependencies = [
  "bumpalo",
  "spin",
