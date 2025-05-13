@@ -90,6 +90,14 @@ pub struct Args {
     /// 不模拟浏览器行为
     #[arg(long, default_value_t = false)]
     pub no_browser: bool,
+
+    /// 全部确认
+    #[arg(short, long, default_value_t = false)]
+    pub yes: bool,
+
+    /// 全部拒绝
+    #[arg(long, default_value_t = false)]
+    pub no: bool,
 }
 
 impl Args {
@@ -207,59 +215,73 @@ fn main() -> Result<()> {
                         format_file_size(info.file_size as f64),
                         downloaded * 100 / info.file_size
                     );
-                    if progress.total_size != info.file_size {
-                        eprint!(
-                            "原文件大小: {}\n现文件大小: {}\n文件大小不一致，是否继续？(y/N) ",
-                            progress.total_size, info.file_size
-                        );
-                        io::stdout().flush()?;
-                        let mut input = String::new();
-                        io::stdin().read_line(&mut input)?;
-                        match input.trim().to_lowercase().as_str() {
-                            "y" => {}
-                            "n" | "" => {
-                                println!("下载取消");
+                    if !args.yes {
+                        if progress.total_size != info.file_size {
+                            eprint!(
+                                "原文件大小: {}\n现文件大小: {}\n文件大小不一致，是否继续？(y/N) ",
+                                progress.total_size, info.file_size
+                            );
+                            if args.no {
                                 return Ok(());
                             }
-                            _ => return Err(eyre!("无效输入，下载取消")),
+                            io::stdout().flush()?;
+                            let mut input = String::new();
+                            io::stdin().read_line(&mut input)?;
+                            match input.trim().to_lowercase().as_str() {
+                                "y" => {}
+                                "n" | "" => {
+                                    println!("下载取消");
+                                    return Ok(());
+                                }
+                                _ => return Err(eyre!("无效输入，下载取消")),
+                            }
                         }
-                    }
-                    if progress.etag != info.etag {
-                        eprint!(
+                        if progress.etag != info.etag {
+                            eprint!(
                             "原文件 etag: {:?}\n现文件 etag: {:?}\n文件 etag 不一致，是否继续？(y/N) ",
                             progress.etag, info.etag
-                        );
-                        io::stdout().flush()?;
-                        let mut input = String::new();
-                        io::stdin().read_line(&mut input)?;
-                        match input.trim().to_lowercase().as_str() {
-                            "y" => {}
-                            "n" | "" => {
-                                println!("下载取消");
+                            );
+                            if args.no {
                                 return Ok(());
                             }
-                            _ => return Err(eyre!("无效输入，下载取消")),
+                            io::stdout().flush()?;
+                            let mut input = String::new();
+                            io::stdin().read_line(&mut input)?;
+                            match input.trim().to_lowercase().as_str() {
+                                "y" => {}
+                                "n" | "" => {
+                                    println!("下载取消");
+                                    return Ok(());
+                                }
+                                _ => return Err(eyre!("无效输入，下载取消")),
+                            }
                         }
-                    }
-                    if progress.last_modified != info.last_modified {
-                        eprint!("原文件最后编辑时间: {:?}\n现文件最后编辑时间: {:?}\n文件最后编辑时间不一致，是否继续？(y/N) ", progress.last_modified, info.last_modified);
-                        io::stdout().flush()?;
-                        let mut input = String::new();
-                        io::stdin().read_line(&mut input)?;
-                        match input.trim().to_lowercase().as_str() {
-                            "y" => {}
-                            "n" | "" => {
-                                println!("下载取消");
+                        if progress.last_modified != info.last_modified {
+                            eprint!("原文件最后编辑时间: {:?}\n现文件最后编辑时间: {:?}\n文件最后编辑时间不一致，是否继续？(y/N) ", progress.last_modified, info.last_modified);
+                            if args.no {
                                 return Ok(());
                             }
-                            _ => return Err(eyre!("无效输入，下载取消")),
+                            io::stdout().flush()?;
+                            let mut input = String::new();
+                            io::stdin().read_line(&mut input)?;
+                            match input.trim().to_lowercase().as_str() {
+                                "y" => {}
+                                "n" | "" => {
+                                    println!("下载取消");
+                                    return Ok(());
+                                }
+                                _ => return Err(eyre!("无效输入，下载取消")),
+                            }
                         }
                     }
                 }
             }
         }
-        if !resume_download && !args.force {
+        if args.yes || !resume_download && !args.force {
             eprint!("文件已存在，是否覆盖？(y/N) ");
+            if args.no {
+                return Ok(());
+            }
             io::stdout().flush()?;
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
