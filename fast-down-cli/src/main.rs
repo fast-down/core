@@ -194,21 +194,65 @@ fn main() -> Result<()> {
     if save_path.try_exists()? {
         if args.resume && info.can_fast_download {
             if let Ok(Some(progress)) = persist::get_progress(&conn, &save_path_str) {
-                if progress.total_size == info.file_size {
-                    let downloaded = progress.progress.total();
-                    if downloaded < info.file_size {
-                        download_chunks = reverse_progress(&progress.progress, progress.total_size);
-                        write_progress = progress.progress.clone();
-                        get_progress = progress.progress;
-                        if !download_chunks.is_empty() {
-                            resume_download = true;
-                            println!("发现未完成的下载，将继续下载剩余部分");
-                            println!(
-                                "已下载: {} / {} ({}%)",
-                                format_file_size(downloaded as f64),
-                                format_file_size(info.file_size as f64),
-                                downloaded * 100 / info.file_size
-                            );
+                let downloaded = progress.progress.total();
+                if downloaded < info.file_size {
+                    download_chunks = reverse_progress(&progress.progress, info.file_size);
+                    write_progress = progress.progress.clone();
+                    get_progress = progress.progress;
+                    resume_download = true;
+                    println!("发现未完成的下载，将继续下载剩余部分");
+                    println!(
+                        "已下载: {} / {} ({}%)",
+                        format_file_size(downloaded as f64),
+                        format_file_size(info.file_size as f64),
+                        downloaded * 100 / info.file_size
+                    );
+                    if progress.total_size != info.file_size {
+                        eprint!(
+                            "原文件大小: {}\n现文件大小: {}\n文件大小不一致，是否继续？(y/N) ",
+                            progress.total_size, info.file_size
+                        );
+                        io::stdout().flush()?;
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input)?;
+                        match input.trim().to_lowercase().as_str() {
+                            "y" => {}
+                            "n" | "" => {
+                                println!("下载取消");
+                                return Ok(());
+                            }
+                            _ => return Err(eyre!("无效输入，下载取消")),
+                        }
+                    }
+                    if progress.etag != info.etag {
+                        eprint!(
+                            "原文件 etag: {:?}\n现文件 etag: {:?}\n文件 etag 不一致，是否继续？(y/N) ",
+                            progress.etag, info.etag
+                        );
+                        io::stdout().flush()?;
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input)?;
+                        match input.trim().to_lowercase().as_str() {
+                            "y" => {}
+                            "n" | "" => {
+                                println!("下载取消");
+                                return Ok(());
+                            }
+                            _ => return Err(eyre!("无效输入，下载取消")),
+                        }
+                    }
+                    if progress.last_modified != info.last_modified {
+                        eprint!("原文件最后编辑时间: {:?}\n现文件最后编辑时间: {:?}\n文件最后编辑时间不一致，是否继续？(y/N) ", progress.last_modified, info.last_modified);
+                        io::stdout().flush()?;
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input)?;
+                        match input.trim().to_lowercase().as_str() {
+                            "y" => {}
+                            "n" | "" => {
+                                println!("下载取消");
+                                return Ok(());
+                            }
+                            _ => return Err(eyre!("无效输入，下载取消")),
                         }
                     }
                 }
@@ -266,7 +310,13 @@ fn main() -> Result<()> {
     let mut last_db_update = Instant::now();
 
     if !resume_download {
-        init_progress(&conn, &save_path_str, info.file_size)?;
+        init_progress(
+            &conn,
+            &save_path_str,
+            info.file_size,
+            info.etag,
+            info.last_modified,
+        )?;
     }
 
     eprint!("\n\n");

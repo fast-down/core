@@ -8,6 +8,8 @@ use crate::{fmt_progress::fmt_progress, str_to_progress::str_to_progress};
 
 pub struct WriteProgress {
     pub total_size: usize,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
     pub progress: Vec<Progress>,
 }
 
@@ -32,19 +34,27 @@ pub fn init_db(db_path: &PathBuf) -> Result<Connection> {
             id INTEGER PRIMARY KEY,
             file_path TEXT NOT NULL UNIQUE,
             total_size INTEGER NOT NULL,
-            progress TEXT NOT NULL
+            etag TEXT,
+            last_modified TEXT,
+            progress BLOB NOT NULL
         )",
         (),
     )?;
     Ok(conn)
 }
 
-pub fn init_progress(conn: &Connection, file_path: &str, total_size: usize) -> Result<()> {
+pub fn init_progress(
+    conn: &Connection,
+    file_path: &str,
+    total_size: usize,
+    etag: Option<String>,
+    last_modified: Option<String>,
+) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO write_progress
-        (file_path, total_size, progress)
-        VALUES (?1, ?2, ?3)",
-        (file_path, total_size, ""),
+        (file_path, total_size, etag, last_modified, progress)
+        VALUES (?1, ?2, ?3, ?4, ?5)",
+        (file_path, total_size, etag, last_modified, ""),
     )?;
     Ok(())
 }
@@ -67,13 +77,15 @@ pub fn remove_progress(conn: &Connection, file_path: &str) -> Result<()> {
 
 pub fn get_progress(conn: &Connection, file_path: &str) -> Result<Option<WriteProgress>> {
     conn.query_row(
-        "SELECT total_size, progress
+        "SELECT total_size, etag, last_modified, progress
         FROM write_progress WHERE file_path = ?1",
         [file_path],
         |row| {
             Ok(WriteProgress {
                 total_size: row.get(0)?,
-                progress: str_to_progress(row.get(1)?),
+                etag: row.get(1)?,
+                last_modified: row.get(2)?,
+                progress: str_to_progress(row.get(3)?),
             })
         },
     )
