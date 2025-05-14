@@ -25,37 +25,30 @@ jobs:
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             archive-name: fast-down-linux-arm64
-            filename: fast-down
           # - build: linux-32bit
           #   os: ubuntu-latest
           #   target: i686-unknown-linux-gnu
           #   archive-name: fast-down-linux-32bit
-          #   filename: fast-down
           - build: linux-64bit
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive-name: fast-down-linux-64bit
-            filename: fast-down
           - build: macos-arm64
             os: macos-latest
             target: aarch64-apple-darwin
             archive-name: fast-down-macos-arm64
-            filename: fast-down
           - build: macos-64bit
             os: macos-latest
             target: x86_64-apple-darwin
             archive-name: fast-down-macos-64bit
-            filename: fast-down
           - build: windows-64bit
             os: windows-latest
             target: x86_64-pc-windows-msvc
             archive-name: fast-down-windows-64bit
-            filename: fast-down.exe
           - build: windows-32bit
             os: windows-latest
             target: i686-pc-windows-msvc
             archive-name: fast-down-windows-32bit
-            filename: fast-down.exe
       fail-fast: false
 
     steps:
@@ -72,21 +65,32 @@ jobs:
         env:
           RUST_BACKTRACE: 1
 
+      - name: Make output folder
+        run: |
+          mkdir output
+          cp fast-down-cli/config.ini
+
+      - name: Copy target to folder (Windows)
+        if: contains(matrix.build, 'windows')
+        run: cp target/${{ matrix.target }}/release/fast-down.exe output
+      
+      - name: Copy target to folder (Non-Windows)
+        if: ${{ !contains(matrix.build, 'windows') }}
+        run: cp target/${{ matrix.target }}/release/fast-down.exe output
+
       - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive-name }}
-          path: ./target/${{ matrix.target }}/release/${{ matrix.filename }}
+          path: output
 
-      - name: Rename binary (Windows)
-        if: contains(matrix.build, 'windows')
-        run: mv ./target/${{ matrix.target }}/release/${{ matrix.filename }} ./target/${{ matrix.target }}/release/${{ matrix.archive-name }}.exe
+      - name: Zip output folder (Windows)
+        run: Compress-Archive -Path ./output/* -DestinationPath ${{ matrix.archive-name }}.zip -CompressionLevel Optimal
 
-      - name: Rename binary (Non-Windows)
-        if: ${{ !contains(matrix.build, 'windows') }}
-        run: mv ./target/${{ matrix.target }}/release/${{ matrix.filename }} ./target/${{ matrix.target }}/release/${{ matrix.archive-name }}
+      - name: Zip output folder (Non-Windows)
+        run: zip -r -9 ${{ matrix.archive-name }}.zip output
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ./target/${{ matrix.target }}/release/${{ matrix.archive-name }}*
+          files: ${{ matrix.archive-name }}.zip
