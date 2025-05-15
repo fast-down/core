@@ -1,15 +1,19 @@
 use super::DownloadResult;
-use crate::{Event, Flush, Progress, RandWriter, Total};
+use crate::{Event, Progress, RandWriter, Total};
 use bytes::{Bytes, BytesMut};
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use fast_steal::{sync::action, sync::Spawn, TaskList};
 use reqwest::{blocking::Client, header, IntoUrl, StatusCode};
-use std::io::{ErrorKind, Read};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
+use std::{
+    io::{ErrorKind, Read},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
 
 pub struct DownloadOptions {
     pub threads: usize,
@@ -21,7 +25,7 @@ pub struct DownloadOptions {
 
 pub fn download(
     url: impl IntoUrl,
-    mut writer: impl RandWriter + Flush + 'static,
+    mut writer: impl RandWriter + 'static,
     options: DownloadOptions,
 ) -> Result<DownloadResult> {
     let url = url.into_url()?;
@@ -153,13 +157,13 @@ pub fn download(
             }
         }),
     );
-    Ok(DownloadResult {
+    Ok(DownloadResult::new(
         event_chain,
         handle,
-        cancel_fn: Box::new(move || {
+        Box::new(move || {
             running_clone.store(false, Ordering::Relaxed);
         }),
-    })
+    ))
 }
 
 #[cfg(test)]
@@ -230,11 +234,7 @@ mod tests {
 
         let client = Client::new();
         let download_chunks = vec![0..mock_body.len()];
-        let DownloadResult {
-            event_chain,
-            handle,
-            cancel_fn: _,
-        } = download(
+        let result = download(
             format!("{}/mutli-2", server.url()),
             RandFileWriter::new(file, mock_body.len()).unwrap(),
             DownloadOptions {
@@ -249,7 +249,7 @@ mod tests {
 
         let mut download_progress: Vec<Progress> = Vec::new();
         let mut write_progress: Vec<Progress> = Vec::new();
-        for e in event_chain {
+        for e in &result {
             match e {
                 Event::DownloadProgress(p) => {
                     download_progress.merge_progress(p);
@@ -265,7 +265,7 @@ mod tests {
         assert_eq!(download_progress, download_chunks);
         assert_eq!(write_progress, download_chunks);
 
-        handle.join().unwrap();
+        result.join().unwrap();
 
         let output = {
             let mut data = Vec::with_capacity(mock_body.len());
@@ -324,11 +324,7 @@ mod tests {
 
         let client = Client::new();
         let download_chunks = vec![10..80, 100..300, 1000..2000];
-        let DownloadResult {
-            event_chain,
-            handle,
-            cancel_fn: _,
-        } = download(
+        let result = download(
             format!("{}/mutli-2", server.url()),
             RandFileWriter::new(file, mock_body.len()).unwrap(),
             DownloadOptions {
@@ -343,7 +339,7 @@ mod tests {
 
         let mut download_progress: Vec<Progress> = Vec::new();
         let mut write_progress: Vec<Progress> = Vec::new();
-        for e in event_chain {
+        for e in &result {
             match e {
                 Event::DownloadProgress(p) => {
                     download_progress.merge_progress(p);
@@ -359,7 +355,7 @@ mod tests {
         assert_eq!(download_progress, download_chunks);
         assert_eq!(write_progress, download_chunks);
 
-        handle.join().unwrap();
+        result.join().unwrap();
 
         let output = {
             let mut data = Vec::with_capacity(mock_body.len());
@@ -418,11 +414,7 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let DownloadResult {
-            event_chain,
-            handle,
-            cancel_fn,
-        } = download(
+        let result = download(
             format!("{}/mutli-3", server.url()),
             RandFileWriter::new(file, mock_body.len()).unwrap(),
             DownloadOptions {
@@ -434,14 +426,15 @@ mod tests {
             },
         )
         .unwrap();
+        let result_clone = result.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(1));
-            cancel_fn()
+            result_clone.cancel()
         });
 
         let mut download_progress: Vec<Progress> = Vec::new();
         let mut write_progress: Vec<Progress> = Vec::new();
-        for e in event_chain {
+        for e in &result {
             match e {
                 Event::DownloadProgress(p) => {
                     download_progress.merge_progress(p);
@@ -456,7 +449,7 @@ mod tests {
         dbg!(&write_progress);
         assert_eq!(download_progress, write_progress);
 
-        handle.join().unwrap();
+        result.join().unwrap();
         let mut file_content = Vec::new();
         File::open(temp_file.path())
             .unwrap()
@@ -481,11 +474,7 @@ mod tests {
         let file = temp_file.reopen().unwrap();
         let client = Client::new();
         let download_chunks = reverse_progress(&write_progress, mock_body.len());
-        let DownloadResult {
-            event_chain,
-            handle,
-            cancel_fn: _,
-        } = download(
+        let result = download(
             format!("{}/mutli-3", server.url()),
             RandFileWriter::new(file, mock_body.len()).unwrap(),
             DownloadOptions {
@@ -500,7 +489,7 @@ mod tests {
 
         let mut download_progress: Vec<Progress> = Vec::new();
         let mut write_progress: Vec<Progress> = Vec::new();
-        for e in event_chain {
+        for e in &result {
             match e {
                 Event::DownloadProgress(p) => {
                     download_progress.merge_progress(p);
@@ -516,7 +505,7 @@ mod tests {
         assert_eq!(download_progress, download_chunks);
         assert_eq!(write_progress, download_chunks);
 
-        handle.join().unwrap();
+        result.join().unwrap();
 
         let mut file_content = Vec::new();
         File::open(temp_file.path())

@@ -1,19 +1,17 @@
 use super::DownloadResult;
-use crate::Event;
-use crate::Flush;
-use crate::Progress;
-use crate::SeqWriter;
-use bytes::Bytes;
-use bytes::BytesMut;
+use crate::{Event, Progress, SeqWriter};
+use bytes::{Bytes, BytesMut};
 use color_eyre::eyre::Result;
 use reqwest::{blocking::Client, IntoUrl};
-use std::io::ErrorKind;
-use std::io::Read;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
+use std::{
+    io::{ErrorKind, Read},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
 
 pub struct DownloadOptions {
     pub client: Client,
@@ -23,7 +21,7 @@ pub struct DownloadOptions {
 
 pub fn download(
     url: impl IntoUrl,
-    mut writer: impl SeqWriter + Flush + 'static,
+    mut writer: impl SeqWriter + 'static,
     options: DownloadOptions,
 ) -> Result<DownloadResult> {
     let url = url.into_url()?;
@@ -98,13 +96,13 @@ pub fn download(
         }
         tx.send(Event::Finished(0)).unwrap();
     });
-    Ok(DownloadResult {
+    Ok(DownloadResult::new(
         event_chain,
         handle,
-        cancel_fn: Box::new(move || {
+        Box::new(move || {
             running_clone.store(false, Ordering::Relaxed);
         }),
-    })
+    ))
 }
 
 #[cfg(test)]
@@ -135,11 +133,7 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let DownloadResult {
-            event_chain,
-            handle,
-            cancel_fn: _,
-        } = download(
+        let result = download(
             format!("{}/small", server.url()),
             SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
@@ -150,9 +144,9 @@ mod tests {
         )
         .unwrap();
 
-        let progress_events: Vec<_> = event_chain.iter().collect();
+        let progress_events: Vec<_> = result.clone().collect();
         dbg!(&progress_events);
-        handle.join().unwrap();
+        result.join().unwrap();
 
         let mut file_content = Vec::new();
         File::open(temp_file.path())
@@ -201,11 +195,7 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let DownloadResult {
-            event_chain,
-            handle,
-            cancel_fn: _,
-        } = download(
+        let result = download(
             format!("{}/empty", server.url()),
             SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
@@ -216,8 +206,8 @@ mod tests {
         )
         .unwrap();
 
-        let progress_events: Vec<_> = event_chain.iter().collect();
-        handle.join().unwrap();
+        let progress_events: Vec<_> = result.clone().collect();
+        result.join().unwrap();
 
         // 验证空文件
         let mut file_content = Vec::new();
@@ -267,11 +257,7 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let DownloadResult {
-            event_chain,
-            handle,
-            cancel_fn: _,
-        } = download(
+        let result = download(
             format!("{}/large", server.url()),
             SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
@@ -282,8 +268,8 @@ mod tests {
         )
         .unwrap();
 
-        let progress_events: Vec<_> = event_chain.iter().collect();
-        handle.join().unwrap();
+        let progress_events: Vec<_> = result.clone().collect();
+        result.join().unwrap();
 
         // 验证文件内容
         let mut file_content = Vec::new();
@@ -333,11 +319,7 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let DownloadResult {
-            event_chain,
-            handle,
-            cancel_fn: _,
-        } = download(
+        let result = download(
             format!("{}/exact_buffer_size_file", server.url()),
             SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
@@ -348,8 +330,8 @@ mod tests {
         )
         .unwrap();
 
-        let progress_events: Vec<_> = event_chain.iter().collect();
-        handle.join().unwrap();
+        let progress_events: Vec<_> = result.clone().collect();
+        result.join().unwrap();
 
         // 验证文件内容
         let mut file_content = Vec::new();

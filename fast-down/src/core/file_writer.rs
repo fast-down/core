@@ -1,4 +1,4 @@
-use crate::{Flush, Progress, RandWriter, SeqWriter};
+use crate::{Progress, RandWriter, SeqWriter};
 use bytes::Bytes;
 use color_eyre::Result;
 use memmap2::MmapMut;
@@ -25,9 +25,7 @@ impl SeqWriter for SeqFileWriter {
         self.buffer.write_all(&bytes)?;
         Ok(())
     }
-}
 
-impl Flush for SeqFileWriter {
     fn flush(&mut self) -> Result<()> {
         self.buffer.flush()?;
         Ok(())
@@ -53,9 +51,7 @@ impl RandWriter for RandFileWriter {
         self.mmap[range].copy_from_slice(&bytes);
         Ok(())
     }
-}
 
-impl Flush for RandFileWriter {
     fn flush(&mut self) -> Result<()> {
         self.mmap.flush()?;
         Ok(())
@@ -66,7 +62,7 @@ impl Flush for RandFileWriter {
 #[cfg(feature = "file")]
 mod tests {
     use super::*;
-    use crate::{Flush, RandWriter, SeqWriter};
+    use crate::{RandWriter, SeqWriter};
     use bytes::Bytes;
     use std::{fs::File, io::Read};
     use tempfile::NamedTempFile;

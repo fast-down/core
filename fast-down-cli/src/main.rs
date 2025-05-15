@@ -10,7 +10,7 @@ mod str_to_progress;
 use build_headers::build_headers;
 use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
-use fast_down::{DownloadOptions, DownloadResult, Event, MergeProgress, Progress, Total};
+use fast_down::{DownloadOptions, Event, MergeProgress, Progress, Total};
 use fmt_size::format_file_size;
 use home::home_dir;
 use path_clean::clean;
@@ -25,7 +25,6 @@ use std::{
     env,
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -297,11 +296,7 @@ fn main() -> Result<()> {
     }
 
     let start = Instant::now();
-    let DownloadResult {
-        event_chain,
-        handle,
-        cancel_fn,
-    } = fast_down::download_file(
+    let result = fast_down::download_file(
         &info.final_url,
         &save_path,
         DownloadOptions {
@@ -316,11 +311,9 @@ fn main() -> Result<()> {
         },
     )?;
 
-    let cancel_fn = Arc::new(Mutex::new(Some(cancel_fn)));
+    let result_clone = result.clone();
     ctrlc::set_handler(move || {
-        if let Some(f) = cancel_fn.lock().unwrap().take() {
-            f();
-        }
+        result_clone.cancel();
     })
     .expect("Error setting Ctrl-C handler");
 
@@ -342,7 +335,7 @@ fn main() -> Result<()> {
     }
 
     eprint!("\n\n");
-    for e in event_chain {
+    for e in &result {
         match e {
             Event::DownloadProgress(p) => {
                 get_progress.merge_progress(p);
@@ -426,6 +419,6 @@ fn main() -> Result<()> {
         get_progress.total(),
         &mut avg_get_speed,
     );
-    handle.join().unwrap();
+    result.join().unwrap();
     Ok(())
 }

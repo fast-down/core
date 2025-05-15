@@ -29,5 +29,6 @@ mockito = "1.6.1"
 tempfile = "3.18.0"
 
 [features]
+default = ["file"]
 file = ["memmap2"]
 memmap2 = ["dep:memmap2"]

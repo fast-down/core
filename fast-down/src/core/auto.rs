@@ -1,5 +1,5 @@
 use super::{multi, single, DownloadResult};
-use crate::{Flush, Progress, RandWriter, SeqWriter};
+use crate::{Progress, RandWriter, SeqWriter};
 use color_eyre::eyre::Result;
 use core::time::Duration;
 use reqwest::{blocking::Client, IntoUrl};
@@ -16,8 +16,8 @@ pub struct DownloadOptions {
 
 pub fn download(
     url: impl IntoUrl,
-    seq_writer: impl SeqWriter + Flush + 'static,
-    rand_writer: impl RandWriter + Flush + 'static,
+    seq_writer: impl SeqWriter + 'static,
+    rand_writer: impl RandWriter + 'static,
     options: DownloadOptions,
 ) -> Result<DownloadResult> {
     if options.can_fast_download {
