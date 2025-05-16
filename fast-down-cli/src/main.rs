@@ -205,6 +205,7 @@ fn main() -> Result<()> {
                                 progress.total_size, info.file_size
                             );
                             if args.no {
+                                eprintln!("N");
                                 return Ok(());
                             }
                             io::stdout().flush()?;
@@ -225,6 +226,7 @@ fn main() -> Result<()> {
                                 progress.etag, info.etag
                             );
                             if args.no {
+                                eprintln!("N");
                                 return Ok(());
                             }
                             io::stdout().flush()?;
@@ -242,6 +244,7 @@ fn main() -> Result<()> {
                         if progress.last_modified != info.last_modified {
                             eprint!("原文件最后编辑时间: {:?}\n现文件最后编辑时间: {:?}\n文件最后编辑时间不一致，是否继续？(y/N) ", progress.last_modified, info.last_modified);
                             if args.no {
+                                eprintln!("N");
                                 return Ok(());
                             }
                             io::stdout().flush()?;
@@ -263,6 +266,7 @@ fn main() -> Result<()> {
         if !args.yes && !resume_download && !args.force {
             eprint!("文件已存在，是否覆盖？(y/N) ");
             if args.no {
+                eprintln!("N");
                 return Ok(());
             }
             io::stdout().flush()?;
