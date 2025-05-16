@@ -68,15 +68,15 @@ jobs:
       - name: Make output folder
         run: |
           mkdir output
-          cp fast-down-cli/config.ini
+          cp fast-down-cli/config.ini output/
 
       - name: Copy target to folder (Windows)
         if: contains(matrix.build, 'windows')
         run: cp target/${{ matrix.target }}/release/fast-down.exe output
-      
+
       - name: Copy target to folder (Non-Windows)
         if: ${{ !contains(matrix.build, 'windows') }}
-        run: cp target/${{ matrix.target }}/release/fast-down.exe output
+        run: cp target/${{ matrix.target }}/release/fast-down output
 
       - name: Upload archive
         uses: actions/upload-artifact@v4
@@ -84,11 +84,17 @@ jobs:
           name: ${{ matrix.archive-name }}
           path: output
 
-      - name: Zip output folder (Windows)
-        run: Compress-Archive -Path ./output/* -DestinationPath ${{ matrix.archive-name }}.zip -CompressionLevel Optimal
+      - name: Create ZIP (Windows)
+        if: contains(matrix.build, 'windows')
+        run: |
+          cd output
+          Compress-Archive -Path * -DestinationPath ../${{ matrix.archive-name }}.zip
 
-      - name: Zip output folder (Non-Windows)
-        run: zip -r -9 ${{ matrix.archive-name }}.zip output
+      - name: Create ZIP (Non-Windows)
+        if: ${{ !contains(matrix.build, 'windows') }}
+        run: |
+          cd output
+          zip -r -9 ../${{ matrix.archive-name }}.zip *
 
       - name: Release
         uses: softprops/action-gh-release@v2
