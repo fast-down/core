@@ -12,9 +12,8 @@ use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
 use fast_down::{DownloadOptions, Event, MergeProgress, Progress, Total};
 use fmt_size::format_file_size;
-use home::home_dir;
 use path_clean::clean;
-use persist::{init_db, init_progress, remove_progress, update_progress};
+use persist::{init_db, init_progress, update_progress};
 use reqwest::{
     blocking::Client,
     header::{self, HeaderName, HeaderValue},
@@ -24,7 +23,7 @@ use reverse_progress::reverse_progress;
 use std::{
     env,
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::Path,
     thread,
     time::{Duration, Instant},
 };
@@ -82,10 +81,6 @@ pub struct Args {
     #[arg(long, default_value_t = 500)]
     pub retry_gap: u64,
 
-    /// 数据库存储路径
-    #[arg(long)]
-    pub db_path: Option<String>,
-
     /// 不模拟浏览器行为
     #[arg(long, default_value_t = false)]
     pub no_browser: bool,
@@ -97,20 +92,10 @@ pub struct Args {
     /// 全部拒绝
     #[arg(long, default_value_t = false)]
     pub no: bool,
-}
 
-impl Args {
-    pub fn db_path(&self) -> PathBuf {
-        match &self.db_path {
-            Some(path) => PathBuf::from(path),
-            None => {
-                let mut path = home_dir().unwrap_or(PathBuf::from("."));
-                path.push("fast-down");
-                path.push("fast-down.db");
-                path
-            }
-        }
-    }
+    /// 详细输出
+    #[arg(short, long, default_value_t = false)]
+    pub verbose: bool,
 }
 
 fn main() -> Result<()> {
@@ -144,9 +129,9 @@ fn main() -> Result<()> {
             .or_insert(HeaderValue::from_static(include_str!("./default_ua.txt")));
         headers
             .entry(HeaderName::from_static("sec-ch-ua"))
-            .or_insert(HeaderValue::from_static(
-                "\"Not)A;Brand\";v=\"99\", \"Google Chrome\";v=\"127\", \"Chromium\";v=\"127\"",
-            ));
+            .or_insert(HeaderValue::from_static(include_str!(
+                "./default_sec_ch_ua.txt"
+            )));
         headers
             .entry(HeaderName::from_static("sec-ch-ua-mobile"))
             .or_insert(HeaderValue::from_static("?0"));
@@ -159,7 +144,7 @@ fn main() -> Result<()> {
         client = client.proxy(Proxy::all(proxy)?);
     }
     let client = client.build()?;
-    let conn = init_db(&args.db_path())?;
+    let conn = init_db()?;
 
     let info = loop {
         match fast_down::get_url_info(&args.url, &client) {
@@ -192,11 +177,10 @@ fn main() -> Result<()> {
         threads
     );
 
-    // 检查是否有未完成的下载
     let mut download_chunks = vec![0..info.file_size];
     let mut resume_download = false;
-    let mut write_progress: Vec<Progress> = Vec::new();
-    let mut get_progress: Vec<Progress> = Vec::new();
+    let mut write_progress: Vec<Progress> = Vec::with_capacity(threads);
+    let mut get_progress: Vec<Progress> = Vec::with_capacity(threads);
 
     if save_path.try_exists()? {
         if args.resume && info.can_fast_download {
@@ -237,8 +221,8 @@ fn main() -> Result<()> {
                         }
                         if progress.etag != info.etag {
                             eprint!(
-                            "原文件 etag: {:?}\n现文件 etag: {:?}\n文件 etag 不一致，是否继续？(y/N) ",
-                            progress.etag, info.etag
+                                "原文件 etag: {:?}\n现文件 etag: {:?}\n文件 etag 不一致，是否继续？(y/N) ",
+                                progress.etag, info.etag
                             );
                             if args.no {
                                 return Ok(());
@@ -276,7 +260,7 @@ fn main() -> Result<()> {
                 }
             }
         }
-        if args.yes || !resume_download && !args.force {
+        if !args.yes && !resume_download && !args.force {
             eprint!("文件已存在，是否覆盖？(y/N) ");
             if args.no {
                 return Ok(());
@@ -314,8 +298,7 @@ fn main() -> Result<()> {
     let result_clone = result.clone();
     ctrlc::set_handler(move || {
         result_clone.cancel();
-    })
-    .expect("Error setting Ctrl-C handler");
+    })?;
 
     let mut last_get_size = 0;
     let mut last_get_time = Instant::now();
@@ -381,34 +364,35 @@ fn main() -> Result<()> {
                     err
                 );
             }
-            _ => {} // Event::Connecting(id) => {
-                    //     print!(
-                    //         "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在连接中……\n\n\n",
-                    //         id
-                    //     );
-                    // }
-                    // Event::Finished(id) => {
-                    //     print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 完成任务\n\n\n", id);
-                    // }
-                    // Event::Abort(id) => {
-                    //     print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 已中断\n\n\n", id);
-                    // }
-                    // Event::Downloading(id) => {
-                    //     print!(
-                    //         "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在下载中……\n\n\n",
-                    //         id
-                    //     );
-                    // }
+            Event::Connecting(id) => {
+                if args.verbose {
+                    print!(
+                        "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在连接中……\n\n\n",
+                        id
+                    );
+                }
+            }
+            Event::Finished(id) => {
+                if args.verbose {
+                    print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 完成任务\n\n\n", id);
+                }
+            }
+            Event::Abort(id) => {
+                if args.verbose {
+                    print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 已中断\n\n\n", id);
+                }
+            }
+            Event::Downloading(id) => {
+                if args.verbose {
+                    print!(
+                        "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在下载中……\n\n\n",
+                        id
+                    );
+                }
+            }
         }
     }
-    if write_progress.len() == 1
-        && write_progress[0].start == 0
-        && write_progress[0].end == info.file_size
-    {
-        remove_progress(&conn, &save_path_str)?;
-    } else {
-        update_progress(&conn, &save_path_str, &write_progress)?;
-    }
+    update_progress(&conn, &save_path_str, &write_progress)?;
     draw_progress::draw_progress(
         start,
         info.file_size,
