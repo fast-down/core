@@ -169,12 +169,14 @@ fn main() -> Result<()> {
     let save_path_str = save_path.to_str().unwrap().to_string();
 
     println!(
-        "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}",
+        "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}\nETag: {:?}\nLast-Modified: {:?}\n",
         info.file_name,
         format_file_size(info.file_size as f64),
         info.file_size,
         save_path.to_str().unwrap(),
-        threads
+        threads,
+        info.etag,
+        info.last_modified
     );
 
     let mut download_chunks = vec![0..info.file_size];
@@ -222,9 +224,48 @@ fn main() -> Result<()> {
                         }
                         if progress.etag != info.etag {
                             eprint!(
-                                "原文件 etag: {:?}\n现文件 etag: {:?}\n文件 etag 不一致，是否继续？(y/N) ",
+                                "原文件 ETag: {:?}\n现文件 ETag: {:?}\n文件 ETag 不一致，是否继续？(y/N) ",
                                 progress.etag, info.etag
                             );
+                            if args.no {
+                                eprintln!("N");
+                                return Ok(());
+                            }
+                            io::stdout().flush()?;
+                            let mut input = String::new();
+                            io::stdin().read_line(&mut input)?;
+                            match input.trim().to_lowercase().as_str() {
+                                "y" => {}
+                                "n" | "" => {
+                                    println!("下载取消");
+                                    return Ok(());
+                                }
+                                _ => return Err(eyre!("无效输入，下载取消")),
+                            }
+                        } else if let Some(progress_etag) = progress.etag.as_ref() {
+                            if progress_etag.starts_with("W/") {
+                                eprint!(
+                                    "使用弱 ETag: {}，无法保证文件一致是否继续？(y/N) ",
+                                    progress_etag
+                                );
+                                if args.no {
+                                    eprintln!("N");
+                                    return Ok(());
+                                }
+                                io::stdout().flush()?;
+                                let mut input = String::new();
+                                io::stdin().read_line(&mut input)?;
+                                match input.trim().to_lowercase().as_str() {
+                                    "y" => {}
+                                    "n" | "" => {
+                                        println!("下载取消");
+                                        return Ok(());
+                                    }
+                                    _ => return Err(eyre!("无效输入，下载取消")),
+                                }
+                            }
+                        } else {
+                            eprint!("此文件无 ETag，无法保证文件一致是否继续？(y/N) ");
                             if args.no {
                                 eprintln!("N");
                                 return Ok(());
