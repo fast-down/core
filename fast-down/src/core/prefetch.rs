@@ -232,7 +232,7 @@ mod tests {
         match get_url_info(&format!("{}/404", server.url()), &client) {
             Ok(info) => assert!(false, "404 status code should not success: {:?}", info),
             Err(err) => {
-                let err = err.downcast::<reqwest::Error>().expect("reqwest error");
+                let err = err.downcast::<reqwest::Error>().expect("request error");
                 assert!(err.is_status(), "should be error about status code");
                 assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
             }
