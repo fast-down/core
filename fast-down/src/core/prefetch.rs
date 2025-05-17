@@ -75,12 +75,7 @@ pub fn get_url_info(url: &str, client: &Client) -> Result<UrlInfo> {
 
     let resp = match resp.error_for_status() {
         Ok(resp) => resp,
-        Err(err) => {
-            return match err.status() {
-                Some(StatusCode::NOT_IMPLEMENTED) => get_url_info_fallback(url, client),
-                _ => Err(err.into()),
-            };
-        }
+        Err(_) => return get_url_info_fallback(url, client),
     };
 
     let status = resp.status();
