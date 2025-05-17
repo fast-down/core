@@ -31,7 +31,7 @@ use url::Url;
 fn main() -> Result<()> {
     color_eyre::install()?;
     let mut args = Args::parse()?;
-    if !args.no_browser {
+    if args.browser {
         let url = Url::parse(&args.url)?;
         args.headers
             .entry(header::ORIGIN)

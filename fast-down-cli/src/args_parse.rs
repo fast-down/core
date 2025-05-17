@@ -14,11 +14,19 @@ struct Cli {
 
     /// 强制覆盖已有文件
     #[arg(short, long = "allow-overwrite")]
-    pub force: Option<bool>,
+    pub force: bool,
+
+    /// 不强制覆盖已有文件
+    #[arg(long = "no-allow-overwrite")]
+    pub no_force: bool,
 
     /// 断点续传
     #[arg(short = 'c', long = "continue")]
-    pub resume: Option<bool>,
+    pub resume: bool,
+
+    /// 不断点续传
+    #[arg(long = "no-continue")]
+    pub no_resume: bool,
 
     /// 保存目录
     #[arg(short = 'd', long = "dir")]
@@ -56,21 +64,37 @@ struct Cli {
     #[arg(long)]
     pub retry_gap: Option<u64>,
 
+    /// 模拟浏览器行为
+    #[arg(long)]
+    pub browser: bool,
+
     /// 不模拟浏览器行为
     #[arg(long)]
-    pub no_browser: Option<bool>,
+    pub no_browser: bool,
 
     /// 全部确认
     #[arg(short, long)]
-    pub yes: Option<bool>,
+    pub yes: bool,
+
+    /// 不全部确认
+    #[arg(long)]
+    pub no_yes: bool,
 
     /// 全部拒绝
     #[arg(long)]
-    pub no: Option<bool>,
+    pub no: bool,
+
+    /// 不全部拒绝
+    #[arg(long)]
+    pub no_no: bool,
 
     /// 详细输出
     #[arg(short, long)]
-    pub verbose: Option<bool>,
+    pub verbose: bool,
+
+    /// 不详细输出
+    #[arg(long)]
+    pub no_verbose: bool,
 }
 
 #[derive(Debug)]
@@ -87,7 +111,7 @@ pub struct Args {
     pub write_buffer_size: usize,
     pub progress_width: usize,
     pub retry_gap: Duration,
-    pub no_browser: bool,
+    pub browser: bool,
     pub yes: bool,
     pub no: bool,
     pub verbose: bool,
@@ -109,7 +133,7 @@ impl Args {
             write_buffer_size: 8 * 1024 * 1024,
             progress_width: 50,
             retry_gap: Duration::from_millis(500),
-            no_browser: false,
+            browser: true,
             yes: false,
             no: false,
             verbose: false,
@@ -157,8 +181,8 @@ impl Args {
         if let Ok(value) = config.get_int("General.retry_gap") {
             args.retry_gap = Duration::from_millis(value.try_into()?);
         }
-        if let Ok(value) = config.get_bool("General.no_browser") {
-            args.no_browser = value;
+        if let Ok(value) = config.get_bool("General.browser") {
+            args.browser = value;
         }
         if let Ok(value) = config.get_bool("General.yes") {
             args.yes = value;
@@ -194,11 +218,15 @@ impl Args {
         }
 
         // 命令行参数覆盖配置文件设置
-        if let Some(value) = cli.force {
-            args.force = value;
+        if cli.force {
+            args.force = true;
+        } else if cli.no_force {
+            args.force = false;
         }
-        if let Some(value) = cli.resume {
-            args.resume = value;
+        if cli.resume {
+            args.resume = true;
+        } else if cli.no_resume {
+            args.resume = false;
         }
         if let Some(value) = cli.save_folder {
             args.save_folder = value;
@@ -221,17 +249,25 @@ impl Args {
         if let Some(value) = cli.retry_gap {
             args.retry_gap = Duration::from_millis(value);
         }
-        if let Some(value) = cli.no_browser {
-            args.no_browser = value;
+        if cli.browser {
+            args.browser = true;
+        } else if cli.no_browser {
+            args.browser = false;
         }
-        if let Some(value) = cli.yes {
-            args.yes = value;
+        if cli.yes {
+            args.yes = true;
+        } else if cli.no_yes {
+            args.yes = false;
         }
-        if let Some(value) = cli.no {
-            args.no = value;
+        if cli.no {
+            args.no = true;
+        } else if cli.no_no {
+            args.no = false;
         }
-        if let Some(value) = cli.verbose {
-            args.verbose = value;
+        if cli.verbose {
+            args.verbose = true;
+        } else if cli.no_verbose {
+            args.verbose = false;
         }
 
         // 处理命令行指定的请求头
