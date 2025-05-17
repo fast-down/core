@@ -1,0 +1,24 @@
+[General]
+# 基本设置
+force = false     # 强制覆盖已有文件
+resume = false    # 断点续传
+save_folder = "." # 保存目录
+threads = 32      # 下载线程数
+# proxy = ""      # 代理地址 (格式: http://proxy:port 或 socks5://proxy:port)
+
+# 高级设置
+download_buffer_size = 8192 # 下载缓冲区大小 (单位: B)
+write_buffer_size = 8388608 # 写入缓冲区大小 (单位: B)
+progress_width = 50         # 进度条显示宽度
+retry_gap = 500             # 重试间隔 (单位: ms)
+no_browser = false          # 不模拟浏览器行为
+yes = false                 # 全部确认
+no = false                  # 全部拒绝
+verbose = false             # 详细输出
+
+[Headers]
+sec-ch-ua-mobile = "?0"
+User-Agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+sec-ch-ua = '"Not)A;Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"'
+sec-ch-ua-platform = '"Windows"'
+# Cookie = "key=value"      # 自定义Cookie

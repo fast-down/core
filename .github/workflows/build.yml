@@ -68,7 +68,7 @@ jobs:
       - name: Make output folder
         run: |
           mkdir output
-          cp fast-down-cli/config.ini output/
+          cp config.toml output/
 
       - name: Copy target to folder (Windows)
         if: contains(matrix.build, 'windows')

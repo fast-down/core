@@ -1,4 +1,4 @@
-mod build_headers;
+mod args_parse;
 mod draw_progress;
 mod fmt_progress;
 mod fmt_size;
@@ -7,8 +7,7 @@ mod persist;
 mod reverse_progress;
 mod str_to_progress;
 
-use build_headers::build_headers;
-use clap::Parser;
+use args_parse::Args;
 use color_eyre::eyre::{eyre, Result};
 use fast_down::{DownloadOptions, Event, MergeProgress, Progress, Total};
 use fmt_size::format_file_size;
@@ -16,7 +15,7 @@ use path_clean::clean;
 use persist::{init_db, init_progress, update_progress};
 use reqwest::{
     blocking::Client,
-    header::{self, HeaderName, HeaderValue},
+    header::{self, HeaderValue},
     Proxy,
 };
 use reverse_progress::reverse_progress;
@@ -25,121 +24,28 @@ use std::{
     io::{self, Write},
     path::Path,
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 use url::Url;
 
-/// 超级快的下载器
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-pub struct Args {
-    /// 强制覆盖已有文件
-    #[arg(short, long = "allow-overwrite", default_value_t = false)]
-    pub force: bool,
-
-    /// 断点续传
-    #[arg(short = 'c', long = "continue", default_value_t = false)]
-    pub resume: bool,
-
-    /// 要下载的URL
-    #[arg(required = true)]
-    pub url: String,
-
-    /// 保存目录
-    #[arg(short = 'd', long = "dir", default_value = ".")]
-    pub save_folder: String,
-
-    /// 下载线程数
-    #[arg(short, long, default_value_t = 32)]
-    pub threads: usize,
-
-    /// 自定义文件名
-    #[arg(short = 'o', long = "out")]
-    pub file_name: Option<String>,
-
-    /// 代理地址 (格式: http://proxy:port 或 socks5://proxy:port)
-    #[arg(short, long = "all-proxy")]
-    pub proxy: Option<String>,
-
-    /// 自定义请求头 (可多次使用)
-    #[arg(short = 'H', long = "header", value_name = "Key: Value")]
-    pub headers: Vec<String>,
-
-    /// 下载缓冲区大小 (单位: B)
-    #[arg(long, default_value_t = 8 * 1024)]
-    pub download_buffer_size: usize,
-
-    /// 写入缓冲区大小 (单位: B)
-    #[arg(long, default_value_t = 8 * 1024 * 1024)]
-    pub write_buffer_size: usize,
-
-    /// 进度条显示宽度
-    #[arg(long, default_value_t = 50)]
-    pub progress_width: usize,
-
-    /// 重试间隔 (单位: ms)
-    #[arg(long, default_value_t = 500)]
-    pub retry_gap: u64,
-
-    /// 不模拟浏览器行为
-    #[arg(long, default_value_t = false)]
-    pub no_browser: bool,
-
-    /// 全部确认
-    #[arg(short, long, default_value_t = false)]
-    pub yes: bool,
-
-    /// 全部拒绝
-    #[arg(long, default_value_t = false)]
-    pub no: bool,
-
-    /// 详细输出
-    #[arg(short, long, default_value_t = false)]
-    pub verbose: bool,
-}
-
 fn main() -> Result<()> {
     color_eyre::install()?;
-    let args = Args::parse();
-    let mut headers = build_headers(&args.headers)?;
+    let mut args = Args::parse()?;
     if !args.no_browser {
         let url = Url::parse(&args.url)?;
-        headers
-            .entry(header::ACCEPT)
-            .or_insert(HeaderValue::from_static("*/*"));
-        headers
-            .entry(header::ACCEPT_ENCODING)
-            .or_insert(HeaderValue::from_static("gzip, deflate, br, zstd"));
-        headers
-            .entry(header::CONNECTION)
-            .or_insert(HeaderValue::from_static("keep-alive"));
-        headers
-            .entry(header::HOST)
-            .or_insert(HeaderValue::from_str(url.host_str().unwrap_or(&args.url))?);
-        headers
+        args.headers
             .entry(header::ORIGIN)
             .or_insert(HeaderValue::from_str(
                 url.origin().ascii_serialization().as_str(),
             )?);
-        headers
+        args.headers
             .entry(header::REFERER)
             .or_insert(HeaderValue::from_str(&args.url)?);
-        headers
-            .entry(header::USER_AGENT)
-            .or_insert(HeaderValue::from_static(include_str!("./default_ua.txt")));
-        headers
-            .entry(HeaderName::from_static("sec-ch-ua"))
-            .or_insert(HeaderValue::from_static(include_str!(
-                "./default_sec_ch_ua.txt"
-            )));
-        headers
-            .entry(HeaderName::from_static("sec-ch-ua-mobile"))
-            .or_insert(HeaderValue::from_static("?0"));
-        headers
-            .entry(HeaderName::from_static("sec-ch-ua-platform"))
-            .or_insert(HeaderValue::from_static("\"Windows\""));
     }
-    let mut client = Client::builder().default_headers(headers);
+    if args.verbose {
+        dbg!(&args);
+    }
+    let mut client = Client::builder().default_headers(args.headers);
     if let Some(ref proxy) = args.proxy {
         client = client.proxy(Proxy::all(proxy)?);
     }
@@ -151,7 +57,7 @@ fn main() -> Result<()> {
             Ok(info) => break info,
             Err(err) => {
                 println!("获取文件信息失败: {}", err);
-                thread::sleep(Duration::from_millis(args.retry_gap));
+                thread::sleep(args.retry_gap);
             }
         }
     };
@@ -335,7 +241,7 @@ fn main() -> Result<()> {
             client,
             download_buffer_size: args.download_buffer_size,
             download_chunks,
-            retry_gap: Duration::from_millis(args.retry_gap),
+            retry_gap: args.retry_gap,
             write_buffer_size: args.write_buffer_size,
         },
     )?;

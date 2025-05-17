@@ -23,6 +23,7 @@ serde = { version = "1.0.197", features = ["derive"] }
 path-clean = "1.0.1"
 ctrlc = "3.4.6"
 url = "2.5.4"
+config = "0.15.11"
 
 [[bin]]
 name = "fast-down"
