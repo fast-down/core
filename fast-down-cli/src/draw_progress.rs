@@ -4,12 +4,12 @@ use std::time::Instant;
 
 pub fn draw_progress(
     start: Instant,
-    total: usize,
+    total: u64,
     get_progress: &Vec<Progress>,
-    last_get_size: usize,
+    last_get_size: u64,
     last_get_time: Instant,
     progress_width: usize,
-    get_size: usize,
+    get_size: u64,
     avg_get_speed: &mut f64,
 ) {
     // 创建合并的进度条
@@ -77,8 +77,8 @@ pub fn draw_progress(
         // 计算该位置对应的字节范围
         // 使用saturating_mul和saturating_add可防止在接近usize::MAX时溢出
         // 但目前保持更接近原始f64逻辑。f64仍可能存在精度问题
-        let pos_start = (pos as f64 * bytes_per_position).floor() as usize;
-        let pos_end = ((pos + 1) as f64 * bytes_per_position).floor() as usize;
+        let pos_start = (pos as f64 * bytes_per_position).floor() as u64;
+        let pos_end = ((pos + 1) as f64 * bytes_per_position).floor() as u64;
 
         // 计算该位置代表的总字节数
         let position_total = pos_end.saturating_sub(pos_start);

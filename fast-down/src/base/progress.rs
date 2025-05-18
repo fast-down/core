@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-pub type Progress = Range<usize>;
+pub type Progress = Range<u64>;
 
 pub trait CanMerge {
     fn can_merge(&self, other: &Self) -> bool;

@@ -1,7 +1,6 @@
 use crate::{Progress, RandWriter, SeqWriter};
 use bytes::Bytes;
 use color_eyre::Result;
-use memmap2::MmapMut;
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -32,40 +31,106 @@ impl SeqWriter for SeqFileWriter {
     }
 }
 
-#[derive(Debug)]
-pub struct RandFileWriter {
-    mmap: MmapMut,
-    downloaded: usize,
-    write_buffer_size: usize,
-}
+#[cfg(target_pointer_width = "64")]
+mod rand_file_writer_mmap {
+    use super::*;
+    use memmap2::MmapMut;
 
-impl RandFileWriter {
-    pub fn new(file: File, size: usize, write_buffer_size: usize) -> Result<Self> {
-        file.set_len(size as u64)?;
-        Ok(Self {
-            mmap: unsafe { MmapMut::map_mut(&file) }?,
-            downloaded: 0,
-            write_buffer_size,
-        })
+    #[derive(Debug)]
+    pub struct RandFileWriter {
+        mmap: MmapMut,
+        downloaded: usize,
+        write_buffer_size: usize,
     }
-}
 
-impl RandWriter for RandFileWriter {
-    fn write_randomly(&mut self, range: Progress, bytes: Bytes) -> Result<()> {
-        self.mmap[range].copy_from_slice(&bytes);
-        self.downloaded += bytes.len();
-        if self.downloaded >= self.write_buffer_size {
-            self.mmap.flush()?;
-            self.downloaded = 0;
+    impl RandFileWriter {
+        pub fn new(file: File, size: u64, write_buffer_size: usize) -> Result<Self> {
+            file.set_len(size)?;
+            Ok(Self {
+                mmap: unsafe { MmapMut::map_mut(&file) }?,
+                downloaded: 0,
+                write_buffer_size,
+            })
         }
-        Ok(())
     }
 
-    fn flush(&mut self) -> Result<()> {
-        self.mmap.flush()?;
-        Ok(())
+    impl RandWriter for RandFileWriter {
+        fn write_randomly(&mut self, range: Progress, bytes: Bytes) -> Result<()> {
+            self.mmap[range.start as usize..range.end as usize].copy_from_slice(&bytes);
+            self.downloaded += bytes.len();
+            if self.downloaded >= self.write_buffer_size {
+                self.mmap.flush()?;
+                self.downloaded = 0;
+            }
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<()> {
+            self.mmap.flush()?;
+            Ok(())
+        }
     }
 }
+#[cfg(target_pointer_width = "64")]
+pub use rand_file_writer_mmap::RandFileWriter;
+
+#[cfg(not(target_pointer_width = "64"))]
+mod rand_file_writer_std {
+    use std::io::Seek;
+
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct RandFileWriter {
+        buffer: BufWriter<File>,
+        cache: Vec<(u64, Bytes)>,
+        p: u64,
+        cache_size: usize,
+        write_buffer_size: usize,
+    }
+
+    impl RandFileWriter {
+        pub fn new(file: File, size: u64, write_buffer_size: usize) -> Result<Self> {
+            file.set_len(size)?;
+            Ok(Self {
+                buffer: BufWriter::with_capacity(write_buffer_size, file),
+                cache: Vec::new(),
+                p: 0,
+                cache_size: 0,
+                write_buffer_size,
+            })
+        }
+    }
+
+    impl RandWriter for RandFileWriter {
+        fn write_randomly(&mut self, range: Progress, bytes: Bytes) -> Result<()> {
+            let pos = self.cache.partition_point(|(i, _)| i < &range.start);
+            self.cache_size += bytes.len();
+            self.cache.insert(pos, (range.start, bytes));
+            if self.cache_size >= self.write_buffer_size {
+                self.flush()?;
+            }
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<()> {
+            for (start, bytes) in self.cache.drain(..) {
+                let len = bytes.len();
+                self.cache_size -= len;
+                if start != self.p {
+                    self.buffer.seek(std::io::SeekFrom::Start(start))?;
+                    self.p = start;
+                }
+                self.buffer.write_all(&bytes)?;
+                self.p += len as u64;
+            }
+            self.buffer.flush()?;
+            Ok(())
+        }
+    }
+}
+#[cfg(not(target_pointer_width = "64"))]
+pub use rand_file_writer_std::RandFileWriter;
 
 #[cfg(test)]
 #[cfg(feature = "file")]

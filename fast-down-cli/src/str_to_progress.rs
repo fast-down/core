@@ -6,7 +6,7 @@ pub fn str_to_progress(text: String) -> Vec<Progress> {
     }
     text.split(',')
         .map(|p| p.splitn(2, '-').map(|n| n.parse().unwrap()).collect())
-        .map(|p: Vec<usize>| p[0]..p[1] + 1)
+        .map(|p: Vec<u64>| p[0]..p[1] + 1)
         .collect()
 }
 

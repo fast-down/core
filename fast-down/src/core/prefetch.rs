@@ -9,7 +9,7 @@ use sanitize_filename;
 
 #[derive(Debug)]
 pub struct UrlInfo {
-    pub file_size: usize,
+    pub file_size: u64,
     pub file_name: String,
     pub supports_range: bool,
     pub can_fast_download: bool,
@@ -18,7 +18,7 @@ pub struct UrlInfo {
     pub last_modified: Option<String>,
 }
 
-fn get_file_size(headers: &HeaderMap, status: &StatusCode) -> usize {
+fn get_file_size(headers: &HeaderMap, status: &StatusCode) -> u64 {
     if *status == StatusCode::PARTIAL_CONTENT {
         headers
             .get(header::CONTENT_RANGE)

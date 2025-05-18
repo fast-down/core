@@ -57,7 +57,7 @@ pub fn download(
     let running_clone = running.clone();
     tasks.spawn(
         options.threads,
-        options.download_buffer_size,
+        options.download_buffer_size as u64,
         |executor| thread::spawn(move || executor.run()),
         action::from_fn(move |id, task, get_task| 'retry: loop {
             if !running.load(Ordering::Relaxed) {
@@ -108,12 +108,14 @@ pub fn download(
                         tx.send(Event::Abort(id)).unwrap();
                         return;
                     }
-                    let expect_len = options.download_buffer_size.min(total - downloaded);
-                    task.fetch_add_start(expect_len);
+                    let expect_len = options
+                        .download_buffer_size
+                        .min((total - downloaded) as usize);
+                    task.fetch_add_start(expect_len as u64);
                     unsafe { buffer.set_len(expect_len) }
                     let len = loop {
                         if !running.load(Ordering::Relaxed) {
-                            task.fetch_sub_start(expect_len);
+                            task.fetch_sub_start(expect_len as u64);
                             tx.send(Event::Abort(id)).unwrap();
                             return;
                         }
@@ -123,7 +125,7 @@ pub fn download(
                                 let kind = e.kind();
                                 tx.send(Event::DownloadError(id, e.into())).unwrap();
                                 if kind != ErrorKind::Interrupted {
-                                    task.fetch_sub_start(expect_len);
+                                    task.fetch_sub_start(expect_len as u64);
                                     continue 'retry;
                                 }
                             }
@@ -131,19 +133,19 @@ pub fn download(
                         thread::sleep(options.retry_gap);
                     };
                     if expect_len > len {
-                        task.fetch_sub_start(expect_len - len);
+                        task.fetch_sub_start((expect_len - len) as u64);
                     }
                     if len == 0 {
                         break;
                     }
                     let range_start = range.start + downloaded;
-                    downloaded += len;
+                    downloaded += len as u64;
                     let range_end = range.start + downloaded;
                     let span = range_start..range_end.min(tasks_clone.get(task.end()));
                     let len = span.total();
                     tx.send(Event::DownloadProgress(span.clone())).unwrap();
                     tx_write
-                        .send((span, buffer.clone().split_to(len).freeze()))
+                        .send((span, buffer.clone().split_to(len as usize).freeze()))
                         .unwrap();
                     start += len;
                     if start >= task.end() {
@@ -179,7 +181,7 @@ mod tests {
         (0..size).map(|i| (i % 256) as u8).collect()
     }
 
-    pub fn reverse_progress(progress: &[Progress], total_size: usize) -> Vec<Progress> {
+    pub fn reverse_progress(progress: &[Progress], total_size: u64) -> Vec<Progress> {
         if progress.is_empty() {
             return vec![0..total_size];
         }
@@ -233,10 +235,10 @@ mod tests {
         let file = temp_file.reopen().unwrap();
 
         let client = Client::new();
-        let download_chunks = vec![0..mock_body.len()];
+        let download_chunks = vec![0..mock_body.len() as u64];
         let result = download(
             format!("{}/mutli-2", server.url()),
-            RandFileWriter::new(file, mock_body.len(), 8 * 1024 * 1024).unwrap(),
+            RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
                 threads: 32,
@@ -274,7 +276,7 @@ mod tests {
             }
             for chunk in download_chunks.clone() {
                 for i in chunk {
-                    data[i] = mock_body[i];
+                    data[i as usize] = mock_body[i as usize];
                 }
             }
             data
@@ -326,7 +328,7 @@ mod tests {
         let download_chunks = vec![10..80, 100..300, 1000..2000];
         let result = download(
             format!("{}/mutli-2", server.url()),
-            RandFileWriter::new(file, mock_body.len(), 8 * 1024 * 1024).unwrap(),
+            RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
                 threads: 32,
@@ -364,7 +366,7 @@ mod tests {
             }
             for chunk in download_chunks.clone() {
                 for i in chunk {
-                    data[i] = mock_body[i];
+                    data[i as usize] = mock_body[i as usize];
                 }
             }
             data
@@ -416,12 +418,12 @@ mod tests {
         let client = Client::new();
         let result = download(
             format!("{}/mutli-3", server.url()),
-            RandFileWriter::new(file, mock_body.len(), 8 * 1024 * 1024).unwrap(),
+            RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
                 threads: 32,
                 download_buffer_size: 8 * 1024,
-                download_chunks: vec![0..mock_body.len()],
+                download_chunks: vec![0..mock_body.len() as u64],
                 retry_gap: Duration::from_secs(1),
             },
         )
@@ -462,7 +464,7 @@ mod tests {
             }
             for chunk in write_progress.clone() {
                 for i in chunk {
-                    data[i] = mock_body[i];
+                    data[i as usize] = mock_body[i as usize];
                 }
             }
             data
@@ -473,10 +475,10 @@ mod tests {
         // 开始续传
         let file = temp_file.reopen().unwrap();
         let client = Client::new();
-        let download_chunks = reverse_progress(&write_progress, mock_body.len());
+        let download_chunks = reverse_progress(&write_progress, mock_body.len() as u64);
         let result = download(
             format!("{}/mutli-3", server.url()),
-            RandFileWriter::new(file, mock_body.len(), 8 * 1024 * 1024).unwrap(),
+            RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
                 threads: 8,

@@ -17,7 +17,7 @@ pub struct DownloadOptions {
     pub write_buffer_size: usize,
     pub download_chunks: Vec<Progress>,
     pub retry_gap: Duration,
-    pub file_size: usize,
+    pub file_size: u64,
 }
 
 pub fn download_file(

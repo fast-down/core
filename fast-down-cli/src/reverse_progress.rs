@@ -1,6 +1,6 @@
 use fast_down::Progress;
 
-pub fn reverse_progress(progress: &[Progress], total_size: usize) -> Vec<Progress> {
+pub fn reverse_progress(progress: &[Progress], total_size: u64) -> Vec<Progress> {
     if progress.is_empty() {
         return vec![0..total_size];
     }

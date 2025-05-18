@@ -5,7 +5,7 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension};
 use std::{env, path::Path};
 
 pub struct WriteProgress {
-    pub total_size: usize,
+    pub total_size: u64,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub progress: Vec<Progress>,
@@ -44,7 +44,7 @@ pub fn init_db() -> Result<Connection> {
 pub fn init_progress(
     conn: &Connection,
     file_path: &str,
-    total_size: usize,
+    total_size: u64,
     etag: Option<String>,
     last_modified: Option<String>,
 ) -> Result<()> {

@@ -50,7 +50,7 @@ pub fn download(
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
     thread::spawn(move || {
-        let mut downloaded: usize = 0;
+        let mut downloaded: u64 = 0;
         let mut response = loop {
             if !running.load(Ordering::Relaxed) {
                 tx.send(Event::Abort(0)).unwrap();
@@ -87,12 +87,12 @@ pub fn download(
             if len == 0 {
                 break;
             }
-            let span = downloaded..(downloaded + len);
+            let span = downloaded..(downloaded + len as u64);
             tx.send(Event::DownloadProgress(span.clone())).unwrap();
             tx_write
                 .send((span, buffer.clone().split_to(len).freeze()))
                 .unwrap();
-            downloaded += len;
+            downloaded += len as u64;
         }
         tx.send(Event::Finished(0)).unwrap();
     });
@@ -163,8 +163,8 @@ mod tests {
                 } else {
                     0
                 })
-                .sum::<usize>(),
-            mock_body.len()
+                .sum::<u64>(),
+            mock_body.len() as u64
         );
         assert_eq!(
             progress_events
@@ -174,8 +174,8 @@ mod tests {
                 } else {
                     0
                 })
-                .sum::<usize>(),
-            mock_body.len()
+                .sum::<u64>(),
+            mock_body.len() as u64
         );
         mock.assert();
     }
@@ -226,8 +226,8 @@ mod tests {
                 } else {
                     0
                 })
-                .sum::<usize>(),
-            mock_body.len()
+                .sum::<u64>(),
+            mock_body.len() as u64
         );
         assert_eq!(
             progress_events
@@ -237,8 +237,8 @@ mod tests {
                 } else {
                     0
                 })
-                .sum::<usize>(),
-            mock_body.len()
+                .sum::<u64>(),
+            mock_body.len() as u64
         );
         mock.assert();
     }
@@ -288,8 +288,8 @@ mod tests {
                 } else {
                     0
                 })
-                .sum::<usize>(),
-            mock_body.len()
+                .sum::<u64>(),
+            mock_body.len() as u64
         );
         assert_eq!(
             progress_events
@@ -299,8 +299,8 @@ mod tests {
                 } else {
                     0
                 })
-                .sum::<usize>(),
-            mock_body.len()
+                .sum::<u64>(),
+            mock_body.len() as u64
         );
         mock.assert();
     }
@@ -350,8 +350,8 @@ mod tests {
                 } else {
                     0
                 })
-                .sum::<usize>(),
-            mock_body.len()
+                .sum::<u64>(),
+            mock_body.len() as u64
         );
         assert_eq!(
             progress_events
@@ -361,8 +361,8 @@ mod tests {
                 } else {
                     0
                 })
-                .sum::<usize>(),
-            mock_body.len()
+                .sum::<u64>(),
+            mock_body.len() as u64
         );
         mock.assert();
     }

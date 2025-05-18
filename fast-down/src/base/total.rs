@@ -1,23 +1,23 @@
 use crate::Progress;
 
 pub trait Total {
-    fn total(&self) -> usize;
+    fn total(&self) -> u64;
 }
 
 impl Total for Progress {
-    fn total(&self) -> usize {
+    fn total(&self) -> u64 {
         self.end - self.start
     }
 }
 
 impl<T: Total> Total for Vec<T> {
-    fn total(&self) -> usize {
+    fn total(&self) -> u64 {
         self.iter().map(|r| r.total()).sum()
     }
 }
 
 impl<T: Total> Total for [T] {
-    fn total(&self) -> usize {
+    fn total(&self) -> u64 {
         self.iter().map(|r| r.total()).sum()
     }
 }

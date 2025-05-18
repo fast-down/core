@@ -19,11 +19,14 @@ clap = { version = "4.5.36", features = ["derive"] }
 color-eyre = { workspace = true }
 reqwest = { workspace = true }
 rusqlite = { version = "0.31.0", features = ["bundled"] }
-serde = { version = "1.0.197", features = ["derive"] }
+serde = { version = "1.0.197", default-features = false, features = ["derive"] }
 path-clean = "1.0.1"
 ctrlc = "3.4.6"
-url = "2.5.4"
-config = "0.15.11"
+url = { version = "2.5.4", default-features = false }
+config = { version = "0.15.11", default-features = false, features = [
+  "toml",
+  "convert-case",
+] }
 
 [[bin]]
 name = "fd"

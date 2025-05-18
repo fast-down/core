@@ -144,10 +144,10 @@ impl Args {
             .map(|p| p.join("config.toml"));
         let mut config = Config::builder();
         if let Some(config_path) = self_config_path {
-            config = config.add_source(File::from(config_path));
+            config = config.add_source(File::from(config_path).required(false));
         }
         let config = config
-            .add_source(File::with_name("fast-down").required(false))
+            .add_source(File::with_name("fast-down.toml").required(false))
             .add_source(Environment::with_prefix("FD"))
             .build()?;
 
