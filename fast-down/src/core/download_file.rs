@@ -37,7 +37,7 @@ pub fn download_file(
         .create(true)
         .open(&save_path)?;
     let seq_file_writer = SeqFileWriter::new(file.try_clone()?, options.write_buffer_size)?;
-    let rand_file_writer = RandFileWriter::new(file, options.file_size)?;
+    let rand_file_writer = RandFileWriter::new(file, options.file_size, options.write_buffer_size)?;
     auto::download(
         url,
         seq_file_writer,

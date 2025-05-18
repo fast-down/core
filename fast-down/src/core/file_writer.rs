@@ -35,13 +35,17 @@ impl SeqWriter for SeqFileWriter {
 #[derive(Debug)]
 pub struct RandFileWriter {
     mmap: MmapMut,
+    downloaded: usize,
+    write_buffer_size: usize,
 }
 
 impl RandFileWriter {
-    pub fn new(file: File, size: usize) -> Result<Self> {
+    pub fn new(file: File, size: usize, write_buffer_size: usize) -> Result<Self> {
         file.set_len(size as u64)?;
         Ok(Self {
             mmap: unsafe { MmapMut::map_mut(&file) }?,
+            downloaded: 0,
+            write_buffer_size,
         })
     }
 }
@@ -49,6 +53,11 @@ impl RandFileWriter {
 impl RandWriter for RandFileWriter {
     fn write_randomly(&mut self, range: Progress, bytes: Bytes) -> Result<()> {
         self.mmap[range].copy_from_slice(&bytes);
+        self.downloaded += bytes.len();
+        if self.downloaded >= self.write_buffer_size {
+            self.mmap.flush()?;
+            self.downloaded = 0;
+        }
         Ok(())
     }
 
@@ -98,7 +107,7 @@ mod tests {
         let file_path = temp_file.path().to_path_buf();
 
         // 初始化 RandFileWriter，假设文件大小为 10 字节
-        let mut writer = RandFileWriter::new(temp_file.reopen()?, 10)?;
+        let mut writer = RandFileWriter::new(temp_file.reopen()?, 10, 8 * 1024 * 1024)?;
 
         // 写入数据
         let data = Bytes::from("234");

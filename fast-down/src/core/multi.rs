@@ -57,7 +57,7 @@ pub fn download(
     let running_clone = running.clone();
     tasks.spawn(
         options.threads,
-        options.download_buffer_size * 2,
+        options.download_buffer_size,
         |executor| thread::spawn(move || executor.run()),
         action::from_fn(move |id, task, get_task| 'retry: loop {
             if !running.load(Ordering::Relaxed) {
@@ -236,7 +236,7 @@ mod tests {
         let download_chunks = vec![0..mock_body.len()];
         let result = download(
             format!("{}/mutli-2", server.url()),
-            RandFileWriter::new(file, mock_body.len()).unwrap(),
+            RandFileWriter::new(file, mock_body.len(), 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
                 threads: 32,
@@ -326,7 +326,7 @@ mod tests {
         let download_chunks = vec![10..80, 100..300, 1000..2000];
         let result = download(
             format!("{}/mutli-2", server.url()),
-            RandFileWriter::new(file, mock_body.len()).unwrap(),
+            RandFileWriter::new(file, mock_body.len(), 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
                 threads: 32,
@@ -416,7 +416,7 @@ mod tests {
         let client = Client::new();
         let result = download(
             format!("{}/mutli-3", server.url()),
-            RandFileWriter::new(file, mock_body.len()).unwrap(),
+            RandFileWriter::new(file, mock_body.len(), 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
                 threads: 32,
@@ -476,7 +476,7 @@ mod tests {
         let download_chunks = reverse_progress(&write_progress, mock_body.len());
         let result = download(
             format!("{}/mutli-3", server.url()),
-            RandFileWriter::new(file, mock_body.len()).unwrap(),
+            RandFileWriter::new(file, mock_body.len(), 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
                 threads: 8,
