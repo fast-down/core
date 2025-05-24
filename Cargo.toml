@@ -1,5 +1,5 @@
 [workspace]
-members = ["fast-down", "fast-down-cli", "fast-down-gui"]
+members = ["crates/core", "crates/cli", "crates/gui"]
 resolver = "2"
 
 [workspace.package]
@@ -11,6 +11,7 @@ readme = "README.md"
 exclude = ["/.github"]
 
 [workspace.dependencies]
+fast-down = { path = "crates/core" }
 color-eyre = "0.6.3"
 reqwest = { version = "0.12.12", features = [
   "gzip",

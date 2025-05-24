@@ -14,7 +14,7 @@ keywords = ["downloader", "parallel", "thread", "concurrency", "performance"]
 categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
-fast-down = { path = "../fast-down", version = "1.6.0", features = ["file"] }
+fast-down = { workspace = true, features = ["file"] }
 clap = { version = "4.5.36", features = ["derive"] }
 color-eyre = { workspace = true }
 reqwest = { workspace = true }
@@ -28,6 +28,7 @@ config = { version = "0.15.11", default-features = false, features = [
   "convert-case",
 ] }
 crossterm = "0.29.0"
+mimalloc = "0.1.46"
 
 [[bin]]
 name = "fd"

@@ -7,6 +7,7 @@ mod persist;
 mod reverse_progress;
 mod str_to_progress;
 
+use mimalloc::MiMalloc;
 use args_parse::Args;
 use color_eyre::eyre::{eyre, Result};
 use draw_progress::ProgressPainter;
@@ -29,6 +30,9 @@ use std::{
     time::{Duration, Instant},
 };
 use url::Url;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
