@@ -22,7 +22,7 @@ const BLOCK_CHARS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '
 pub struct ProgressPainter {
     pub progress: Vec<Progress>,
     pub total: u64,
-    pub width: usize,
+    pub width: u16,
     pub start_time: Instant,
     pub alpha: f64,
     pub prev_size: u64,
@@ -39,7 +39,7 @@ impl ProgressPainter {
     pub fn new(
         init_progress: Vec<Progress>,
         total: u64,
-        progress_width: usize,
+        progress_width: u16,
         alpha: f64,
         repaint_duration: Duration,
     ) -> Self {
@@ -101,7 +101,7 @@ impl ProgressPainter {
         let progress_str = if self.total == 0 {
             format!(
                 "|{}| {:>6.2}% ({:>8}/Unknown)\n已用时间: {} | 速度: {:>8}/s | 剩余: Unknown\n",
-                BLOCK_CHARS[0].to_string().repeat(self.width),
+                BLOCK_CHARS[0].to_string().repeat(self.width as usize),
                 0.0,
                 format_file_size(self.curr_size as f64),
                 format_time(self.start_time.elapsed().as_secs()),
@@ -111,7 +111,7 @@ impl ProgressPainter {
             let get_percent = (self.curr_size as f64 / self.total as f64) * 100.0;
             let get_remaining_time = (self.total - self.curr_size) as f64 / self.avg_speed;
             let per_bytes = self.total as f64 / self.width as f64;
-            let mut bar_values = vec![0u64; self.width];
+            let mut bar_values = vec![0u64; self.width as usize];
             let mut index = 0;
             for i in 0..self.width {
                 let start_byte = i as f64 * per_bytes;
@@ -132,7 +132,7 @@ impl ProgressPainter {
                         block_total += overlap_end - overlap_start;
                     }
                 }
-                bar_values[i] = block_total;
+                bar_values[i as usize] = block_total;
             }
             let bar_str: String = bar_values
                 .iter()

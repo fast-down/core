@@ -23,7 +23,7 @@
 ```bash
 超级快的下载器命令行界面
 
-Usage: fast-down.exe [OPTIONS] <URL>
+Usage: fd [OPTIONS] <URL>
 
 Arguments:
   <URL>  要下载的URL
@@ -55,6 +55,8 @@ Options:
           进度条显示宽度
       --retry-gap <RETRY_GAP>
           重试间隔 (单位: ms)
+      --repaint-gap <REPAINT_GAP>
+          进度条重绘间隔 (单位: ms)
       --browser
           模拟浏览器行为
       --no-browser

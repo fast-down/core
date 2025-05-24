@@ -18,8 +18,8 @@ jobs:
           - linux-64bit
           - macos-arm64
           - macos-64bit
-          - windows-64bit
-          - windows-32bit
+          - windows10-64bit
+          - windows10-32bit
         include:
           - build: linux-arm64
             os: ubuntu-24.04-arm
@@ -41,14 +41,22 @@ jobs:
             os: macos-latest
             target: x86_64-apple-darwin
             archive-name: fast-down-macos-64bit
-          - build: windows-64bit
+          - build: windows10-64bit
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive-name: fast-down-windows-64bit
-          - build: windows-32bit
+            archive-name: fast-down-windows10-64bit
+          - build: windows10-32bit
             os: windows-latest
             target: i686-pc-windows-msvc
-            archive-name: fast-down-windows-32bit
+            archive-name: fast-down-windows10-32bit
+          - build: windows7-64bit
+            os: windows-latest
+            target: x86_64-win7-windows-msvc
+            archive-name: fast-down-windows7-64bit
+          - build: windows7-32bit
+            os: windows-latest
+            target: i686-win7-windows-msvc
+            archive-name: fast-down-windows7-32bit
       fail-fast: false
 
     steps:

@@ -1,6 +1,7 @@
 use clap::Parser;
 use color_eyre::Result;
 use config::{Config, Environment, File};
+use crossterm::terminal;
 use reqwest::header::{HeaderMap, HeaderName};
 use std::{env, str::FromStr, time::Duration};
 
@@ -58,11 +59,15 @@ struct Cli {
 
     /// 进度条显示宽度
     #[arg(long)]
-    pub progress_width: Option<usize>,
+    pub progress_width: Option<u16>,
 
     /// 重试间隔 (单位: ms)
     #[arg(long)]
     pub retry_gap: Option<u64>,
+
+    /// 进度条重绘间隔 (单位: ms)
+    #[arg(long)]
+    pub repaint_gap: Option<u64>,
 
     /// 模拟浏览器行为
     #[arg(long)]
@@ -109,7 +114,8 @@ pub struct Args {
     pub headers: HeaderMap,
     pub download_buffer_size: usize,
     pub write_buffer_size: usize,
-    pub progress_width: usize,
+    pub repaint_gap: Duration,
+    pub progress_width: u16,
     pub retry_gap: Duration,
     pub browser: bool,
     pub yes: bool,
@@ -131,8 +137,12 @@ impl Args {
             headers: HeaderMap::new(),
             download_buffer_size: 8 * 1024,
             write_buffer_size: 8 * 1024 * 1024,
-            progress_width: 50,
+            progress_width: terminal::size()
+                .ok()
+                .and_then(|s| s.0.checked_sub(40))
+                .unwrap_or(50),
             retry_gap: Duration::from_millis(500),
+            repaint_gap: Duration::from_millis(100),
             browser: true,
             yes: false,
             no: false,
@@ -179,6 +189,9 @@ impl Args {
             args.progress_width = value.try_into()?;
         }
         if let Ok(value) = config.get_int("General.retry_gap") {
+            args.retry_gap = Duration::from_millis(value.try_into()?);
+        }
+        if let Ok(value) = config.get_int("General.repaint_gap") {
             args.retry_gap = Duration::from_millis(value.try_into()?);
         }
         if let Ok(value) = config.get_bool("General.browser") {
@@ -247,6 +260,9 @@ impl Args {
             args.progress_width = value;
         }
         if let Some(value) = cli.retry_gap {
+            args.retry_gap = Duration::from_millis(value);
+        }
+        if let Some(value) = cli.repaint_gap {
             args.retry_gap = Duration::from_millis(value);
         }
         if cli.browser {

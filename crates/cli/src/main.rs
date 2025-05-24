@@ -27,7 +27,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 use url::Url;
 
@@ -271,7 +271,7 @@ fn main() -> Result<()> {
         info.file_size,
         args.progress_width,
         0.9,
-        Duration::from_millis(100),
+        args.repaint_gap,
     )));
     let cancel = ProgressPainter::start_update_thread(painter.clone());
 
