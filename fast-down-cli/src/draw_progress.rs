@@ -112,14 +112,27 @@ impl ProgressPainter {
             let get_remaining_time = (self.total - self.curr_size) as f64 / self.avg_speed;
             let per_bytes = self.total as f64 / self.width as f64;
             let mut bar_values = vec![0u64; self.width];
+            let mut index = 0;
             for i in 0..self.width {
                 let start_byte = i as f64 * per_bytes;
-                let end_byte = start_byte + per_bytes;
-                let byte_range = start_byte as u64..end_byte as u64;
-                for segment in &self.progress {
-                    let overlap = byte_range.overlap(segment);
-                    bar_values[i] += overlap;
+                let end_byte = (start_byte + per_bytes) as u64;
+                let start_byte = start_byte as u64;
+                let mut block_total = 0;
+                for segment in &self.progress[index..] {
+                    if segment.end <= start_byte {
+                        index += 1;
+                        continue;
+                    }
+                    if segment.start >= end_byte {
+                        break;
+                    }
+                    let overlap_start = segment.start.max(start_byte);
+                    let overlap_end = segment.end.min(end_byte);
+                    if overlap_start < overlap_end {
+                        block_total += overlap_end - overlap_start;
+                    }
                 }
+                bar_values[i] = block_total;
             }
             let bar_str: String = bar_values
                 .iter()
