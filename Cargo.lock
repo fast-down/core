@@ -1791,7 +1791,7 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fast-down"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "bytes",
  "color-eyre",
@@ -1808,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "fast-down-cli"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "clap",
  "color-eyre",
