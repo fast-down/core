@@ -1,24 +1,24 @@
 # fast-down 快下
 
-![GitHub last commit (branch)](https://img.shields.io/github/last-commit/share121/fast-down/main)
-[![Rust](https://github.com/share121/fast-down/workflows/Test/badge.svg)](https://github.com/share121/fast-down/actions)
+![Lastest commit (branch)](https://img.shields.io/github/last-commit/share121/fast-down/main)
+[![Test](https://github.com/share121/fast-down/workflows/Test/badge.svg)](https://github.com/share121/fast-down/actions)
 [![Latest version](https://img.shields.io/crates/v/fast-down.svg)](https://crates.io/crates/fast-down)
 [![Documentation](https://docs.rs/fast-down/badge.svg)](https://docs.rs/fast-down)
 ![License](https://img.shields.io/crates/l/fast-down.svg)
 
-`fast-down` 全网最快多线程下载库
+`fast-down` **全网最快**多线程下载库
 
-![cli界面](cli.png)
+![CLI 界面](./examples/cli.png)
 
 ## 优势
 
-1. 全网最快多线程下载库
+1. 下载全网最快
 2. 支持断点续传
-3. 安全的 Rust 代码
-4. 超强任务调度算法：自研 [fast-steal](https://github.com/share121/fast-steal) 任务窃取算法
-5. 跨平台，Windows、Linux、Mac OS 都支持
-6. 优秀的错误自动重试，下载过程中随意断网都可以保证文件正确下载
-7. 详细的进度跟踪
+3. 代码安全健壮
+4. 自研调度算法：超强 [fast-steal](https://github.com/share121/fast-steal) 任务窃取算法
+5. 跨平台软件 (Windows, Linux, MacOS)
+6. 错误自动恢复，下载过程中随意断网都可以保证文件正确下载
+7. 详细进度跟踪
 
 ```bash
 超级快的下载器命令行界面
@@ -76,3 +76,6 @@ Options:
   -V, --version
           Print version
 ```
+
+
+

@@ -7606,3 +7606,7 @@ dependencies = [
  "quote",
  "syn 2.0.100",
 ]
+
+[[patch.unused]]
+name = "deno_core"
+version = "0.346.0"
