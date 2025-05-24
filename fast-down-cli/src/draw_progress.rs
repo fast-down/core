@@ -1,4 +1,4 @@
-use crate::{fmt_size::format_file_size, fmt_time::format_time, overlap::ProgressOverlap};
+use crate::{fmt_size::format_file_size, fmt_time::format_time};
 use color_eyre::Result;
 use crossterm::{
     cursor,
