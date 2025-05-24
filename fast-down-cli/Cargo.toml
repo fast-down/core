@@ -27,6 +27,7 @@ config = { version = "0.15.11", default-features = false, features = [
   "toml",
   "convert-case",
 ] }
+crossterm = "0.29.0"
 
 [[bin]]
 name = "fd"

@@ -1,149 +1,169 @@
-use crate::{fmt_size::format_file_size, fmt_time::format_time};
-use fast_down::Progress;
-use std::time::Instant;
+use crate::{fmt_size::format_file_size, fmt_time::format_time, overlap::ProgressOverlap};
+use color_eyre::Result;
+use crossterm::{
+    cursor,
+    style::Print,
+    terminal::{self, ClearType},
+    ExecutableCommand, QueueableCommand,
+};
+use fast_down::{MergeProgress, Progress, Total};
+use std::{
+    io::{self, Stderr, Stdout, Write},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
-pub fn draw_progress(
-    start: Instant,
-    total: u64,
-    get_progress: &Vec<Progress>,
-    last_get_size: u64,
-    last_get_time: Instant,
-    progress_width: usize,
-    get_size: u64,
-    avg_get_speed: &mut f64,
-) {
-    // 创建合并的进度条
-    const BLOCK_CHARS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+const BLOCK_CHARS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 
-    // 计算瞬时速度
-    let get_elapsed_ms = last_get_time.elapsed().as_millis();
-    let get_speed = if get_elapsed_ms > 0 {
-        (get_size - last_get_size) as f64 * 1e3 / get_elapsed_ms as f64
-    } else {
-        0.0
-    };
+pub struct ProgressPainter {
+    pub progress: Vec<Progress>,
+    pub total: u64,
+    pub width: usize,
+    pub start_time: Instant,
+    pub alpha: f64,
+    pub prev_size: u64,
+    pub curr_size: u64,
+    pub avg_speed: f64,
+    pub repaint_duration: Duration,
+    pub last_repaint_time: Instant,
+    has_progress: bool,
+    stderr: Stderr,
+    stdout: Stdout,
+}
 
-    // 更新下载速度队列
-    const ALPHA: f64 = 0.9;
-    *avg_get_speed = *avg_get_speed * ALPHA + get_speed * (1.0 - ALPHA);
-
-    if total == 0 {
-        // 处理空文件的情况，例如直接打印完成信息或一个特殊的进度条
-        eprint!(
-            "\x1b[1A\x1b[1A\r\x1B[K|{}| {:>6.2}% ({:>8}/{})\n\x1B[K已用时间: {} | 速度: {:>8}/s | 剩余: {}\n",
-            BLOCK_CHARS[BLOCK_CHARS.len() - 1]
-                .to_string()
-                .repeat(progress_width), // 全满进度条
-            100.0,
-            format_file_size(get_size as f64),
-            format_file_size(0.0),
-            format_time(start.elapsed().as_secs()),
-            format_file_size(*avg_get_speed),
-            format_time(0)
-        );
-        return; // 不需要复杂的计算
+impl ProgressPainter {
+    pub fn new(
+        init_progress: Vec<Progress>,
+        total: u64,
+        progress_width: usize,
+        alpha: f64,
+        repaint_duration: Duration,
+    ) -> Self {
+        debug_assert_ne!(progress_width, 0);
+        let init_size = init_progress.total();
+        Self {
+            progress: init_progress,
+            total,
+            width: progress_width,
+            alpha,
+            repaint_duration,
+            start_time: Instant::now(),
+            prev_size: init_size,
+            curr_size: init_size,
+            avg_speed: 0.0,
+            last_repaint_time: Instant::now(),
+            has_progress: false,
+            stdout: io::stdout(),
+            stderr: io::stderr(),
+        }
     }
 
-    // 计算百分比
-    let get_percent = (get_size as f64 / total as f64) * 1e2;
-
-    // 计算已用时间
-    let elapsed = start.elapsed();
-
-    // 下载剩余时间
-    let get_remaining = if *avg_get_speed > 0.0 {
-        (total as f64 - get_size as f64) / *avg_get_speed
-    } else {
-        0.0
-    };
-
-    // 格式化文件大小
-    let formatted_get_size = format_file_size(get_size as f64);
-    let formatted_total_size = format_file_size(total as f64);
-    let formatted_get_speed = format_file_size(*avg_get_speed);
-    let formatted_get_remaining = format_time(get_remaining as u64);
-    let formatted_elapsed = format_time(elapsed.as_secs());
-
-    // 构建进度条字符串
-    let mut bar_str = String::with_capacity(progress_width);
-
-    // 计算每个位置对应的字节范围
-    let bytes_per_position = total as f64 / progress_width as f64;
-
-    let mut current_progress_index = 0; // 指向get_progress的索引
-
-    // 为进度条每个位置循环
-    for pos in 0..progress_width {
-        // 计算该位置对应的字节范围
-        // 使用saturating_mul和saturating_add可防止在接近usize::MAX时溢出
-        // 但目前保持更接近原始f64逻辑。f64仍可能存在精度问题
-        let pos_start = (pos as f64 * bytes_per_position).floor() as u64;
-        let pos_end = ((pos + 1) as f64 * bytes_per_position).floor() as u64;
-
-        // 计算该位置代表的总字节数
-        let position_total = pos_end.saturating_sub(pos_start);
-
-        // 优化：如果该位置代表零字节（如因舍入或文件过小）
-        // 则必为空
-        if position_total == 0 {
-            bar_str.push(BLOCK_CHARS[0]);
-            continue;
-        }
-
-        // 推进进度索引越过在当前位置开始前就结束的块
-        // 这些块对当前及后续位置都不会有影响
-        while current_progress_index < get_progress.len()
-            && get_progress[current_progress_index].end <= pos_start
-        {
-            current_progress_index += 1;
-        }
-
-        let mut get_completed_bytes = 0;
-
-        // 从当前索引开始遍历可能相关的进度块
-        for i in current_progress_index..get_progress.len() {
-            let p = &get_progress[i];
-
-            // 如果进度块开始位置在当前位置结束之后
-            // 由于排序，该块及后续块都不可能重叠。可以停止搜索
-            if p.start >= pos_end {
+    pub fn start_update_thread(painter_arc: Arc<Mutex<ProgressPainter>>) -> Box<impl Fn()> {
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+        thread::spawn(move || loop {
+            let mut painter = painter_arc.lock().unwrap();
+            painter.update().unwrap();
+            let should_stop = painter.total > 0 && painter.curr_size >= painter.total;
+            let duration = painter.repaint_duration;
+            drop(painter);
+            if should_stop || !running.load(Ordering::Relaxed) {
                 break;
             }
-
-            // 现在知道该块*可能*重叠(p.start < pos_end)
-            // 且由于上述while循环，p.end > pos_start
-            // 因此计算重叠部分
-            let overlap_start = p.start.max(pos_start);
-            let overlap_end = p.end.min(pos_end);
-
-            // 确保overlap_end严格大于overlap_start才累加
-            // 处理边界接触但内容不重叠的情况
-            if overlap_end > overlap_start {
-                get_completed_bytes += overlap_end - overlap_start;
-            }
-        }
-
-        // 计算该位置的填充级别(0-8)
-        let fill_level = if get_completed_bytes > 0 {
-            // 使用浮点数计算比例
-            let get_ratio = get_completed_bytes as f64 / position_total as f64;
-            // 缩放至0-8，四舍五入，转为usize并安全截断
-            ((get_ratio * 8.0).round() as usize).min(BLOCK_CHARS.len() - 1)
-        } else {
-            0 // 该段无完成字节
-        };
-
-        bar_str.push(BLOCK_CHARS[fill_level]);
+            thread::sleep(duration);
+        });
+        Box::new(move || {
+            running_clone.store(false, Ordering::Relaxed);
+        })
     }
 
-    eprint!(
-        "\x1b[1A\x1b[1A\r\x1B[K|{}| {:>6.2}% ({:>8}/{})\n\x1B[K已用时间: {} | 速度: {:>8}/s | 剩余: {}\n",
-        bar_str,
-        get_percent,
-        formatted_get_size,
-        formatted_total_size,
-        formatted_elapsed,
-        formatted_get_speed,
-        formatted_get_remaining
-    );
+    pub fn add(&mut self, p: Progress) {
+        self.curr_size += p.total();
+        self.progress.merge_progress(p);
+    }
+
+    pub fn update(&mut self) -> Result<()> {
+        let repaint_elapsed = self.last_repaint_time.elapsed();
+        self.last_repaint_time = Instant::now();
+        let repaint_elapsed_ms = repaint_elapsed.as_millis();
+        let curr_dsize = self.curr_size - self.prev_size;
+        let get_speed = if repaint_elapsed_ms > 0 {
+            (curr_dsize * 1000) as f64 / repaint_elapsed_ms as f64
+        } else {
+            0.0
+        };
+        self.avg_speed = self.avg_speed * self.alpha + get_speed * (1.0 - self.alpha);
+        self.prev_size = self.curr_size;
+        let progress_str = if self.total == 0 {
+            format!(
+                "|{}| {:>6.2}% ({:>8}/Unknown)\n已用时间: {} | 速度: {:>8}/s | 剩余: Unknown\n",
+                BLOCK_CHARS[0].to_string().repeat(self.width),
+                0.0,
+                format_file_size(self.curr_size as f64),
+                format_time(self.start_time.elapsed().as_secs()),
+                format_file_size(self.avg_speed)
+            )
+        } else {
+            let get_percent = (self.curr_size as f64 / self.total as f64) * 100.0;
+            let get_remaining_time = (self.total - self.curr_size) as f64 / self.avg_speed;
+            let per_bytes = self.total as f64 / self.width as f64;
+            let mut bar_values = vec![0u64; self.width];
+            for i in 0..self.width {
+                let start_byte = i as f64 * per_bytes;
+                let end_byte = start_byte + per_bytes;
+                let byte_range = start_byte as u64..end_byte as u64;
+                for segment in &self.progress {
+                    let overlap = byte_range.overlap(segment);
+                    bar_values[i] += overlap;
+                }
+            }
+            let bar_str: String = bar_values
+                .iter()
+                .map(|&count| {
+                    BLOCK_CHARS[((count as f64 / per_bytes as f64 * (BLOCK_CHARS.len() - 1) as f64)
+                        .round() as usize)
+                        .min(BLOCK_CHARS.len() - 1)]
+                })
+                .collect();
+            format!(
+                "|{}| {:>6.2}% ({:>8}/{})\n已用时间: {} | 速度: {:>8}/s | 剩余: {}\n",
+                bar_str,
+                get_percent,
+                format_file_size(self.curr_size as f64),
+                format_file_size(self.total as f64),
+                format_time(self.start_time.elapsed().as_secs()),
+                format_file_size(self.avg_speed),
+                format_time(get_remaining_time as u64)
+            )
+        };
+        if self.has_progress {
+            self.stderr
+                .queue(cursor::MoveUp(1))?
+                .queue(terminal::Clear(ClearType::CurrentLine))?
+                .queue(cursor::MoveUp(1))?
+                .queue(terminal::Clear(ClearType::CurrentLine))?;
+        }
+        self.has_progress = true;
+        self.stderr.queue(Print(progress_str))?;
+        self.stderr.flush()?;
+        Ok(())
+    }
+
+    pub fn print(&mut self, msg: &str) -> Result<()> {
+        if self.has_progress {
+            self.stderr
+                .queue(cursor::MoveUp(1))?
+                .queue(terminal::Clear(ClearType::CurrentLine))?
+                .queue(cursor::MoveUp(1))?
+                .queue(terminal::Clear(ClearType::CurrentLine))?;
+        }
+        self.stdout.execute(Print(msg))?;
+        self.has_progress = false;
+        self.update()?;
+        Ok(())
+    }
 }

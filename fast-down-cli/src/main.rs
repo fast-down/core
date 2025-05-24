@@ -3,12 +3,14 @@ mod draw_progress;
 mod fmt_progress;
 mod fmt_size;
 mod fmt_time;
+mod overlap;
 mod persist;
 mod reverse_progress;
 mod str_to_progress;
 
 use args_parse::Args;
 use color_eyre::eyre::{eyre, Result};
+use draw_progress::ProgressPainter;
 use fast_down::{DownloadOptions, Event, MergeProgress, Progress, Total};
 use fmt_size::format_file_size;
 use path_clean::clean;
@@ -23,8 +25,9 @@ use std::{
     env,
     io::{self, Write},
     path::Path,
+    sync::{Arc, Mutex},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use url::Url;
 
@@ -88,7 +91,6 @@ fn main() -> Result<()> {
     let mut download_chunks = vec![0..info.file_size];
     let mut resume_download = false;
     let mut write_progress: Vec<Progress> = Vec::with_capacity(threads);
-    let mut get_progress: Vec<Progress> = Vec::with_capacity(threads);
 
     if save_path.try_exists()? {
         if args.resume && info.can_fast_download {
@@ -97,7 +99,6 @@ fn main() -> Result<()> {
                 if downloaded < info.file_size {
                     download_chunks = reverse_progress(&progress.progress, info.file_size);
                     write_progress = progress.progress.clone();
-                    get_progress = progress.progress;
                     resume_download = true;
                     println!("发现未完成的下载，将继续下载剩余部分");
                     println!(
@@ -230,7 +231,6 @@ fn main() -> Result<()> {
         }
     }
 
-    let start = Instant::now();
     let result = fast_down::download_file(
         &info.final_url,
         &save_path,
@@ -251,11 +251,6 @@ fn main() -> Result<()> {
         result_clone.cancel();
     })?;
 
-    let mut last_get_size = 0;
-    let mut last_get_time = Instant::now();
-    let mut avg_get_speed = 0.0;
-
-    let mut last_progress_update = Instant::now();
     let mut last_db_update = Instant::now();
 
     if !resume_download {
@@ -268,27 +263,19 @@ fn main() -> Result<()> {
         )?;
     }
 
-    eprint!("\n\n");
+    let painter = Arc::new(Mutex::new(ProgressPainter::new(
+        write_progress.clone(),
+        info.file_size,
+        args.progress_width,
+        0.9,
+        Duration::from_millis(100),
+    )));
+    let cancel = ProgressPainter::start_update_thread(painter.clone());
+
     for e in &result {
         match e {
             Event::DownloadProgress(p) => {
-                get_progress.merge_progress(p);
-                if last_progress_update.elapsed().as_millis() > 50 {
-                    last_progress_update = Instant::now();
-                    let get_size = get_progress.total();
-                    draw_progress::draw_progress(
-                        start,
-                        info.file_size,
-                        &get_progress,
-                        last_get_size,
-                        last_get_time,
-                        args.progress_width,
-                        get_size,
-                        &mut avg_get_speed,
-                    );
-                    last_get_size = get_size;
-                    last_get_time = Instant::now();
-                }
+                painter.lock().unwrap().add(p);
             }
             Event::WriteProgress(p) => {
                 write_progress.merge_progress(p);
@@ -298,62 +285,60 @@ fn main() -> Result<()> {
                 }
             }
             Event::ConnectError(id, err) => {
-                print!(
-                    "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 连接失败, 错误原因: {:?}\n\n",
-                    id, err
-                );
+                painter
+                    .lock()
+                    .unwrap()
+                    .print(&format!("线程 {} 连接失败, 错误原因: {:?}\n", id, err))?;
             }
             Event::DownloadError(id, err) => {
-                print!(
-                    "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 下载失败, 错误原因: {:?}\n\n",
-                    id, err
-                );
+                painter
+                    .lock()
+                    .unwrap()
+                    .print(&format!("线程 {} 下载失败, 错误原因: {:?}\n", id, err))?;
             }
             Event::WriteError(err) => {
-                print!(
-                    "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K写入文件失败, 错误原因: {:?}\n\n",
-                    err
-                );
+                painter
+                    .lock()
+                    .unwrap()
+                    .print(&format!("写入文件失败, 错误原因: {:?}\n", err))?;
             }
             Event::Connecting(id) => {
                 if args.verbose {
-                    print!(
-                        "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在连接中……\n\n\n",
-                        id
-                    );
+                    painter
+                        .lock()
+                        .unwrap()
+                        .print(&format!("线程 {} 正在连接中……\n", id))?;
                 }
             }
             Event::Finished(id) => {
                 if args.verbose {
-                    print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 完成任务\n\n\n", id);
+                    painter
+                        .lock()
+                        .unwrap()
+                        .print(&format!("线程 {} 完成任务\n", id))?;
                 }
             }
             Event::Abort(id) => {
                 if args.verbose {
-                    print!("\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 已中断\n\n\n", id);
+                    painter
+                        .lock()
+                        .unwrap()
+                        .print(&format!("线程 {} 已中断\n", id))?;
                 }
             }
             Event::Downloading(id) => {
                 if args.verbose {
-                    print!(
-                        "\x1b[1A\r\x1B[K\x1b[1A\r\x1B[K线程 {} 正在下载中……\n\n\n",
-                        id
-                    );
+                    painter
+                        .lock()
+                        .unwrap()
+                        .print(&format!("线程 {} 正在下载中……\n", id))?;
                 }
             }
         }
     }
     update_progress(&conn, &save_path_str, &write_progress)?;
-    draw_progress::draw_progress(
-        start,
-        info.file_size,
-        &get_progress,
-        last_get_size,
-        last_get_time,
-        args.progress_width,
-        get_progress.total(),
-        &mut avg_get_speed,
-    );
+    painter.lock().unwrap().update()?;
+    cancel();
     result.join().unwrap();
     Ok(())
 }
