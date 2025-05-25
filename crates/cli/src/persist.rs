@@ -34,7 +34,7 @@ pub fn init_db() -> Result<Connection> {
             total_size INTEGER NOT NULL,
             etag TEXT,
             last_modified TEXT,
-            progress BLOB NOT NULL
+            progress TEXT NOT NULL
         )",
         (),
     )?;

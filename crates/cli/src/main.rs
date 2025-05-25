@@ -1,4 +1,5 @@
 mod args_parse;
+mod clean;
 mod download;
 mod draw_progress;
 mod fmt_progress;
@@ -22,5 +23,6 @@ fn main() -> Result<()> {
     match args {
         Args::Download(download_args) => download::download(download_args),
         Args::Update => update::update(),
+        Args::Clean => clean::clean(),
     }
 }
