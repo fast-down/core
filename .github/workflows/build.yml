@@ -49,14 +49,6 @@ jobs:
             os: windows-latest
             target: i686-pc-windows-msvc
             archive-name: fast-down-windows-32bit
-          - build: windows7-64bit
-            os: windows-latest
-            target: x86_64-win7-windows-msvc
-            archive-name: fast-down-windows7-64bit
-          - build: windows7-32bit
-            os: windows-latest
-            target: i686-win7-windows-msvc
-            archive-name: fast-down-windows7-32bit
       fail-fast: false
 
     steps:
