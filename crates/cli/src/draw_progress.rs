@@ -1,4 +1,4 @@
-use crate::{fmt_size::format_file_size, fmt_time::format_time};
+use crate::{fmt_size, fmt_time};
 use color_eyre::Result;
 use crossterm::{
     cursor,
@@ -103,9 +103,9 @@ impl ProgressPainter {
                 "|{}| {:>6.2}% ({:>8}/Unknown)\n已用时间: {} | 速度: {:>8}/s | 剩余: Unknown\n",
                 BLOCK_CHARS[0].to_string().repeat(self.width as usize),
                 0.0,
-                format_file_size(self.curr_size as f64),
-                format_time(self.start_time.elapsed().as_secs()),
-                format_file_size(self.avg_speed)
+                fmt_size::format_file_size(self.curr_size as f64),
+                fmt_time::format_time(self.start_time.elapsed().as_secs()),
+                fmt_size::format_file_size(self.avg_speed)
             )
         } else {
             let get_percent = (self.curr_size as f64 / self.total as f64) * 100.0;
@@ -146,11 +146,11 @@ impl ProgressPainter {
                 "|{}| {:>6.2}% ({:>8}/{})\n已用时间: {} | 速度: {:>8}/s | 剩余: {}\n",
                 bar_str,
                 get_percent,
-                format_file_size(self.curr_size as f64),
-                format_file_size(self.total as f64),
-                format_time(self.start_time.elapsed().as_secs()),
-                format_file_size(self.avg_speed),
-                format_time(get_remaining_time as u64)
+                fmt_size::format_file_size(self.curr_size as f64),
+                fmt_size::format_file_size(self.total as f64),
+                fmt_time::format_time(self.start_time.elapsed().as_secs()),
+                fmt_size::format_file_size(self.avg_speed),
+                fmt_time::format_time(get_remaining_time as u64)
             )
         };
         if self.has_progress {

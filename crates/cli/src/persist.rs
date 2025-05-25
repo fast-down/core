@@ -1,4 +1,4 @@
-use crate::{fmt_progress::fmt_progress, str_to_progress::str_to_progress};
+use crate::{fmt_progress, str_to_progress};
 use color_eyre::eyre::Result;
 use fast_down::Progress;
 use rusqlite::{Connection, ErrorCode, OptionalExtension};
@@ -60,7 +60,7 @@ pub fn init_progress(
 pub fn update_progress(conn: &Connection, file_path: &str, progress: &[Progress]) -> Result<()> {
     conn.execute(
         "UPDATE write_progress SET progress = ?1 WHERE file_path = ?2",
-        (fmt_progress(progress), file_path),
+        (fmt_progress::fmt_progress(progress), file_path),
     )?;
     Ok(())
 }
@@ -75,7 +75,7 @@ pub fn get_progress(conn: &Connection, file_path: &str) -> Result<Option<WritePr
                 total_size: row.get(0)?,
                 etag: row.get(1)?,
                 last_modified: row.get(2)?,
-                progress: str_to_progress(row.get(3)?),
+                progress: str_to_progress::str_to_progress(row.get(3)?),
             })
         },
     )
