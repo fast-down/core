@@ -1,4 +1,5 @@
-use crate::{Progress, RandWriter, SeqWriter};
+use crate::{Progress};
+use super::{RandWriter, SeqWriter};
 use bytes::Bytes;
 use color_eyre::Result;
 use std::{

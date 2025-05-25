@@ -9,12 +9,9 @@ use std::{
 pub mod auto;
 #[cfg(feature = "file")]
 pub mod download_file;
-#[cfg(feature = "file")]
-pub mod file_writer;
 pub mod multi;
 pub mod prefetch;
 pub mod single;
-pub mod writer;
 
 pub type CancelFn = Box<dyn FnOnce() + Send>;
 

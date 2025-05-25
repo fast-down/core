@@ -22,6 +22,12 @@ impl<T: Total> Total for [T] {
     }
 }
 
+impl<T: Total> Total for &T {
+    fn total(&self) -> u64 {
+        (*self).total()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

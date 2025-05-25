@@ -3,7 +3,8 @@ use crate::fmt::size;
 use crate::persist;
 use crate::progress::{invert as progress_invert, Painter as ProgressPainter};
 use color_eyre::eyre::{eyre, Result};
-use fast_down::{DownloadOptions, Event, MergeProgress, Progress, Total};
+use fast_down::{Event, MergeProgress, Progress, Total};
+use fast_down::file::DownloadOptions;
 use path_clean;
 use reqwest::{
     blocking::Client,
@@ -203,7 +204,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
         }
     }
 
-    let result = fast_down::download_file(
+    let result = fast_down::file::download(
         &info.final_url,
         &save_path,
         DownloadOptions {

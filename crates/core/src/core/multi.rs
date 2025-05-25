@@ -169,10 +169,11 @@ pub fn download(
 }
 
 #[cfg(test)]
-#[cfg(feature = "file")]
 mod tests {
+    #[cfg(feature = "file")]
+    use crate::writer::file::RandFileWriter;
     use super::*;
-    use crate::{MergeProgress, Progress, RandFileWriter};
+    use crate::{MergeProgress, Progress};
     use std::fs::File;
     use std::io::Read;
     use tempfile::NamedTempFile;
@@ -199,6 +200,7 @@ mod tests {
         result
     }
 
+    #[cfg(feature = "file")]
     #[test]
     fn test_multi_thread_regular_download() {
         let mock_body = build_mock_data(3 * 1024);
@@ -289,13 +291,14 @@ mod tests {
         assert_eq!(file_content, output);
     }
 
+    #[cfg(feature = "file")]
     #[test]
     fn test_multi_thread_download_chunk() {
         let mock_body = build_mock_data(3 * 1024);
         let mock_body_clone = mock_body.clone();
         let mut server = mockito::Server::new();
         server
-            .mock("GET", "/mutli-2")
+            .mock("GET", "/multi-2")
             .with_status(206)
             .with_body_from_request(move |request| {
                 if !request.has_header("Range") {
@@ -327,7 +330,7 @@ mod tests {
         let client = Client::new();
         let download_chunks = vec![10..80, 100..300, 1000..2000];
         let result = download(
-            format!("{}/mutli-2", server.url()),
+            format!("{}/multi-2", server.url()),
             RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024).unwrap(),
             DownloadOptions {
                 client,
@@ -379,6 +382,7 @@ mod tests {
         assert_eq!(file_content, output);
     }
 
+    #[cfg(feature = "file")]
     #[test]
     fn test_multi_thread_break_point() {
         let mock_body = build_mock_data(200 * 1024 * 1024);

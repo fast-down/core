@@ -109,7 +109,7 @@ pub fn download(
 #[cfg(feature = "file")]
 mod tests {
     use super::*;
-    use crate::core::file_writer::SeqFileWriter;
+    use crate::writer::file::SeqFileWriter;
     use crate::Total;
     use std::fs::File;
     use tempfile::NamedTempFile;

@@ -1,4 +1,4 @@
-use crate::{CanMerge, Progress};
+use crate::{Spliceable, Progress};
 
 pub trait MergeProgress {
     fn merge_progress(&mut self, new: Progress);
@@ -18,9 +18,9 @@ impl MergeProgress for Vec<Progress> {
             let u1 = if i == 0 {
                 false
             } else {
-                self[i - 1].can_merge(&new)
+                self[i - 1].can_splice(&new)
             };
-            let u2 = self[i].can_merge(&new);
+            let u2 = self[i].can_splice(&new);
             if u1 && u2 {
                 self[i - 1].end = self[i].end;
                 self.remove(i);
