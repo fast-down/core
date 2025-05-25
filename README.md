@@ -8,7 +8,7 @@
 
 `fast-down` **全网最快**多线程下载库
 
-![CLI 界面](./examples/cli.png)
+![CLI 界面](./docs/cli.png)
 
 ## 优势
 
