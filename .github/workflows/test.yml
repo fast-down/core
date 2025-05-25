@@ -23,6 +23,13 @@ jobs:
       - name: Install Rust Toolchain
         run: rustup update ${{ matrix.channel }} && rustup default ${{ matrix.channel }}
 
+      - name: Configure sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Set Rust Caching Env
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
       - name: Test
         run: cargo test --all-features
 
