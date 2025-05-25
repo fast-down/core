@@ -1,4 +1,4 @@
-use crate::{fmt_size, fmt_time};
+use crate::fmt::{size, time};
 use color_eyre::Result;
 use crossterm::{
     cursor,
@@ -19,7 +19,7 @@ use std::{
 
 const BLOCK_CHARS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 
-pub struct ProgressPainter {
+pub struct Painter {
     pub progress: Vec<Progress>,
     pub total: u64,
     pub width: u16,
@@ -35,7 +35,7 @@ pub struct ProgressPainter {
     stdout: Stdout,
 }
 
-impl ProgressPainter {
+impl Painter {
     pub fn new(
         init_progress: Vec<Progress>,
         total: u64,
@@ -62,7 +62,7 @@ impl ProgressPainter {
         }
     }
 
-    pub fn start_update_thread(painter_arc: Arc<Mutex<ProgressPainter>>) -> Box<impl Fn()> {
+    pub fn start_update_thread(painter_arc: Arc<Mutex<Painter>>) -> Box<impl Fn()> {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
         thread::spawn(move || loop {
@@ -103,9 +103,9 @@ impl ProgressPainter {
                 "|{}| {:>6.2}% ({:>8}/Unknown)\n已用时间: {} | 速度: {:>8}/s | 剩余: Unknown\n",
                 BLOCK_CHARS[0].to_string().repeat(self.width as usize),
                 0.0,
-                fmt_size::format_file_size(self.curr_size as f64),
-                fmt_time::format_time(self.start_time.elapsed().as_secs()),
-                fmt_size::format_file_size(self.avg_speed)
+                size::format(self.curr_size as f64),
+                time::format(self.start_time.elapsed().as_secs()),
+                size::format(self.avg_speed)
             )
         } else {
             let get_percent = (self.curr_size as f64 / self.total as f64) * 100.0;
@@ -146,11 +146,11 @@ impl ProgressPainter {
                 "|{}| {:>6.2}% ({:>8}/{})\n已用时间: {} | 速度: {:>8}/s | 剩余: {}\n",
                 bar_str,
                 get_percent,
-                fmt_size::format_file_size(self.curr_size as f64),
-                fmt_size::format_file_size(self.total as f64),
-                fmt_time::format_time(self.start_time.elapsed().as_secs()),
-                fmt_size::format_file_size(self.avg_speed),
-                fmt_time::format_time(get_remaining_time as u64)
+                size::format(self.curr_size as f64),
+                size::format(self.total as f64),
+                time::format(self.start_time.elapsed().as_secs()),
+                size::format(self.avg_speed),
+                time::format(get_remaining_time as u64)
             )
         };
         if self.has_progress {

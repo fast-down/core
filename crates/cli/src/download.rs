@@ -1,8 +1,7 @@
-use crate::args_parse::DownloadArgs;
-use crate::draw_progress::ProgressPainter;
-use crate::fmt_size;
+use crate::args::DownloadArgs;
+use crate::fmt::size;
 use crate::persist;
-use crate::reverse_progress;
+use crate::progress::{invert as progress_invert, Painter as ProgressPainter};
 use color_eyre::eyre::{eyre, Result};
 use fast_down::{DownloadOptions, Event, MergeProgress, Progress, Total};
 use path_clean;
@@ -20,6 +19,15 @@ use std::{
     time::Instant,
 };
 use url::Url;
+
+#[inline]
+fn confirm(input: String) -> Result<bool> {
+    match input.trim().to_lowercase().as_str() {
+        "y" => Ok(true),
+        "n" | "" => Ok(false),
+        _ => Err(eyre!("无效输入，下载取消")),
+    }
+}
 
 pub fn download(mut args: DownloadArgs) -> Result<()> {
     if args.browser {
@@ -66,14 +74,14 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
     let save_path_str = save_path.to_str().unwrap().to_string();
 
     println!(
-      "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}\nETag: {:?}\nLast-Modified: {:?}\n",
-      info.file_name,
-      fmt_size::format_file_size(info.file_size as f64),
-      info.file_size,
-      save_path.to_str().unwrap(),
-      threads,
-      info.etag,
-      info.last_modified
+        "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}\nETag: {:?}\nLast-Modified: {:?}\n",
+        info.file_name,
+        size::format(info.file_size as f64),
+        info.file_size,
+        save_path.to_str().unwrap(),
+        threads,
+        info.etag,
+        info.last_modified
   );
 
     let mut download_chunks = vec![0..info.file_size];
@@ -85,15 +93,14 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
             if let Ok(Some(progress)) = persist::get_progress(&conn, &save_path_str) {
                 let downloaded = progress.progress.total();
                 if downloaded < info.file_size {
-                    download_chunks =
-                        reverse_progress::reverse_progress(&progress.progress, info.file_size);
+                    download_chunks = progress_invert(&progress.progress, info.file_size);
                     write_progress = progress.progress.clone();
                     resume_download = true;
                     println!("发现未完成的下载，将继续下载剩余部分");
                     println!(
                         "已下载: {} / {} ({}%)",
-                        fmt_size::format_file_size(downloaded as f64),
-                        fmt_size::format_file_size(info.file_size as f64),
+                        size::format(downloaded as f64),
+                        size::format(info.file_size as f64),
                         downloaded * 100 / info.file_size
                     );
                     if !args.yes {
@@ -109,13 +116,9 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                             io::stdout().flush()?;
                             let mut input = String::new();
                             io::stdin().read_line(&mut input)?;
-                            match input.trim().to_lowercase().as_str() {
-                                "y" => {}
-                                "n" | "" => {
-                                    println!("下载取消");
-                                    return Ok(());
-                                }
-                                _ => return Err(eyre!("无效输入，下载取消")),
+                            if !confirm(input)? {
+                                println!("下载取消");
+                                return Ok(());
                             }
                         }
                         if progress.etag != info.etag {
@@ -130,13 +133,9 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                             io::stdout().flush()?;
                             let mut input = String::new();
                             io::stdin().read_line(&mut input)?;
-                            match input.trim().to_lowercase().as_str() {
-                                "y" => {}
-                                "n" | "" => {
-                                    println!("下载取消");
-                                    return Ok(());
-                                }
-                                _ => return Err(eyre!("无效输入，下载取消")),
+                            if !confirm(input)? {
+                                println!("下载取消");
+                                return Ok(());
                             }
                         } else if let Some(progress_etag) = progress.etag.as_ref() {
                             if progress_etag.starts_with("W/") {
@@ -151,13 +150,9 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                                 io::stdout().flush()?;
                                 let mut input = String::new();
                                 io::stdin().read_line(&mut input)?;
-                                match input.trim().to_lowercase().as_str() {
-                                    "y" => {}
-                                    "n" | "" => {
-                                        println!("下载取消");
-                                        return Ok(());
-                                    }
-                                    _ => return Err(eyre!("无效输入，下载取消")),
+                                if !confirm(input)? {
+                                    println!("下载取消");
+                                    return Ok(());
                                 }
                             }
                         } else {
@@ -169,13 +164,9 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                             io::stdout().flush()?;
                             let mut input = String::new();
                             io::stdin().read_line(&mut input)?;
-                            match input.trim().to_lowercase().as_str() {
-                                "y" => {}
-                                "n" | "" => {
-                                    println!("下载取消");
-                                    return Ok(());
-                                }
-                                _ => return Err(eyre!("无效输入，下载取消")),
+                            if !confirm(input)? {
+                                println!("下载取消");
+                                return Ok(());
                             }
                         }
                         if progress.last_modified != info.last_modified {
@@ -187,13 +178,9 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                             io::stdout().flush()?;
                             let mut input = String::new();
                             io::stdin().read_line(&mut input)?;
-                            match input.trim().to_lowercase().as_str() {
-                                "y" => {}
-                                "n" | "" => {
-                                    println!("下载取消");
-                                    return Ok(());
-                                }
-                                _ => return Err(eyre!("无效输入，下载取消")),
+                            if !confirm(input)? {
+                                println!("下载取消");
+                                return Ok(());
                             }
                         }
                     }
@@ -209,13 +196,9 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
             io::stdout().flush()?;
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
-            match input.trim().to_lowercase().as_str() {
-                "y" => {}
-                "n" | "" => {
-                    println!("下载取消");
-                    return Ok(());
-                }
-                _ => return Err(eyre!("无效输入，下载取消")),
+            if !confirm(input)? {
+                println!("下载取消");
+                return Ok(());
             }
         }
     }

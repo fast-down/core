@@ -1,16 +1,12 @@
-mod args_parse;
+mod args;
 mod clean;
 mod download;
-mod draw_progress;
-mod fmt_progress;
-mod fmt_size;
-mod fmt_time;
+mod fmt;
 mod persist;
-mod reverse_progress;
-mod str_to_progress;
+mod progress;
 mod update;
 
-use args_parse::Args;
+use args::Args;
 use color_eyre::eyre::Result;
 use mimalloc::MiMalloc;
 
