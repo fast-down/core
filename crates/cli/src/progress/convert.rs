@@ -25,11 +25,11 @@ mod tests {
     #[test]
     fn test_str_to_progress() {
         assert_eq!(
-            from_str("1-10,20-30,40-50".to_string()),
+            from_str("1-10,20-30,40-50"),
             vec![1..11, 20..31, 40..51]
         );
-        assert_eq!(from_str("".to_string()), vec![] as Vec<Progress>);
-        assert_eq!(from_str("2-5".to_string()), vec![2..6]);
+        assert_eq!(from_str(""), vec![] as Vec<Progress>);
+        assert_eq!(from_str("2-5"), vec![2..6]);
     }
 
     #[test]
