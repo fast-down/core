@@ -87,11 +87,11 @@ jobs:
 
       - name: Copy target to folder (Windows)
         if: contains(matrix.build, 'windows')
-        run: cp target/${{ matrix.target }}/release/fd.exe output
+        run: cp target/${{ matrix.target }}/release/fast.exe output
 
       - name: Copy target to folder (Non-Windows)
         if: ${{ !contains(matrix.build, 'windows') }}
-        run: cp target/${{ matrix.target }}/release/fd output
+        run: cp target/${{ matrix.target }}/release/fast output
 
       - name: Upload archive
         uses: actions/upload-artifact@v4

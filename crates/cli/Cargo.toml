@@ -31,5 +31,5 @@ crossterm = "0.29.0"
 mimalloc = "0.1.46"
 
 [[bin]]
-name = "fd"
+name = "fast"
 path = "src/main.rs"
