@@ -44,11 +44,11 @@ jobs:
           - build: windows10-64bit
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive-name: fast-down-windows10-64bit
+            archive-name: fast-down-windows-64bit
           - build: windows10-32bit
             os: windows-latest
             target: i686-pc-windows-msvc
-            archive-name: fast-down-windows10-32bit
+            archive-name: fast-down-windows-32bit
           - build: windows7-64bit
             os: windows-latest
             target: x86_64-win7-windows-msvc
