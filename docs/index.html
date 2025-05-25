@@ -2,8 +2,8 @@
 <html lang="zh-CN">
 
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>fast-down 快下</title>
   <style>
     html {
@@ -16,7 +16,7 @@
       --accent-color: #007bff;
       --secondary-bg-color: #fcfdff;
       --border-color: #dee2e6;
-      --table-header-bg: #e9ecef;
+      --table-header-bg: #f4f6f8;
       --link-color: var(--accent-color);
       --button-text-color: #ffffff;
     }
@@ -31,7 +31,6 @@
         --table-header-bg: #333333;
         --link-color: var(--accent-color);
         --button-text-color: var(--bg-color);
-        /* Or consider a fixed light color for dark mode buttons */
       }
     }
 
@@ -60,7 +59,6 @@
     }
 
     .page-header {
-      /* Added for semantic grouping */
       margin-bottom: 1.5em;
     }
 
@@ -82,7 +80,6 @@
       font-size: 1.5em;
       color: var(--text-color);
       opacity: 0.9;
-      /* margin-bottom: 1.5em; removed as .page-header has margin */
       font-weight: normal;
     }
 
@@ -106,14 +103,7 @@
     }
 
     .links-container a:hover {
-      background-color: color-mix(in srgb, var(--accent-color) 85%, black);
       transform: translateY(-2px);
-    }
-
-    @media (prefers-color-scheme: dark) {
-      .links-container a:hover {
-        background-color: color-mix(in srgb, var(--accent-color) 85%, white);
-      }
     }
 
     .features {
@@ -133,7 +123,6 @@
       box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
       transition: transform 0.2s ease, box-shadow 0.2s ease, background-color 0.3s ease, border-color 0.3s ease;
       min-width: 0;
-      /* Kept for safety, often useful in grid/flex */
     }
 
     @media (prefers-color-scheme: dark) {
@@ -172,7 +161,6 @@
 
     .feature-item a:hover {
       text-decoration: none;
-      color: color-mix(in srgb, var(--link-color) 80%, var(--text-color));
     }
 
     .feature-item strong {
@@ -216,10 +204,6 @@
       border: 2px solid var(--secondary-bg-color);
     }
 
-    .table-wrapper::-webkit-scrollbar-thumb:hover {
-      background-color: color-mix(in srgb, var(--border-color) 80%, var(--text-color) 20%);
-    }
-
     .table-wrapper::-webkit-scrollbar-corner {
       background: var(--bg-color);
     }
@@ -254,17 +238,6 @@
       font-weight: 600;
     }
 
-    tbody tr:nth-child(even) {
-      background-color: color-mix(in srgb, var(--secondary-bg-color) 50%, var(--bg-color));
-    }
-
-    @media (prefers-color-scheme: dark) {
-      tbody tr:nth-child(even) {
-        background-color: color-mix(in srgb, var(--secondary-bg-color) 70%, var(--bg-color));
-      }
-    }
-
-    /* Responsive adjustments */
     @media (max-width: 768px) {
       .container {
         padding-left: 15px;
@@ -354,49 +327,63 @@
 
 <body>
   <div class="container">
-    <header class="page-header"> <!-- Added header -->
-      <h1><a target="_blank" href="https://github.com/share121/fast-down" rel="noopener noreferrer">fast-down 快下</a>
+    <header class="page-header">
+      <h1>
+        <a target="_blank" href="https://github.com/share121/fast-down" rel="noopener noreferrer">fast-down 快下</a>
       </h1>
-      <h2 class="subtitle"><span aria-hidden="true">🔥</span>全网最快下载器<span aria-hidden="true">🔥</span></h2>
+      <h2 class="subtitle">
+        <span aria-hidden="true">🔥</span>全网最快下载器<span aria-hidden="true">🔥</span>
+      </h2>
     </header>
-
-    <main> <!-- Added main -->
+    <main>
       <div class="links-container">
         <a href="#download">前往下载</a>
         <a target="_blank" href="https://github.com/share121/fast-down" rel="noopener noreferrer">前往 Github</a>
         <a target="_blank" href="https://discord.gg/eSwjCrb5aE" rel="noopener noreferrer">加入 Discord</a>
       </div>
-
-      <section class="features"> <!-- Added section -->
+      <section class="features">
         <div class="feature-item">
           <h2><span aria-hidden="true">⚡️</span>极速下载</h2>
-          <p>自研 <a target="_blank" href="https://github.com/share121/fast-steal"
-              rel="noopener noreferrer">fast-steal</a> 任务窃取算法，实测下载速度比 NDM 快
-            <strong>1.51 倍</strong>
+          <p>
+            自研
+            <a target="_blank" href="https://github.com/share121/fast-steal" rel="noopener noreferrer">fast-steal</a>
+            任务窃取算法，实测下载速度比 NDM 快 <strong>1.51 倍</strong>
           </p>
         </div>
         <div class="feature-item">
           <h2><span aria-hidden="true">🔄</span>超强重试</h2>
-          <p>下载时，切换 WiFi、关闭 WiFi、切换代理，都能保证<strong>文件内容正确</strong></p>
+          <p>
+            下载时，切换 WiFi、关闭 WiFi、切换代理，都能保证<strong>文件内容正确</strong>
+          </p>
         </div>
         <div class="feature-item">
           <h2><span aria-hidden="true">⛓️‍💥</span>断点续传</h2>
-          <p>下到一半<strong>随时暂停</strong>，之后还能<strong>继续传输</strong></p>
+          <p>
+            下到一半<strong>随时暂停</strong>，之后还能<strong>继续传输</strong>
+          </p>
         </div>
         <div class="feature-item">
           <h2><span aria-hidden="true">⛓️‍💥</span>增量续传</h2>
-          <p>服务器日志今天下载完成，明天又多了 1000 行，增量续传功能实现<strong>只传输新增的 1000 行</strong></p>
+          <p>
+            服务器日志今天下载完成，明天又多了 1000
+            行，增量续传功能实现<strong>只传输新增的 1000 行</strong>
+          </p>
         </div>
         <div class="feature-item">
           <h2><span aria-hidden="true">💰</span>开源免费</h2>
-          <p>所有代码全部公开，由 <a target="_blank" href="https://github.com/share121" rel="noopener noreferrer">share121</a>、<a
-              target="_blank" href="https://github.com/CyanChanges" rel="noopener noreferrer">Cyan</a> 与其他贡献者一起维护</p>
+          <p>
+            所有代码全部公开，由
+            <a target="_blank" href="https://github.com/share121" rel="noopener noreferrer">share121</a>、<a
+              target="_blank" href="https://github.com/CyanChanges" rel="noopener noreferrer">Cyan</a>
+            与其他贡献者一起维护
+          </p>
         </div>
-
         <div id="download" class="feature-item platform-support-item">
           <h2><span aria-hidden="true">💻</span>跨平台</h2>
-          <p class="platform-intro">支持 Windows 64 位、Windows 32 位、Linux 64 位、Linux 32 位、Linux Arm64、Mac OS 64 位、Mac OS
-            Arm64</p>
+          <p class="platform-intro">
+            支持 Windows 64 位、Windows 32 位、Linux 64 位、Linux 32 位、Linux
+            Arm64、Mac OS 64 位、Mac OS Arm64
+          </p>
           <div class="table-wrapper">
             <table>
               <thead>
@@ -411,40 +398,55 @@
               <tbody>
                 <tr>
                   <td>64 位</td>
-                  <td><a target="_blank"
+                  <td>
+                    <a target="_blank"
                       href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows-64bit.zip">下载</a>
                   </td>
-                  <td><a target="_blank"
+                  <td>
+                    <a target="_blank"
                       href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows7-64bit.zip">下载</a>
                   </td>
-                  <td><a target="_blank"
+                  <td>
+                    <a target="_blank"
                       href="https://github.com/share121/fast-down/releases/latest/download/fast-down-linux-64bit.zip">下载</a>
                   </td>
-                  <td><a target="_blank"
+                  <td>
+                    <a target="_blank"
                       href="https://github.com/share121/fast-down/releases/latest/download/fast-down-macos-64bit.zip">下载</a>
                   </td>
                 </tr>
                 <tr>
                   <td>32 位</td>
-                  <td><a target="_blank"
+                  <td>
+                    <a target="_blank"
                       href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows-32bit.zip">下载</a>
                   </td>
-                  <td><a target="_blank"
+                  <td>
+                    <a target="_blank"
                       href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows7-32bit.zip">下载</a>
                   </td>
-                  <td><a target="_blank"
+                  <td>
+                    <a target="_blank"
                       href="https://github.com/share121/fast-down/releases/latest/download/fast-down-linux-32bit.zip">下载</a>
                   </td>
-                  <td><span aria-hidden="true">❌</span><span style="position:absolute; left: -9999px;">不支持</span></td>
+                  <td>
+                    <span aria-hidden="true">❌</span><span style="position:absolute; left: -9999px;">不支持</span>
+                  </td>
                 </tr>
                 <tr>
                   <td>Arm64</td>
-                  <td><span aria-hidden="true">❌</span><span style="position:absolute; left: -9999px;">不支持</span></td>
-                  <td><span aria-hidden="true">❌</span><span style="position:absolute; left: -9999px;">不支持</span></td>
-                  <td><a target="_blank"
+                  <td>
+                    <span aria-hidden="true">❌</span><span style="position:absolute; left: -9999px;">不支持</span>
+                  </td>
+                  <td>
+                    <span aria-hidden="true">❌</span><span style="position:absolute; left: -9999px;">不支持</span>
+                  </td>
+                  <td>
+                    <a target="_blank"
                       href="https://github.com/share121/fast-down/releases/latest/download/fast-down-linux-arm64.zip">下载</a>
                   </td>
-                  <td><a target="_blank"
+                  <td>
+                    <a target="_blank"
                       href="https://github.com/share121/fast-down/releases/latest/download/fast-down-macos-arm64.zip">下载</a>
                   </td>
                 </tr>
@@ -452,10 +454,9 @@
             </table>
           </div>
         </div>
-      </section> <!-- End .features section -->
-
-    </main> <!-- End main -->
-  </div> <!-- End .container -->
+      </section>
+    </main>
+  </div>
 </body>
 
 </html>
