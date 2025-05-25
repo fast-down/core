@@ -1808,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "fast-down-cli"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "clap",
  "color-eyre",
