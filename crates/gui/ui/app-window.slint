@@ -1,56 +1,73 @@
-import { HorizontalBox, VerticalBox, StandardTableView, GroupBox, StyleMetrics, LineEdit, Button } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, StandardTableView, GroupBox, StyleMetrics, LineEdit, Button, ListView, TextEdit, ProgressIndicator } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
     title: "fast-down";
-    HorizontalBox {
-        vertical-stretch: 1;
-        VerticalLayout {
-            spacing: StyleMetrics.layout-spacing;
-            HorizontalLayout {
-                spacing: StyleMetrics.layout-spacing;
-                Button {
-                    text: @tr("Add");
+    preferred-height: 500px;
+
+    VerticalLayout {
+        spacing: StyleMetrics.layout-spacing;
+        ListView {
+            for i in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]: VerticalBox {
+                Text {
+                    text: "File Name";
                 }
 
-                Button {
-                    text: @tr("Resume");
+                HorizontalLayout {
+                    VerticalBox {
+                        Text {
+                            text: @tr("Speed");
+                        }
+
+                        Text {
+                            text: "10 MB/s";
+                        }
+                    }
+
+                    VerticalBox {
+                        Text {
+                            text: @tr("Progress");
+                        }
+
+                        Text {
+                            text: "10 MB / 5 GB";
+                        }
+                    }
+
+                    VerticalBox {
+                        Text {
+                            text: @tr("Remaining Time");
+                        }
+
+                        Text {
+                            text: "01:23:45";
+                        }
+                    }
                 }
 
-                Button {
-                    text: @tr("Stop");
-                }
-
-                Button {
-                    text: @tr("Delete");
-                }
-
-                Button {
-                    text: @tr("Settings");
+                ProgressIndicator {
+                    progress: 0.1;
                 }
             }
+        }
 
-            StandardTableView {
-                columns: [
-                    { title: @tr("File Name") },
-                    { title: @tr("Size") },
-                    { title: @tr("Status") },
-                    { title: @tr("Bandwidth") },
-                    { title: @tr("Remaining Time") },
-                ];
-                rows: [
-                    [
-                        { text: "Item 1" },
-                        { text: "Item 2" },
-                    ],
-                    [
-                        { text: "Item 1" },
-                        { text: "Item 2" },
-                    ],
-                    [
-                        { text: "Item 1" },
-                        { text: "Item 2" },
-                    ]
-                ];
+        HorizontalLayout {
+            padding: 8px;
+            spacing: StyleMetrics.layout-spacing;
+            // TextEdit {
+            //     height: 43px;
+            //     placeholder-text: @tr("URL");
+            //     wrap: TextWrap.no-wrap;
+            // }
+            LineEdit {
+                placeholder-text: @tr("URL");
+            }
+
+            Button {
+                text: @tr("Add");
+            }
+
+            Button {
+                text: @tr("Settings");
             }
         }
     }
