@@ -1,63 +1,201 @@
 import { HorizontalBox, VerticalBox, StandardTableView, GroupBox, StyleMetrics, LineEdit, Button, ListView, TextEdit, ProgressIndicator } from "std-widgets.slint";
 
-export component AppWindow inherits Window {
-    title: "fast-down";
-    preferred-height: 500px;
+struct Progress {
+    is-blank: bool,
+    width: float,
+}
 
-    VerticalLayout {
-        spacing: StyleMetrics.layout-spacing;
-        ListView {
-            for i in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]: VerticalBox {
+struct DownloadData {
+    filename: string,
+    speed: string,
+    percentage: string,
+    remaining-time: string,
+    elapsed: string,
+    progress: [Progress],
+    is-downloading: bool,
+}
+
+component DownloadItem {
+    callback resume();
+    callback stop();
+    callback delete();
+    callback open();
+    callback open-folder();
+    in property <string> filename;
+    in property <string> speed;
+    in property <string> percentage;
+    in property <string> remaining-time;
+    in property <string> elapsed;
+    in property <[Progress]> progress;
+    in property <bool> is-downloading;
+
+    VerticalBox {
+        Text {
+            text: filename;
+            font-weight: 700;
+        }
+
+        HorizontalLayout {
+            spacing: StyleMetrics.layout-spacing;
+            VerticalLayout {
                 Text {
-                    text: "File Name";
+                    text: @tr("Speed");
+                    overflow: TextOverflow.elide;
                 }
 
-                HorizontalLayout {
-                    VerticalBox {
-                        Text {
-                            text: @tr("Speed");
-                        }
+                Text {
+                    text: speed;
+                    overflow: TextOverflow.elide;
+                }
+            }
 
-                        Text {
-                            text: "10 MB/s";
-                        }
-                    }
-
-                    VerticalBox {
-                        Text {
-                            text: @tr("Progress");
-                        }
-
-                        Text {
-                            text: "10 MB / 5 GB";
-                        }
-                    }
-
-                    VerticalBox {
-                        Text {
-                            text: @tr("Remaining Time");
-                        }
-
-                        Text {
-                            text: "01:23:45";
-                        }
-                    }
+            VerticalLayout {
+                Text {
+                    text: @tr("Percentage");
+                    overflow: TextOverflow.elide;
                 }
 
-                ProgressIndicator {
-                    progress: 0.1;
+                Text {
+                    text: percentage;
+                    overflow: TextOverflow.elide;
+                }
+            }
+
+            VerticalLayout {
+                Text {
+                    text: @tr("Remaining");
+                    overflow: TextOverflow.elide;
+                }
+
+                Text {
+                    text: remaining-time;
+                    overflow: TextOverflow.elide;
+                }
+            }
+
+            VerticalLayout {
+                Text {
+                    text: @tr("Elapsed");
+                    overflow: TextOverflow.elide;
+                }
+
+                Text {
+                    text: elapsed;
+                    overflow: TextOverflow.elide;
                 }
             }
         }
 
         HorizontalLayout {
-            padding: 8px;
+            for p in progress: ProgressIndicator {
+                width: p.width * parent.width;
+                progress: p.is-blank ? 0 : 1;
+            }
+        }
+
+        HorizontalLayout {
             spacing: StyleMetrics.layout-spacing;
-            // TextEdit {
-            //     height: 43px;
-            //     placeholder-text: @tr("URL");
-            //     wrap: TextWrap.no-wrap;
-            // }
+
+            Button {
+                text: is-downloading ? @tr("Stop") : @tr("Resume");
+                clicked => {
+                    if is-downloading {
+                        stop()
+                    } else {
+                        resume()
+                    }
+                }
+            }
+
+            Button {
+                text: @tr("Delete");
+                clicked => {
+                    delete()
+                }
+            }
+
+            Button {
+                text: @tr("Open");
+                clicked => {
+                    open()
+                }
+            }
+
+            Button {
+                text: @tr("Folder");
+                clicked => {
+                    open-folder()
+                }
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "fast-down";
+    preferred-height: 500px;
+    in property <[DownloadData]> download-list: [
+        {
+            filename: "sdfsdf",
+            speed: "100MB/s",
+            percentage: "10MB / 100GB (10%)",
+            remaining-time: "01:23:45",
+            elapsed: "12:34:56",
+            is-downloading: true,
+            progress: [
+                {
+                    is-blank: false,
+                    width: 0.2,
+                },
+                {
+                    is-blank: true,
+                    width: 0.6,
+                },
+                {
+                    is-blank: false,
+                    width: 0.2,
+                },
+            ]
+        },
+        {
+            filename: "sdfsdf",
+            speed: "100MB/s",
+            percentage: "10MB / 100GB (10%)",
+            remaining-time: "01:23:45",
+            elapsed: "12:34:56",
+            is-downloading: true,
+            progress: [
+                {
+                    is-blank: false,
+                    width: 0.2,
+                },
+                {
+                    is-blank: true,
+                    width: 0.6,
+                },
+                {
+                    is-blank: false,
+                    width: 0.2,
+                },
+            ]
+        },
+    ];
+
+    VerticalLayout {
+        spacing: StyleMetrics.layout-spacing;
+        ListView {
+            for d in download-list: DownloadItem {
+                filename: d.filename;
+                percentage: d.percentage;
+                remaining-time: d.remaining-time;
+                speed: d.speed;
+                elapsed: d.elapsed;
+                is-downloading: d.is-downloading;
+                progress: d.progress;
+            }
+        }
+
+        HorizontalBox {
             LineEdit {
                 placeholder-text: @tr("URL");
             }
