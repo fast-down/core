@@ -20,6 +20,7 @@ jobs:
           - macos-64bit
           - windows-64bit
           - windows-32bit
+          - windows-arm64
         include:
           - build: linux-arm64
             os: ubuntu-22.04-arm
