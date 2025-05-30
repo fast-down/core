@@ -22,33 +22,37 @@ jobs:
           - windows10-32bit
         include:
           - build: linux-arm64
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             archive-name: fast-down-linux-arm64
           - build: linux-32bit
-            os: ubuntu-latest
+            os: ubuntu-22.04
             target: i686-unknown-linux-gnu
             archive-name: fast-down-linux-32bit
           - build: linux-64bit
-            os: ubuntu-latest
+            os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive-name: fast-down-linux-64bit
           - build: macos-arm64
-            os: macos-latest
+            os: macos-14
             target: aarch64-apple-darwin
             archive-name: fast-down-macos-arm64
           - build: macos-64bit
-            os: macos-latest
+            os: macos-14
             target: x86_64-apple-darwin
             archive-name: fast-down-macos-64bit
-          - build: windows10-64bit
-            os: windows-latest
+          - build: windows-64bit
+            os: windows-2019
             target: x86_64-pc-windows-msvc
             archive-name: fast-down-windows-64bit
-          - build: windows10-32bit
-            os: windows-latest
+          - build: windows-32bit
+            os: windows-2019
             target: i686-pc-windows-msvc
             archive-name: fast-down-windows-32bit
+          - build: windows-arm64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            archive-name: fast-down-windows-arm64
       fail-fast: false
 
     steps:
@@ -74,34 +78,30 @@ jobs:
 
       - name: Make output folder
         run: |
-          mkdir output
-          cp config.toml output/
+          mkdir fast-down
+          cp config.toml fast-down
 
       - name: Copy target to folder (Windows)
         if: contains(matrix.build, 'windows')
-        run: cp target/${{ matrix.target }}/release/fast.exe output
+        run: cp target/${{ matrix.target }}/release/fast.exe fast-down
 
       - name: Copy target to folder (Non-Windows)
         if: ${{ !contains(matrix.build, 'windows') }}
-        run: cp target/${{ matrix.target }}/release/fast output
+        run: cp target/${{ matrix.target }}/release/fast fast-down
 
       - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive-name }}
-          path: output
+          path: fast-down
 
       - name: Create ZIP (Windows)
         if: contains(matrix.build, 'windows')
-        run: |
-          cd output
-          Compress-Archive -Path * -DestinationPath ../${{ matrix.archive-name }}.zip
+        run: Compress-Archive -Path fast-down -DestinationPath ${{ matrix.archive-name }}.zip
 
       - name: Create ZIP (Non-Windows)
         if: ${{ !contains(matrix.build, 'windows') }}
-        run: |
-          cd output
-          zip -r -9 ../${{ matrix.archive-name }}.zip *
+        run: zip -r -9 ${{ matrix.archive-name }}.zip fast-down
 
       - name: Release
         uses: softprops/action-gh-release@v2

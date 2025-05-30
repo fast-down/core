@@ -1,6 +1,6 @@
 // Prevent console window in addition to Slint window in Windows release builds when, e.g., starting the app via file manager. Ignored on other platforms.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
+use slint::Model;
 use std::error::Error;
 
 slint::include_modules!();
@@ -19,6 +19,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     //         ui.set_counter(ui.get_counter() + 1);
     //     }
     // });
+
+    ui.on_add_url(move |url| {
+        dbg!(&url);
+    });
 
     ui.run()?;
 

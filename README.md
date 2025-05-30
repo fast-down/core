@@ -23,7 +23,7 @@
 ```bash
 超级快的下载器命令行界面
 
-Usage: fd [OPTIONS] <URL>
+Usage: fast [OPTIONS] <URL>
 
 Arguments:
   <URL>  要下载的URL
@@ -78,6 +78,3 @@ Options:
   -V, --version
           Print version
 ```
-
-
-
