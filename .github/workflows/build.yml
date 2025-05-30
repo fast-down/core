@@ -18,8 +18,8 @@ jobs:
           - linux-64bit
           - macos-arm64
           - macos-64bit
-          - windows10-64bit
-          - windows10-32bit
+          - windows-64bit
+          - windows-32bit
         include:
           - build: linux-arm64
             os: ubuntu-22.04-arm
