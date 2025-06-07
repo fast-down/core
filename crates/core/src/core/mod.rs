@@ -7,8 +7,6 @@ use std::{
 };
 
 pub mod auto;
-#[cfg(feature = "file")]
-pub mod download_file;
 pub mod multi;
 pub mod prefetch;
 pub mod single;

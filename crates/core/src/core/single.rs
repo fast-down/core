@@ -1,7 +1,6 @@
 use super::DownloadResult;
-use crate::{Event, Progress, SeqWriter};
+use crate::{ConnectErrorKind, Event, ProgressEntry, SeqWriter};
 use bytes::{Bytes, BytesMut};
-use color_eyre::eyre::Result;
 use reqwest::{blocking::Client, IntoUrl};
 use std::{
     io::{ErrorKind, Read},
@@ -23,17 +22,17 @@ pub fn download(
     url: impl IntoUrl,
     mut writer: impl SeqWriter + 'static,
     options: DownloadOptions,
-) -> Result<DownloadResult> {
+) -> Result<DownloadResult, reqwest::Error> {
     let url = url.into_url()?;
     let (tx, event_chain) = crossbeam_channel::unbounded();
-    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(Progress, Bytes)>();
+    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(ProgressEntry, Bytes)>();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
         for (spin, data) in rx_write {
             loop {
                 match writer.write_sequentially(data.clone()) {
                     Ok(_) => break,
-                    Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
+                    Err(e) => tx_clone.send(Event::WriteError(e)).unwrap(),
                 }
                 thread::sleep(options.retry_gap);
             }
@@ -42,7 +41,7 @@ pub fn download(
         loop {
             match writer.flush() {
                 Ok(_) => break,
-                Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
+                Err(e) => tx_clone.send(Event::WriteError(e)).unwrap(),
             };
             thread::sleep(options.retry_gap);
         }
@@ -59,7 +58,9 @@ pub fn download(
             tx.send(Event::Connecting(0)).unwrap();
             match options.client.get(url.clone()).send() {
                 Ok(response) => break response,
-                Err(e) => tx.send(Event::ConnectError(0, e.into())).unwrap(),
+                Err(e) => tx
+                    .send(Event::ConnectError(0, ConnectErrorKind::Reqwest(e)))
+                    .unwrap(),
             }
             thread::sleep(options.retry_gap);
         };
@@ -76,7 +77,7 @@ pub fn download(
                     Ok(len) => break len,
                     Err(e) => {
                         let kind = e.kind();
-                        tx.send(Event::DownloadError(0, e.into())).unwrap();
+                        tx.send(Event::DownloadError(0, e)).unwrap();
                         if kind != ErrorKind::Interrupted {
                             return;
                         }
@@ -135,7 +136,7 @@ mod tests {
         let client = Client::new();
         let result = download(
             format!("{}/small", server.url()),
-            SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
+            SeqFileWriter::new(file, 8 * 1024 * 1024),
             DownloadOptions {
                 client,
                 retry_gap: Duration::from_secs(1),
@@ -197,7 +198,7 @@ mod tests {
         let client = Client::new();
         let result = download(
             format!("{}/empty", server.url()),
-            SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
+            SeqFileWriter::new(file, 8 * 1024 * 1024),
             DownloadOptions {
                 client,
                 retry_gap: Duration::from_secs(1),
@@ -259,7 +260,7 @@ mod tests {
         let client = Client::new();
         let result = download(
             format!("{}/large", server.url()),
-            SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
+            SeqFileWriter::new(file, 8 * 1024 * 1024),
             DownloadOptions {
                 client,
                 retry_gap: Duration::from_secs(1),
@@ -321,7 +322,7 @@ mod tests {
         let client = Client::new();
         let result = download(
             format!("{}/exact_buffer_size_file", server.url()),
-            SeqFileWriter::new(file, 8 * 1024 * 1024).unwrap(),
+            SeqFileWriter::new(file, 8 * 1024 * 1024),
             DownloadOptions {
                 client,
                 retry_gap: Duration::from_secs(1),

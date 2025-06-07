@@ -1,7 +1,7 @@
 mod base;
 mod core;
-mod writer;
 mod utils;
+mod writer;
 
 pub use base::event::*;
 pub use base::merge_progress::*;
@@ -12,8 +12,8 @@ pub use core::auto;
 pub use core::multi;
 pub use core::prefetch::*;
 pub use core::single;
-pub use writer::{SeqWriter, RandWriter};
 pub use core::*;
+pub use writer::{RandWriter, SeqWriter};
 
 #[cfg(feature = "file")]
 pub mod file {

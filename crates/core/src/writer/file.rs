@@ -1,7 +1,6 @@
-use crate::{Progress};
 use super::{RandWriter, SeqWriter};
+use crate::ProgressEntry;
 use bytes::Bytes;
-use color_eyre::Result;
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -13,27 +12,26 @@ pub struct SeqFileWriter {
 }
 
 impl SeqFileWriter {
-    pub fn new(file: File, write_buffer_size: usize) -> Result<Self> {
-        Ok(Self {
+    pub fn new(file: File, write_buffer_size: usize) -> Self {
+        Self {
             buffer: BufWriter::with_capacity(write_buffer_size, file),
-        })
+        }
     }
 }
 
 impl SeqWriter for SeqFileWriter {
-    fn write_sequentially(&mut self, bytes: Bytes) -> Result<()> {
+    fn write_sequentially(&mut self, bytes: Bytes) -> Result<(), std::io::Error> {
         self.buffer.write_all(&bytes)?;
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<()> {
+    fn flush(&mut self) -> Result<(), std::io::Error> {
         self.buffer.flush()?;
         Ok(())
     }
 }
 
-#[cfg(target_pointer_width = "64")]
-mod rand_file_writer_mmap {
+pub mod rand_file_writer_mmap {
     use super::*;
     use memmap2::MmapMut;
 
@@ -45,7 +43,11 @@ mod rand_file_writer_mmap {
     }
 
     impl RandFileWriter {
-        pub fn new(file: File, size: u64, write_buffer_size: usize) -> Result<Self> {
+        pub fn new(
+            file: File,
+            size: u64,
+            write_buffer_size: usize,
+        ) -> Result<Self, std::io::Error> {
             file.set_len(size)?;
             Ok(Self {
                 mmap: unsafe { MmapMut::map_mut(&file) }?,
@@ -56,7 +58,11 @@ mod rand_file_writer_mmap {
     }
 
     impl RandWriter for RandFileWriter {
-        fn write_randomly(&mut self, range: Progress, bytes: Bytes) -> Result<()> {
+        fn write_randomly(
+            &mut self,
+            range: ProgressEntry,
+            bytes: Bytes,
+        ) -> Result<(), std::io::Error> {
             self.mmap[range.start as usize..range.end as usize].copy_from_slice(&bytes);
             self.downloaded += bytes.len();
             if self.downloaded >= self.write_buffer_size {
@@ -66,17 +72,14 @@ mod rand_file_writer_mmap {
             Ok(())
         }
 
-        fn flush(&mut self) -> Result<()> {
+        fn flush(&mut self) -> Result<(), std::io::Error> {
             self.mmap.flush()?;
             Ok(())
         }
     }
 }
-#[cfg(target_pointer_width = "64")]
-pub use rand_file_writer_mmap::RandFileWriter;
 
-#[cfg(not(target_pointer_width = "64"))]
-mod rand_file_writer_std {
+pub mod rand_file_writer_std {
     use std::io::Seek;
 
     use super::*;
@@ -91,7 +94,11 @@ mod rand_file_writer_std {
     }
 
     impl RandFileWriter {
-        pub fn new(file: File, size: u64, write_buffer_size: usize) -> Result<Self> {
+        pub fn new(
+            file: File,
+            size: u64,
+            write_buffer_size: usize,
+        ) -> Result<Self, std::io::Error> {
             file.set_len(size)?;
             Ok(Self {
                 buffer: BufWriter::with_capacity(write_buffer_size, file),
@@ -104,7 +111,11 @@ mod rand_file_writer_std {
     }
 
     impl RandWriter for RandFileWriter {
-        fn write_randomly(&mut self, range: Progress, bytes: Bytes) -> Result<()> {
+        fn write_randomly(
+            &mut self,
+            range: ProgressEntry,
+            bytes: Bytes,
+        ) -> Result<(), std::io::Error> {
             let pos = self.cache.partition_point(|(i, _)| i < &range.start);
             self.cache_size += bytes.len();
             self.cache.insert(pos, (range.start, bytes));
@@ -114,7 +125,7 @@ mod rand_file_writer_std {
             Ok(())
         }
 
-        fn flush(&mut self) -> Result<()> {
+        fn flush(&mut self) -> Result<(), std::io::Error> {
             for (start, bytes) in self.cache.drain(..) {
                 let len = bytes.len();
                 self.cache_size -= len;
@@ -130,8 +141,6 @@ mod rand_file_writer_std {
         }
     }
 }
-#[cfg(not(target_pointer_width = "64"))]
-pub use rand_file_writer_std::RandFileWriter;
 
 #[cfg(test)]
 #[cfg(feature = "file")]
@@ -143,13 +152,13 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_seq_file_writer() -> Result<()> {
+    fn test_seq_file_writer() -> Result<(), std::io::Error> {
         // 创建一个临时文件用于测试
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path().to_path_buf();
 
         // 初始化 SeqFileWriter
-        let mut writer = SeqFileWriter::new(temp_file.reopen()?, 1024)?;
+        let mut writer = SeqFileWriter::new(temp_file.reopen()?, 1024);
 
         // 写入数据
         let data1 = Bytes::from("Hello, ");
@@ -167,13 +176,14 @@ mod tests {
     }
 
     #[test]
-    fn test_rand_file_writer() -> Result<()> {
+    fn test_rand_file_writer() -> Result<(), std::io::Error> {
         // 创建一个临时文件用于测试
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path().to_path_buf();
 
         // 初始化 RandFileWriter，假设文件大小为 10 字节
-        let mut writer = RandFileWriter::new(temp_file.reopen()?, 10, 8 * 1024 * 1024)?;
+        let mut writer =
+            rand_file_writer_mmap::RandFileWriter::new(temp_file.reopen()?, 10, 8 * 1024 * 1024)?;
 
         // 写入数据
         let data = Bytes::from("234");

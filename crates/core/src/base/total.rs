@@ -1,10 +1,10 @@
-use crate::Progress;
+use crate::ProgressEntry;
 
 pub trait Total {
     fn total(&self) -> u64;
 }
 
-impl Total for Progress {
+impl Total for ProgressEntry {
     fn total(&self) -> u64 {
         self.end - self.start
     }
@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn test_empty_vec() {
-        let ranges: Vec<Progress> = vec![];
+        let ranges: Vec<ProgressEntry> = vec![];
         assert_eq!(ranges.total(), 0);
     }
 }

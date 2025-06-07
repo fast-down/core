@@ -1,11 +1,11 @@
-use crate::{Spliceable, Progress};
+use crate::{Mergeable, ProgressEntry};
 
 pub trait MergeProgress {
-    fn merge_progress(&mut self, new: Progress);
+    fn merge_progress(&mut self, new: ProgressEntry);
 }
 
-impl MergeProgress for Vec<Progress> {
-    fn merge_progress(&mut self, new: Progress) {
+impl MergeProgress for Vec<ProgressEntry> {
+    fn merge_progress(&mut self, new: ProgressEntry) {
         let i = self.partition_point(|old| old.start < new.start);
         if i == self.len() {
             match self.last_mut() {
@@ -18,9 +18,9 @@ impl MergeProgress for Vec<Progress> {
             let u1 = if i == 0 {
                 false
             } else {
-                self[i - 1].can_splice(&new)
+                self[i - 1].can_merge(&new)
             };
-            let u2 = self[i].can_splice(&new);
+            let u2 = self[i].can_merge(&new);
             if u1 && u2 {
                 self[i - 1].end = self[i].end;
                 self.remove(i);
@@ -41,10 +41,9 @@ mod tests {
 
     #[test]
     fn test_merge_into_empty_vec() {
-        let mut v: Vec<Progress> = Vec::new();
-        let new = 10..20;
-        v.merge_progress(new.clone());
-        assert_eq!(v, vec![new]);
+        let mut v: Vec<ProgressEntry> = Vec::new();
+        v.merge_progress(10..20);
+        assert_eq!(v, vec![10..20]);
     }
 
     #[test]

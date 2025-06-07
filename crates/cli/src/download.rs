@@ -1,10 +1,10 @@
 use crate::args::DownloadArgs;
-use crate::fmt::size;
-use crate::persist;
-use crate::progress::{invert as progress_invert, Painter as ProgressPainter};
+use crate::fmt;
+use crate::persist::Database;
+use crate::progress::{self, Painter as ProgressPainter};
 use color_eyre::eyre::{eyre, Result};
-use fast_down::{Event, MergeProgress, Progress, Total};
 use fast_down::file::DownloadOptions;
+use fast_down::{Event, MergeProgress, ProgressEntry, Total};
 use path_clean;
 use reqwest::{
     blocking::Client,
@@ -49,8 +49,8 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
     if let Some(ref proxy) = args.proxy {
         client = client.proxy(Proxy::all(proxy)?);
     }
-    let client = client.build()?;
-    let conn = persist::init_db()?;
+    let client: Client = client.build()?;
+    let db = Database::new()?;
 
     let info = loop {
         match fast_down::get_url_info(&args.url, &client) {
@@ -69,7 +69,9 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
     let mut save_path =
         Path::new(&args.save_folder).join(args.file_name.as_ref().unwrap_or(&info.file_name));
     if save_path.is_relative() {
-        save_path = env::current_dir()?.join(save_path);
+        if let Ok(current_dir) = env::current_dir() {
+            save_path = current_dir.join(save_path);
+        }
     }
     save_path = path_clean::clean(save_path);
     let save_path_str = save_path.to_str().unwrap().to_string();
@@ -77,31 +79,31 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
     println!(
         "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}\nETag: {:?}\nLast-Modified: {:?}\n",
         info.file_name,
-        size::format(info.file_size as f64),
+        fmt::format_size(info.file_size as f64),
         info.file_size,
         save_path.to_str().unwrap(),
         threads,
         info.etag,
         info.last_modified
-  );
+    );
 
     let mut download_chunks = vec![0..info.file_size];
     let mut resume_download = false;
-    let mut write_progress: Vec<Progress> = Vec::with_capacity(threads);
+    let mut write_progress: Vec<ProgressEntry> = Vec::with_capacity(threads);
 
     if save_path.try_exists()? {
         if args.resume && info.can_fast_download {
-            if let Ok(Some(progress)) = persist::get_progress(&conn, &save_path_str) {
+            if let Ok(Some(progress)) = db.get_progress(&save_path_str) {
                 let downloaded = progress.progress.total();
                 if downloaded < info.file_size {
-                    download_chunks = progress_invert(&progress.progress, info.file_size);
+                    download_chunks = progress::invert(&progress.progress, info.file_size);
                     write_progress = progress.progress.clone();
                     resume_download = true;
                     println!("发现未完成的下载，将继续下载剩余部分");
                     println!(
                         "已下载: {} / {} ({}%)",
-                        size::format(downloaded as f64),
-                        size::format(info.file_size as f64),
+                        fmt::format_size(downloaded as f64),
+                        fmt::format_size(info.file_size as f64),
                         downloaded * 100 / info.file_size
                     );
                     if !args.yes {
@@ -124,9 +126,9 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                         }
                         if progress.etag != info.etag {
                             eprint!(
-                              "原文件 ETag: {:?}\n现文件 ETag: {:?}\n文件 ETag 不一致，是否继续？(y/N) ",
-                              progress.etag, info.etag
-                          );
+                                "原文件 ETag: {:?}\n现文件 ETag: {:?}\n文件 ETag 不一致，是否继续？(y/N) ",
+                                progress.etag, info.etag
+                            );
                             if args.no {
                                 eprintln!("N");
                                 return Ok(());
@@ -227,12 +229,13 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
     let mut last_db_update = Instant::now();
 
     if !resume_download {
-        persist::init_progress(
-            &conn,
+        db.init_progress(
             &save_path_str,
             info.file_size,
             info.etag,
             info.last_modified,
+            &info.file_name,
+            &info.final_url,
         )?;
     }
 
@@ -244,6 +247,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
         args.repaint_gap,
     )));
     let cancel = ProgressPainter::start_update_thread(painter.clone());
+    let start = Instant::now();
 
     for e in &result {
         match e {
@@ -254,7 +258,11 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                 write_progress.merge_progress(p);
                 if last_db_update.elapsed().as_secs() >= 1 {
                     last_db_update = Instant::now();
-                    persist::update_progress(&conn, &save_path_str, &write_progress)?;
+                    db.update_progress(
+                        &save_path_str,
+                        &write_progress,
+                        start.elapsed().as_millis() as u64,
+                    )?;
                 }
             }
             Event::ConnectError(id, err) => {
@@ -309,7 +317,11 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
             }
         }
     }
-    persist::update_progress(&conn, &save_path_str, &write_progress)?;
+    db.update_progress(
+        &save_path_str,
+        &write_progress,
+        start.elapsed().as_millis() as u64,
+    )?;
     painter.lock().unwrap().update()?;
     cancel();
     result.join().unwrap();

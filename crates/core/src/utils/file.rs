@@ -1,6 +1,6 @@
-use crate::{auto, DownloadResult, Progress};
-use crate::writer::file::{RandFileWriter, SeqFileWriter};
-use color_eyre::eyre::Result;
+use crate::file;
+use crate::writer::file::SeqFileWriter;
+use crate::{auto, DownloadResult, ProgressEntry};
 use reqwest::{blocking::Client, IntoUrl};
 use std::{
     fs::{self, OpenOptions},
@@ -15,29 +15,69 @@ pub struct DownloadOptions {
     pub can_fast_download: bool,
     pub download_buffer_size: usize,
     pub write_buffer_size: usize,
-    pub download_chunks: Vec<Progress>,
+    pub download_chunks: Vec<ProgressEntry>,
     pub retry_gap: Duration,
     pub file_size: u64,
+}
+
+#[derive(Debug)]
+pub enum DownloadErrorKind {
+    Reqwest(reqwest::Error),
+    Io(std::io::Error),
+}
+impl std::fmt::Display for DownloadErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DownloadErrorKind::Reqwest(err) => write!(f, "HTTP request failed: {}", err),
+            DownloadErrorKind::Io(err) => write!(f, "IO error: {}", err),
+        }
+    }
+}
+
+impl std::error::Error for DownloadErrorKind {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DownloadErrorKind::Reqwest(err) => Some(err),
+            DownloadErrorKind::Io(err) => Some(err),
+        }
+    }
 }
 
 pub fn download(
     url: impl IntoUrl,
     save_path: &Path,
     options: DownloadOptions,
-) -> Result<DownloadResult> {
+) -> Result<DownloadResult, DownloadErrorKind> {
     let save_folder = save_path.parent().unwrap();
     if let Err(e) = fs::create_dir_all(save_folder) {
         if e.kind() != ErrorKind::AlreadyExists {
-            return Err(e.into());
+            return Err(DownloadErrorKind::Io(e));
         }
     }
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
-        .open(&save_path)?;
-    let seq_file_writer = SeqFileWriter::new(file.try_clone()?, options.write_buffer_size)?;
-    let rand_file_writer = RandFileWriter::new(file, options.file_size, options.write_buffer_size)?;
+        .open(&save_path)
+        .map_err(|e| DownloadErrorKind::Io(e))?;
+    let seq_file_writer = SeqFileWriter::new(
+        file.try_clone().map_err(|e| DownloadErrorKind::Io(e))?,
+        options.write_buffer_size,
+    );
+    #[cfg(target_pointer_width = "64")]
+    let rand_file_writer = file::rand_file_writer_mmap::RandFileWriter::new(
+        file,
+        options.file_size,
+        options.write_buffer_size,
+    )
+    .map_err(|e| DownloadErrorKind::Io(e))?;
+    #[cfg(not(target_pointer_width = "64"))]
+    let rand_file_writer = file::rand_file_writer_std::RandFileWriter::new(
+        file,
+        options.file_size,
+        options.write_buffer_size,
+    )
+    .map_err(|e| DownloadErrorKind::Io(e))?;
     auto::download(
         url,
         seq_file_writer,
@@ -52,4 +92,5 @@ pub fn download(
             file_size: options.file_size,
         },
     )
+    .map_err(|e| DownloadErrorKind::Reqwest(e))
 }

@@ -1,4 +1,4 @@
-use crate::fmt::{size, time};
+use crate::fmt;
 use color_eyre::Result;
 use crossterm::{
     cursor,
@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{self, ClearType},
     ExecutableCommand, QueueableCommand,
 };
-use fast_down::{MergeProgress, Progress, Total};
+use fast_down::{MergeProgress, ProgressEntry, Total};
 use std::{
     io::{self, Stderr, Stdout, Write},
     sync::{
@@ -20,7 +20,7 @@ use std::{
 const BLOCK_CHARS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 
 pub struct Painter {
-    pub progress: Vec<Progress>,
+    pub progress: Vec<ProgressEntry>,
     pub total: u64,
     pub width: u16,
     pub start_time: Instant,
@@ -37,7 +37,7 @@ pub struct Painter {
 
 impl Painter {
     pub fn new(
-        init_progress: Vec<Progress>,
+        init_progress: Vec<ProgressEntry>,
         total: u64,
         progress_width: u16,
         alpha: f64,
@@ -62,7 +62,7 @@ impl Painter {
         }
     }
 
-    pub fn start_update_thread(painter_arc: Arc<Mutex<Painter>>) -> Box<impl Fn()> {
+    pub fn start_update_thread(painter_arc: Arc<Mutex<Self>>) -> Box<impl Fn()> {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
         thread::spawn(move || loop {
@@ -81,7 +81,7 @@ impl Painter {
         })
     }
 
-    pub fn add(&mut self, p: Progress) {
+    pub fn add(&mut self, p: ProgressEntry) {
         self.curr_size += p.total();
         self.progress.merge_progress(p);
     }
@@ -103,9 +103,9 @@ impl Painter {
                 "|{}| {:>6.2}% ({:>8}/Unknown)\n已用时间: {} | 速度: {:>8}/s | 剩余: Unknown\n",
                 BLOCK_CHARS[0].to_string().repeat(self.width as usize),
                 0.0,
-                size::format(self.curr_size as f64),
-                time::format(self.start_time.elapsed().as_secs()),
-                size::format(self.avg_speed)
+                fmt::format_size(self.curr_size as f64),
+                fmt::format_time(self.start_time.elapsed().as_secs()),
+                fmt::format_size(self.avg_speed)
             )
         } else {
             let get_percent = (self.curr_size as f64 / self.total as f64) * 100.0;
@@ -146,11 +146,11 @@ impl Painter {
                 "|{}| {:>6.2}% ({:>8}/{})\n已用时间: {} | 速度: {:>8}/s | 剩余: {}\n",
                 bar_str,
                 get_percent,
-                size::format(self.curr_size as f64),
-                size::format(self.total as f64),
-                time::format(self.start_time.elapsed().as_secs()),
-                size::format(self.avg_speed),
-                time::format(get_remaining_time as u64)
+                fmt::format_size(self.curr_size as f64),
+                fmt::format_size(self.total as f64),
+                fmt::format_time(self.start_time.elapsed().as_secs()),
+                fmt::format_size(self.avg_speed),
+                fmt::format_time(get_remaining_time as u64)
             )
         };
         if self.has_progress {

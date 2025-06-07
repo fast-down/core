@@ -5,65 +5,39 @@ import { Home } from "home.slint";
 
 export component AppWindow inherits Window {
     callback add-url(string);
+    callback stop(int);
+    callback resume(int);
+    callback delete(int);
+    callback open(int);
+    callback open-folder(int);
     title: "fast-down";
     preferred-height: 500px;
-    in property <[DownloadData]> download-list: [
-        {
-            filename: "sdfsdf",
-            speed: "100MB/s",
-            percentage: "10MB / 100GB (10%)",
-            remaining-time: "01:23:45",
-            elapsed: "12:34:56",
-            is-downloading: true,
-            progress: [
-                {
-                    is-blank: false,
-                    width: 0.2,
-                },
-                {
-                    is-blank: true,
-                    width: 0.6,
-                },
-                {
-                    is-blank: false,
-                    width: 0.2,
-                },
-            ]
-        },
-        {
-            filename: "sdfsdf",
-            speed: "100MB/s",
-            percentage: "10MB / 100GB (10%)",
-            remaining-time: "01:23:45",
-            elapsed: "12:34:56",
-            is-downloading: false,
-            progress: [
-                {
-                    is-blank: false,
-                    width: 0.2,
-                },
-                {
-                    is-blank: true,
-                    width: 0.6,
-                },
-                {
-                    is-blank: false,
-                    width: 0.2,
-                },
-            ]
-        },
-    ];
-
+    min-width: 300px;
+    in property <[DownloadData]> download-list;
     TabWidget {
         Tab {
             title: @tr("Home");
-
             Home {
                 width: 100%;
                 height: 100%;
                 download-list: download-list;
                 add-url(url) => {
                     add-url(url)
+                }
+                stop(i) => {
+                    stop(i)
+                }
+                resume(i) => {
+                    resume(i)
+                }
+                delete(i) => {
+                    delete(i)
+                }
+                open(i) => {
+                    open(i)
+                }
+                open-folder(i) => {
+                    open-folder(i)
                 }
             }
         }
@@ -74,7 +48,6 @@ export component AppWindow inherits Window {
 
         Tab {
             title: @tr("About");
-
             VerticalBox {
                 Text {
                     text: @tr("About Page");

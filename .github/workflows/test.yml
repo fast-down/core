@@ -21,7 +21,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust Toolchain
-        run: rustup update ${{ matrix.channel }} && rustup default ${{ matrix.channel }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.channel }}
 
       - name: Configure sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -31,7 +33,10 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
       - name: Test
-        run: cargo test --all-features
+        run: cargo test --all-features --verbose
+
+      - name: Build
+        run: cargo build --verbose
 
   check-minimal:
     name: Check minimal versions
@@ -42,20 +47,29 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust Toolchain
-        run: rustup default nightly
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+
+      - name: Configure sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Set Rust Caching Env
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
       - name: Check minimal versions
         run: cargo check --all --all-targets -Z minimal-versions
 
-  # benches:
-  #   name: Benches
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Checkout sources
-  #       uses: actions/checkout@v4
-
-  #     - name: Install Rust toolchain
-  #       run: rustup default nightly
-
-  #     - name: Default features
-  #       run: cargo bench --no-run
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install latest stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Run rustfmt
+        run: cargo fmt --all -- --check

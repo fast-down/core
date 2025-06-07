@@ -1,6 +1,5 @@
 use super::{multi, single, DownloadResult};
-use crate::{Progress, RandWriter, SeqWriter};
-use color_eyre::eyre::Result;
+use crate::{ProgressEntry, RandWriter, SeqWriter};
 use core::time::Duration;
 use reqwest::{blocking::Client, IntoUrl};
 
@@ -9,7 +8,7 @@ pub struct DownloadOptions {
     pub client: Client,
     pub can_fast_download: bool,
     pub download_buffer_size: usize,
-    pub download_chunks: Vec<Progress>,
+    pub download_chunks: Vec<ProgressEntry>,
     pub retry_gap: Duration,
     pub file_size: u64,
 }
@@ -19,7 +18,7 @@ pub fn download(
     seq_writer: impl SeqWriter + 'static,
     rand_writer: impl RandWriter + 'static,
     options: DownloadOptions,
-) -> Result<DownloadResult> {
+) -> Result<DownloadResult, reqwest::Error> {
     if options.can_fast_download {
         multi::download(
             url,

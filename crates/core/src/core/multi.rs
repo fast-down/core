@@ -1,8 +1,6 @@
 use super::DownloadResult;
-use crate::{Event, Progress, RandWriter, Total};
+use crate::{ConnectErrorKind, Event, ProgressEntry, RandWriter, Total};
 use bytes::{Bytes, BytesMut};
-use color_eyre::eyre::eyre;
-use color_eyre::Result;
 use fast_steal::{sync::action, sync::Spawn, TaskList};
 use reqwest::{blocking::Client, header, IntoUrl, StatusCode};
 use std::{
@@ -18,7 +16,7 @@ use std::{
 pub struct DownloadOptions {
     pub threads: usize,
     pub client: Client,
-    pub download_chunks: Vec<Progress>,
+    pub download_chunks: Vec<ProgressEntry>,
     pub retry_gap: Duration,
     pub download_buffer_size: usize,
 }
@@ -27,17 +25,17 @@ pub fn download(
     url: impl IntoUrl,
     mut writer: impl RandWriter + 'static,
     options: DownloadOptions,
-) -> Result<DownloadResult> {
+) -> Result<DownloadResult, reqwest::Error> {
     let url = url.into_url()?;
     let (tx, event_chain) = crossbeam_channel::unbounded();
-    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(Progress, Bytes)>();
+    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(ProgressEntry, Bytes)>();
     let tx_clone = tx.clone();
     let handle = thread::spawn(move || {
         for (spin, data) in rx_write {
             loop {
                 match writer.write_randomly(spin.clone(), data.clone()) {
                     Ok(_) => break,
-                    Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
+                    Err(e) => tx_clone.send(Event::WriteError(e)).unwrap(),
                 }
                 thread::sleep(options.retry_gap);
             }
@@ -46,7 +44,7 @@ pub fn download(
         loop {
             match writer.flush() {
                 Ok(_) => break,
-                Err(e) => tx_clone.send(Event::WriteError(e.into())).unwrap(),
+                Err(e) => tx_clone.send(Event::WriteError(e)).unwrap(),
             };
             thread::sleep(options.retry_gap);
         }
@@ -92,9 +90,9 @@ pub fn download(
                         }
                         Ok(response) => tx.send(Event::ConnectError(
                             id,
-                            eyre!("Expect to get 206, but got {}", response.status()),
+                            ConnectErrorKind::StatusCode(response.status()),
                         )),
-                        Err(e) => tx.send(Event::ConnectError(id, e.into())),
+                        Err(e) => tx.send(Event::ConnectError(id, ConnectErrorKind::Reqwest(e))),
                     }
                     .unwrap();
                     thread::sleep(options.retry_gap);
@@ -123,7 +121,7 @@ pub fn download(
                             Ok(len) => break len,
                             Err(e) => {
                                 let kind = e.kind();
-                                tx.send(Event::DownloadError(id, e.into())).unwrap();
+                                tx.send(Event::DownloadError(id, e)).unwrap();
                                 if kind != ErrorKind::Interrupted {
                                     task.fetch_sub_start(expect_len as u64);
                                     continue 'retry;
@@ -170,10 +168,10 @@ pub fn download(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "file")]
-    use crate::writer::file::RandFileWriter;
     use super::*;
-    use crate::{MergeProgress, Progress};
+    #[cfg(feature = "file")]
+    use crate::writer::file::rand_file_writer_mmap::RandFileWriter;
+    use crate::{MergeProgress, ProgressEntry};
     use std::fs::File;
     use std::io::Read;
     use tempfile::NamedTempFile;
@@ -182,7 +180,7 @@ mod tests {
         (0..size).map(|i| (i % 256) as u8).collect()
     }
 
-    pub fn reverse_progress(progress: &[Progress], total_size: u64) -> Vec<Progress> {
+    pub fn reverse_progress(progress: &[ProgressEntry], total_size: u64) -> Vec<ProgressEntry> {
         if progress.is_empty() {
             return vec![0..total_size];
         }
@@ -251,8 +249,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut download_progress: Vec<Progress> = Vec::new();
-        let mut write_progress: Vec<Progress> = Vec::new();
+        let mut download_progress: Vec<ProgressEntry> = Vec::new();
+        let mut write_progress: Vec<ProgressEntry> = Vec::new();
         for e in &result {
             match e {
                 Event::DownloadProgress(p) => {
@@ -342,8 +340,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut download_progress: Vec<Progress> = Vec::new();
-        let mut write_progress: Vec<Progress> = Vec::new();
+        let mut download_progress: Vec<ProgressEntry> = Vec::new();
+        let mut write_progress: Vec<ProgressEntry> = Vec::new();
         for e in &result {
             match e {
                 Event::DownloadProgress(p) => {
@@ -438,8 +436,8 @@ mod tests {
             result_clone.cancel()
         });
 
-        let mut download_progress: Vec<Progress> = Vec::new();
-        let mut write_progress: Vec<Progress> = Vec::new();
+        let mut download_progress: Vec<ProgressEntry> = Vec::new();
+        let mut write_progress: Vec<ProgressEntry> = Vec::new();
         for e in &result {
             match e {
                 Event::DownloadProgress(p) => {
@@ -493,8 +491,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut download_progress: Vec<Progress> = Vec::new();
-        let mut write_progress: Vec<Progress> = Vec::new();
+        let mut download_progress: Vec<ProgressEntry> = Vec::new();
+        let mut write_progress: Vec<ProgressEntry> = Vec::new();
         for e in &result {
             match e {
                 Event::DownloadProgress(p) => {

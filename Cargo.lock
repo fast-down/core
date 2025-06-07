@@ -1794,7 +1794,6 @@ name = "fast-down"
 version = "1.7.0"
 dependencies = [
  "bytes",
- "color-eyre",
  "content_disposition",
  "crossbeam-channel",
  "fast-steal",
@@ -1831,6 +1830,7 @@ dependencies = [
  "clap",
  "color-eyre",
  "config",
+ "crossbeam-channel",
  "ctrlc",
  "fast-down",
  "path-clean",
@@ -1839,6 +1839,7 @@ dependencies = [
  "serde",
  "slint",
  "slint-build",
+ "tempfile",
  "url",
 ]
 

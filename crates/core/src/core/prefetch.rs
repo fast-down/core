@@ -1,4 +1,3 @@
-use color_eyre::eyre::Result;
 use content_disposition;
 use reqwest::{
     blocking::Client,
@@ -25,13 +24,13 @@ fn get_file_size(headers: &HeaderMap, status: &StatusCode) -> u64 {
             .and_then(|hv| hv.to_str().ok())
             .and_then(|s| s.rsplit('/').next())
             .and_then(|total| total.parse().ok())
-            .unwrap_or(0)
+            .unwrap_or_default()
     } else {
         headers
             .get(header::CONTENT_LENGTH)
             .and_then(|hv| hv.to_str().ok())
             .and_then(|s| s.parse().ok())
-            .unwrap_or(0)
+            .unwrap_or_default()
     }
 }
 
@@ -70,7 +69,7 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
     )
 }
 
-pub fn get_url_info(url: &str, client: &Client) -> Result<UrlInfo> {
+pub fn get_url_info(url: &str, client: &Client) -> Result<UrlInfo, reqwest::Error> {
     let resp = client.head(url).send()?;
 
     let resp = match resp.error_for_status() {
@@ -106,7 +105,7 @@ pub fn get_url_info(url: &str, client: &Client) -> Result<UrlInfo> {
     })
 }
 
-fn get_url_info_fallback(url: &str, client: &Client) -> Result<UrlInfo> {
+fn get_url_info_fallback(url: &str, client: &Client) -> Result<UrlInfo, reqwest::Error> {
     let resp = client
         .get(url)
         .header(header::RANGE, "bytes=0-")
@@ -227,7 +226,6 @@ mod tests {
         match get_url_info(&format!("{}/404", server.url()), &client) {
             Ok(info) => assert!(false, "404 status code should not success: {:?}", info),
             Err(err) => {
-                let err = err.downcast::<reqwest::Error>().expect("request error");
                 assert!(err.is_status(), "should be error about status code");
                 assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
             }

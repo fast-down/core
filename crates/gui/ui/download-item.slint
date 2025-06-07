@@ -1,17 +1,17 @@
 import { VerticalBox, StyleMetrics, Button, ProgressIndicator } from "std-widgets.slint";
 
-export struct Progress {
+export struct ProgressData {
   is-blank: bool,
   width: float,
 }
 
 export struct DownloadData {
-  filename: string,
+  file-name: string,
   speed: string,
   percentage: string,
   remaining-time: string,
   elapsed: string,
-  progress: [Progress],
+  progress: [ProgressData],
   is-downloading: bool,
 }
 
@@ -21,17 +21,16 @@ export component DownloadItem {
     callback delete();
     callback open();
     callback open-folder();
-    in property <string> filename;
+    in property <string> file-name;
     in property <string> speed;
     in property <string> percentage;
     in property <string> remaining-time;
     in property <string> elapsed;
-    in property <[Progress]> progress;
+    in property <[ProgressData]> progress;
     in property <bool> is-downloading;
-
     VerticalBox {
         Text {
-            text: filename;
+            text: file-name;
             font-weight: 700;
         }
 
@@ -95,7 +94,6 @@ export component DownloadItem {
 
         HorizontalLayout {
             spacing: StyleMetrics.layout-spacing;
-
             Button {
                 text: is-downloading ? @tr("Stop") : @tr("Resume");
                 primary: is-downloading;

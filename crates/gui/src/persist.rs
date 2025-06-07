@@ -10,11 +10,8 @@ pub struct DatabaseEntry {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub progress: Vec<ProgressEntry>,
-    #[allow(dead_code)]
     pub file_name: String,
-    #[allow(dead_code)]
     pub elapsed: u64,
-    #[allow(dead_code)]
     pub url: String,
 }
 
@@ -117,6 +114,26 @@ impl Database {
             (progress::to_string(progress), elapsed, file_path),
         )?;
         Ok(())
+    }
+
+    pub fn get_all_progress(&self) -> Result<Vec<DatabaseEntry>> {
+        Ok(self.conn
+            .prepare("SELECT total_size, etag, last_modified, progress, file_name, elapsed, url FROM write_progress")?
+            .query_map([], |row| {
+                let progress: String = row.get(3)?;
+                Ok(DatabaseEntry {
+                    total_size: row.get(0)?,
+                    etag: row.get(1)?,
+                    last_modified: row.get(2)?,
+                    progress: progress::from_str(&progress),
+                    file_name: row.get(4)?,
+                    elapsed: row.get(5)?,
+                    url: row.get(6)?,
+                })
+            })?
+            .filter(|row| row.is_ok())
+            .map(|row| row.unwrap())
+            .collect())
     }
 
     pub fn clean(&self) -> Result<usize> {

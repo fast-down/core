@@ -1,30 +1,25 @@
 // Prevent console window in addition to Slint window in Windows release builds when, e.g., starting the app via file manager. Ignored on other platforms.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use slint::Model;
-use std::error::Error;
 
-slint::include_modules!();
+mod args;
+mod clean;
+mod fmt;
+mod home_page;
+mod manager;
+mod path;
+mod persist;
+mod progress;
+mod update;
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let ui = AppWindow::new()?;
+use args::Args;
+use color_eyre::Result;
 
-    let mut download_list: Vec<DownloadData> = ui.get_download_list().iter().collect();
-    let download_list_model = std::rc::Rc::new(slint::VecModel::from(download_list));
-    ui.set_download_list(download_list_model.clone().into());
-
-    // ui.on_add_url(move |url| {
-    //     let ui_handle = ui.as_weak();
-    //     move || {
-    //         let ui = ui_handle.unwrap();
-    //         ui.set_counter(ui.get_counter() + 1);
-    //     }
-    // });
-
-    ui.on_add_url(move |url| {
-        dbg!(&url);
-    });
-
-    ui.run()?;
-
-    Ok(())
+fn main() -> Result<()> {
+    color_eyre::install()?;
+    let args = Args::parse()?;
+    match args {
+        Args::Download(download_args) => home_page::home_page(download_args),
+        Args::Update => update::update(),
+        Args::Clean => clean::clean(),
+    }
 }
