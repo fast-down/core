@@ -1844,6 +1844,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast-down-wasm"
+version = "0.1.0"
+dependencies = [
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "fast-steal"
 version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

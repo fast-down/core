@@ -1,5 +1,5 @@
 use crate::args::DownloadArgs;
-use crate::manager::DownloadManager;
+use crate::manager::Manager;
 use crate::persist::DatabaseEntry;
 use crate::{fmt, progress};
 use color_eyre::Result;
@@ -49,9 +49,8 @@ impl From<&DatabaseEntry> for DownloadData {
 pub fn home_page(args: DownloadArgs) -> Result<()> {
     let args = Arc::new(args);
     dbg!(&args);
-
     let ui = AppWindow::new()?;
-    let manager = DownloadManager::new(args.clone(), ui.as_weak())?;
+    let manager = Manager::new(args.clone());
     let download_list_model = Rc::new(VecModel::from(Vec::<DownloadData>::new()));
     ui.set_download_list(download_list_model.into());
 
