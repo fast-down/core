@@ -49,6 +49,9 @@ mod tests {
 
         // 测试不存在的文件
         let non_existent = Path::new("nonexistent.txt");
-        assert_eq!(find_available_path(non_existent).unwrap(), non_existent);
+        assert_eq!(
+            find_available_path(non_existent).unwrap(),
+            Path::new("nonexistent (1).txt")
+        );
     }
 }
