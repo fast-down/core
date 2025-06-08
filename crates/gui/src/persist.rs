@@ -4,17 +4,19 @@ use fast_down::ProgressEntry;
 use rusqlite::{Connection, ErrorCode, OptionalExtension};
 use std::{env, path::Path};
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DatabaseEntry {
     pub total_size: u64,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub progress: Vec<ProgressEntry>,
+    pub file_path: String,
     pub file_name: String,
     pub elapsed: u64,
     pub url: String,
 }
 
+#[derive(Debug)]
 pub struct Database {
     conn: Connection,
 }
@@ -53,7 +55,7 @@ impl Database {
         Ok(Self { conn })
     }
 
-    pub fn init_progress(
+    pub fn init_entry(
         &self,
         file_path: &str,
         total_size: u64,
@@ -80,7 +82,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_progress(&self, file_path: &str) -> Result<Option<DatabaseEntry>> {
+    pub fn get_entry(&self, file_path: &str) -> Result<Option<DatabaseEntry>> {
         self.conn
             .query_row(
                 "SELECT total_size, etag, last_modified, progress, file_name, elapsed, url
@@ -96,6 +98,7 @@ impl Database {
                         file_name: row.get(4)?,
                         elapsed: row.get(5)?,
                         url: row.get(6)?,
+                        file_path: file_path.to_string(),
                     })
                 },
             )
@@ -103,7 +106,7 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn update_progress(
+    pub fn update_entry(
         &self,
         file_path: &str,
         progress: &[ProgressEntry],
@@ -116,9 +119,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_all_progress(&self) -> Result<Vec<DatabaseEntry>> {
+    pub fn get_all_entries(&self) -> Result<Vec<DatabaseEntry>> {
         Ok(self.conn
-            .prepare("SELECT total_size, etag, last_modified, progress, file_name, elapsed, url FROM write_progress")?
+            .prepare("SELECT total_size, etag, last_modified, progress, file_name, elapsed, url, file_path FROM write_progress ORDER BY id DESC")?
             .query_map([], |row| {
                 let progress: String = row.get(3)?;
                 Ok(DatabaseEntry {
@@ -129,6 +132,7 @@ impl Database {
                     file_name: row.get(4)?,
                     elapsed: row.get(5)?,
                     url: row.get(6)?,
+                    file_path: row.get(7)?,
                 })
             })?
             .filter(|row| row.is_ok())
@@ -140,6 +144,13 @@ impl Database {
         Ok(self.conn.execute(
             "DELETE FROM write_progress WHERE progress = '0-' || (total_size - 1)",
             [],
+        )?)
+    }
+
+    pub fn remove_entry(&self, file_path: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM write_progress WHERE file_path = ?1",
+            [file_path],
         )?)
     }
 }

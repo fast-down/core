@@ -1,18 +1,12 @@
 use crate::args::DownloadArgs;
-use crate::manager::Manager;
-use crate::persist::DatabaseEntry;
+use crate::manager::{Manager, ManagerData, Message};
+use crate::persist::{Database, DatabaseEntry};
 use crate::{fmt, progress};
 use color_eyre::Result;
 use fast_down::Total;
-use slint::{Model, SharedString, VecModel};
-use std::{
-    rc::Rc,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, RwLock,
-    },
-    thread::{self, JoinHandle},
-};
+use slint::{Model, Timer, VecModel};
+use std::sync::RwLock;
+use std::{rc::Rc, sync::Arc};
 
 slint::include_modules!();
 
@@ -50,144 +44,120 @@ pub fn home_page(args: DownloadArgs) -> Result<()> {
     let args = Arc::new(args);
     dbg!(&args);
     let ui = AppWindow::new()?;
-    let manager = Manager::new(args.clone());
-    let download_list_model = Rc::new(VecModel::from(Vec::<DownloadData>::new()));
-    ui.set_download_list(download_list_model.into());
+
+    let db = Database::new()?;
+    let entries = db.get_all_entries()?;
+    let manager = Arc::new(Manager::new(
+        args.clone(),
+        entries
+            .iter()
+            .map(|e| {
+                Arc::new(RwLock::new(ManagerData {
+                    result: None,
+                    url: e.url.clone(),
+                    file_path: Some(e.file_path.clone()),
+                }))
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let download_list_model = Rc::new(VecModel::from_iter(entries.iter().map(|e| e.into())));
+    ui.set_download_list(download_list_model.clone().into());
 
     ui.on_add_url({
         let download_list_model = download_list_model.clone();
         let manager = manager.clone();
-        let ui_handle = ui.as_weak();
-        let download_handles = download_handles.clone();
         move |url| {
             dbg!(&url);
             let progress_model = Rc::new(VecModel::from(vec![]));
-            let item_idx = download_list_model.row_count(); // Get the index before inserting
             download_list_model.insert(
-                item_idx, // Insert at the end
+                0,
                 DownloadData {
-                    elapsed: SharedString::from("00:00:00"),
-                    file_name: SharedString::from(url.as_str()),
+                    elapsed: "00:00:00".into(),
+                    file_name: url.clone().into(),
                     is_downloading: true,
-                    percentage: SharedString::from("0.00%"),
+                    percentage: "0.00%".into(),
                     progress: progress_model.into(),
-                    remaining_time: SharedString::from("NaN"),
-                    speed: SharedString::from("0.00 B/s"),
+                    remaining_time: "NaN".into(),
+                    speed: "0.00 B/s".into(),
                 },
             );
-
-            let cancellation_token = Arc::new(AtomicBool::new(true));
-            let manager_clone = manager.clone();
-            let ui_handle_clone = ui_handle.clone();
-            let download_list_model_clone = download_list_model.clone();
-            let url_clone = url.clone();
-
-            let handle = thread::spawn(move || {
-                match manager_clone.lock().unwrap().download(
-                    url.as_str(),
-                    item_idx,
-                    cancellation_token.clone(),
-                    ui_handle_clone,
-                    download_list_model_clone,
-                ) {
-                    Err(err) => {
-                        dbg!(&err);
-                        Err(err) // Return the error
-                    }
-                    Ok(_) => {
-                        println!("下载成功");
-                        Ok(()) // Return Ok(())
-                    }
-                }
-            });
-            download_handles
-                .write()
-                .unwrap()
-                .insert(item_idx, (cancellation_token, handle));
+            manager.add_task(url.to_string()).unwrap();
         }
     });
 
     ui.on_stop({
         let manager = manager.clone();
         let download_list_model = download_list_model.clone();
-        let download_handles = download_handles.clone();
         move |index| {
-            let item_idx = index as usize;
-            if let Some((cancellation_token, handle)) =
-                download_handles.write().unwrap().get_mut(item_idx)
-            {
-                cancellation_token.store(false, Ordering::SeqCst);
-                // Optionally, join the thread to ensure it finishes cleanly
-                // if let Ok(res) = handle.join() {
-                //     if let Err(e) = res {
-                //         dbg!(&e);
-                //     }
-                // }
-            }
-
-            let mut data = download_list_model.row_data(item_idx).unwrap();
+            let index = index as usize;
+            manager.stop(index).unwrap();
+            let mut data = download_list_model.row_data(index).unwrap();
             data.is_downloading = false;
-            download_list_model.set_row_data(item_idx, data);
-
-            // Update manager's internal state
-            if let Err(err) = manager.lock().unwrap().pause(item_idx) {
-                dbg!(&err);
-            }
+            download_list_model.set_row_data(index, data);
         }
     });
 
     ui.on_resume({
         let manager = manager.clone();
         let download_list_model = download_list_model.clone();
-        let ui_handle = ui.as_weak();
-        let download_handles = download_handles.clone();
         move |index| {
-            let item_idx = index as usize;
-            let mut data = download_list_model.row_data(item_idx).unwrap();
+            let index = index as usize;
+            let mut data = download_list_model.row_data(index).unwrap();
             data.is_downloading = true;
-            download_list_model.set_row_data(item_idx, data);
-
-            match manager.lock().unwrap().resume(item_idx) {
-                Ok(Some(progress_to_resume)) => {
-                    let cancellation_token = Arc::new(AtomicBool::new(true));
-                    let manager_clone = manager.clone();
-                    let ui_handle_clone = ui_handle.clone();
-                    let download_list_model_clone = download_list_model.clone();
-                    let url = progress_to_resume.url.clone();
-
-                    let handle = thread::spawn(move || {
-                        match manager_clone.lock().unwrap().download(
-                            url.as_str(),
-                            item_idx,
-                            cancellation_token.clone(),
-                            ui_handle_clone,
-                            download_list_model_clone,
-                        ) {
-                            Err(err) => {
-                                dbg!(&err);
-                                Err(err) // Return the error
-                            }
-                            Ok(_) => {
-                                println!("下载成功");
-                                Ok(()) // Return Ok(())
-                            }
-                        }
-                    });
-                    // Update the existing handle and token
-                    download_handles
-                        .write()
-                        .unwrap()
-                        .insert(item_idx, (cancellation_token, handle));
-                }
-                Ok(None) => {
-                    println!("无法恢复下载：项目不在暂停状态");
-                }
-                Err(err) => {
-                    dbg!(&err);
-                }
-            }
+            download_list_model.set_row_data(index, data);
+            manager.resume(index).unwrap();
         }
     });
+
+    ui.on_delete({
+        let manager = manager.clone();
+        let download_list_model = download_list_model.clone();
+        move |index| {
+            let index = index as usize;
+            manager.remove_task(index).unwrap();
+            download_list_model.remove(index);
+        }
+    });
+
+    let timer = Timer::default();
+    timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(16),
+        {
+            let ui = ui.as_weak();
+            move || {
+                let manager = manager.clone();
+                ui.upgrade_in_event_loop(move |ui| {
+                    let download_list_model = ui.get_download_list();
+                    while let Ok(msg) = manager.rx_recv.try_recv() {
+                        match msg {
+                            Message::ProgressUpdate(index, res) => {
+                                let mut data = download_list_model.row_data(index).unwrap();
+                                data.progress = Rc::new(VecModel::from(res)).into();
+                                download_list_model.set_row_data(index, data);
+                            }
+                            Message::Stopped(index) => {
+                                let mut data = download_list_model.row_data(index).unwrap();
+                                data.is_downloading = false;
+                                download_list_model.set_row_data(index, data);
+                            }
+                            Message::Started(index) => {
+                                let mut data = download_list_model.row_data(index).unwrap();
+                                data.is_downloading = true;
+                                download_list_model.set_row_data(index, data);
+                            }
+                            Message::FileName(index, file_name) => {
+                                let mut data = download_list_model.row_data(index).unwrap();
+                                data.file_name = file_name.into();
+                                download_list_model.set_row_data(index, data);
+                            }
+                        }
+                    }
+                })
+                .unwrap();
+            }
+        },
+    );
 
     ui.run()?;
     Ok(())

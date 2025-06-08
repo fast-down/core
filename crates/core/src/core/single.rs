@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+#[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub client: Client,
     pub retry_gap: Duration,

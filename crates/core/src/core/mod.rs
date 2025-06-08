@@ -66,6 +66,7 @@ impl<'a> IntoIterator for &'a DownloadResult {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct DownloadResultIter<'a> {
     receiver: &'a Receiver<Event>,
 }

@@ -3,6 +3,7 @@ use crate::{ProgressEntry, RandWriter, SeqWriter};
 use core::time::Duration;
 use reqwest::{blocking::Client, IntoUrl};
 
+#[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub threads: usize,
     pub client: Client,

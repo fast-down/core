@@ -19,6 +19,7 @@ use std::{
 
 const BLOCK_CHARS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 
+#[derive(Debug)]
 pub struct Painter {
     pub progress: Vec<ProgressEntry>,
     pub total: u64,

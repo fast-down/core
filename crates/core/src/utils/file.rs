@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+#[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub threads: usize,
     pub client: Client,

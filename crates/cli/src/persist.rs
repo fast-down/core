@@ -4,7 +4,7 @@ use fast_down::ProgressEntry;
 use rusqlite::{Connection, ErrorCode, OptionalExtension};
 use std::{env, path::Path};
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DatabaseEntry {
     pub total_size: u64,
     pub etag: Option<String>,
@@ -18,6 +18,7 @@ pub struct DatabaseEntry {
     pub url: String,
 }
 
+#[derive(Debug)]
 pub struct Database {
     conn: Connection,
 }
@@ -56,7 +57,7 @@ impl Database {
         Ok(Self { conn })
     }
 
-    pub fn init_progress(
+    pub fn init_entry(
         &self,
         file_path: &str,
         total_size: u64,
@@ -83,7 +84,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_progress(&self, file_path: &str) -> Result<Option<DatabaseEntry>> {
+    pub fn get_entry(&self, file_path: &str) -> Result<Option<DatabaseEntry>> {
         self.conn
             .query_row(
                 "SELECT total_size, etag, last_modified, progress, file_name, elapsed, url
@@ -106,7 +107,7 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn update_progress(
+    pub fn update_entry(
         &self,
         file_path: &str,
         progress: &[ProgressEntry],

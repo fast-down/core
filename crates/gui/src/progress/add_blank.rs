@@ -2,7 +2,7 @@ use crate::home_page::ProgressData;
 use fast_down::ProgressEntry;
 
 pub fn add_blank(progress: &[ProgressEntry], total_size: u64) -> Vec<ProgressData> {
-    if progress.is_empty() {
+    if progress.is_empty() || total_size == 0 {
         return vec![ProgressData {
             is_blank: true,
             width: 1.0,

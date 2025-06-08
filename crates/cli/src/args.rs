@@ -134,7 +134,7 @@ pub enum Args {
     Clean,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DownloadArgs {
     pub url: String,
     pub force: bool,

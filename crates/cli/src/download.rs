@@ -93,7 +93,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
 
     if save_path.try_exists()? {
         if args.resume && info.can_fast_download {
-            if let Ok(Some(progress)) = db.get_progress(&save_path_str) {
+            if let Ok(Some(progress)) = db.get_entry(&save_path_str) {
                 let downloaded = progress.progress.total();
                 if downloaded < info.file_size {
                     download_chunks = progress::invert(&progress.progress, info.file_size);
@@ -229,7 +229,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
     let mut last_db_update = Instant::now();
 
     if !resume_download {
-        db.init_progress(
+        db.init_entry(
             &save_path_str,
             info.file_size,
             info.etag,
@@ -258,7 +258,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                 write_progress.merge_progress(p);
                 if last_db_update.elapsed().as_secs() >= 1 {
                     last_db_update = Instant::now();
-                    db.update_progress(
+                    db.update_entry(
                         &save_path_str,
                         &write_progress,
                         start.elapsed().as_millis() as u64,
@@ -317,7 +317,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
             }
         }
     }
-    db.update_progress(
+    db.update_entry(
         &save_path_str,
         &write_progress,
         start.elapsed().as_millis() as u64,

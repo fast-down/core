@@ -77,7 +77,7 @@ pub enum Args {
     Clean,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DownloadArgs {
     pub save_folder: String,
     pub threads: usize,
