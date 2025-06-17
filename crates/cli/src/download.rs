@@ -21,11 +21,50 @@ use std::{
 };
 use url::Url;
 
+enum AutoConfirm {
+    Enable(bool),
+    Disable,
+}
+
+macro_rules! predicate {
+    ($args:expr) => {
+        if ($args . yes) {
+            AutoConfirm::Enable(true)
+        }
+        else if ($args . no) {
+            AutoConfirm::Enable(false)
+        }
+        else {
+            AutoConfirm::Disable
+        }
+    };
+}
+
 #[inline]
-fn confirm(input: String) -> Result<bool> {
-    match input.trim().to_lowercase().as_str() {
-        "y" => Ok(true),
-        "n" | "" => Ok(false),
+fn confirm(predicate: impl Into<AutoConfirm>, prompt: &str, default: bool, ) -> Result<bool> {
+    fn get_text(value: bool) -> u8 {
+        match value {
+            true => b'Y',
+            false => b'N',
+        }
+    }
+    let text = match default {
+        true => b"(Y/n)",
+        false => b"(y/N)"
+    };
+    io::stderr().write_all(prompt.as_bytes())?;
+    io::stderr().write_all(text)?;
+    if let AutoConfirm::Enable(value) = predicate.into() {
+        io::stderr().write(&[get_text(value), b'\n'])?;
+        return Ok(value);
+    }
+    io::stderr().flush()?;
+    let mut input = String::with_capacity(4);
+    io::stdin().read_line(&mut input)?;
+    match input.trim() {
+        "y" | "Y" => Ok(true),
+        "n" | "N" => Ok(false),
+        "" => Ok(default),
         _ => Err(eyre!("无效输入，下载取消")),
     }
 }
@@ -108,80 +147,44 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                     );
                     if !args.yes {
                         if progress.total_size != info.file_size {
-                            eprint!(
-                                "原文件大小: {}\n现文件大小: {}\n文件大小不一致，是否继续？(y/N) ",
+                            if !confirm(predicate!(args), &format!(
+                                "原文件大小: {}\n现文件大小: {}\n文件大小不一致，是否继续？",
                                 progress.total_size, info.file_size
-                            );
-                            if args.no {
-                                eprintln!("N");
-                                return Ok(());
-                            }
-                            io::stdout().flush()?;
-                            let mut input = String::new();
-                            io::stdin().read_line(&mut input)?;
-                            if !confirm(input)? {
+                            ), false)? {
                                 println!("下载取消");
                                 return Ok(());
                             }
                         }
                         if progress.etag != info.etag {
-                            eprint!(
-                                "原文件 ETag: {:?}\n现文件 ETag: {:?}\n文件 ETag 不一致，是否继续？(y/N) ",
+                            if !confirm(predicate!(args), &format!(
+                                "原文件 ETag: {:?}\n现文件 ETag: {:?}\n文件 ETag 不一致，是否继续？",
                                 progress.etag, info.etag
-                            );
-                            if args.no {
-                                eprintln!("N");
-                                return Ok(());
-                            }
-                            io::stdout().flush()?;
-                            let mut input = String::new();
-                            io::stdin().read_line(&mut input)?;
-                            if !confirm(input)? {
+                            ), false)? {
                                 println!("下载取消");
                                 return Ok(());
                             }
                         } else if let Some(progress_etag) = progress.etag.as_ref() {
                             if progress_etag.starts_with("W/") {
-                                eprint!(
-                                    "使用弱 ETag: {}，无法保证文件一致是否继续？(y/N) ",
+                                if !confirm(predicate!(args), &format!(
+                                    "使用弱 ETag: {}，无法保证文件一致是否继续？",
                                     progress_etag
-                                );
-                                if args.no {
-                                    eprintln!("N");
-                                    return Ok(());
-                                }
-                                io::stdout().flush()?;
-                                let mut input = String::new();
-                                io::stdin().read_line(&mut input)?;
-                                if !confirm(input)? {
+                                ), false)? {
                                     println!("下载取消");
                                     return Ok(());
                                 }
                             }
                         } else {
-                            eprint!("此文件无 ETag，无法保证文件一致是否继续？(y/N) ");
-                            if args.no {
-                                eprintln!("N");
-                                return Ok(());
-                            }
-                            io::stdout().flush()?;
-                            let mut input = String::new();
-                            io::stdin().read_line(&mut input)?;
-                            if !confirm(input)? {
+                            if !confirm(predicate!(args), "此文件无 ETag，无法保证文件一致是否继续？", false)? {
                                 println!("下载取消");
                                 return Ok(());
                             }
                         }
                         if progress.last_modified != info.last_modified {
-                            eprint!("原文件最后编辑时间: {:?}\n现文件最后编辑时间: {:?}\n文件最后编辑时间不一致，是否继续？(y/N) ", progress.last_modified, info.last_modified);
-                            if args.no {
-                                eprintln!("N");
-                                return Ok(());
-                            }
-                            io::stdout().flush()?;
-                            let mut input = String::new();
-                            io::stdin().read_line(&mut input)?;
-                            if !confirm(input)? {
+                            if !confirm(
+                                predicate!(args),
+                                &format!("原文件最后编辑时间: {:?}\n现文件最后编辑时间: {:?}\n文件最后编辑时间不一致，是否继续？ ", progress.last_modified, info.last_modified),
+                                false
+                            )? {
                                 println!("下载取消");
                                 return Ok(());
                             }
@@ -191,15 +194,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
             }
         }
         if !args.yes && !resume_download && !args.force {
-            eprint!("文件已存在，是否覆盖？(y/N) ");
-            if args.no {
-                eprintln!("N");
-                return Ok(());
-            }
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            if !confirm(input)? {
+            if !confirm(predicate!(args), "文件已存在，是否覆盖？", false)? {
                 println!("下载取消");
                 return Ok(());
             }
@@ -221,9 +216,10 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
         },
     )?;
 
-    let result_clone = result.clone();
+    let (event_chain, join_handle, cancel) = result.try_into_inner().unwrap();
+    let canceler = std::sync::LazyLock::new(move || cancel());
     ctrlc::set_handler(move || {
-        result_clone.cancel();
+        std::sync::LazyLock::force(&canceler);
     })?;
 
     let mut last_db_update = Instant::now();
@@ -249,7 +245,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
     let cancel = ProgressPainter::start_update_thread(painter.clone());
     let start = Instant::now();
 
-    for e in &result {
+    for e in &event_chain {
         match e {
             Event::DownloadProgress(p) => {
                 painter.lock().unwrap().add(p);
@@ -324,6 +320,6 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
     )?;
     painter.lock().unwrap().update()?;
     cancel();
-    result.join().unwrap();
+    join_handle.join().unwrap();
     Ok(())
 }

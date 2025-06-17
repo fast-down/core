@@ -45,6 +45,15 @@ impl DownloadResult {
             cancel_fn()
         }
     }
+
+    pub fn try_into_inner(self) -> Option<(Receiver<Event>, JoinHandle<()>, CancelFn)> {
+        if let Some(handle) = self.handle.lock().unwrap().take() {
+            if let Some(cancel_fn) = self.cancel_fn.lock().unwrap().take() {
+                return Some((self.event_chain.clone(), handle, cancel_fn));
+            }
+        }
+        None
+    }
 }
 
 impl Iterator for DownloadResult {
