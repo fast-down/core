@@ -28,20 +28,18 @@ enum AutoConfirm {
 
 macro_rules! predicate {
     ($args:expr) => {
-        if ($args . yes) {
+        if ($args.yes) {
             AutoConfirm::Enable(true)
-        }
-        else if ($args . no) {
+        } else if ($args.no) {
             AutoConfirm::Enable(false)
-        }
-        else {
+        } else {
             AutoConfirm::Disable
         }
     };
 }
 
 #[inline]
-fn confirm(predicate: impl Into<AutoConfirm>, prompt: &str, default: bool, ) -> Result<bool> {
+fn confirm(predicate: impl Into<AutoConfirm>, prompt: &str, default: bool) -> Result<bool> {
     fn get_text(value: bool) -> u8 {
         match value {
             true => b'Y',
@@ -50,7 +48,7 @@ fn confirm(predicate: impl Into<AutoConfirm>, prompt: &str, default: bool, ) -> 
     }
     let text = match default {
         true => b"(Y/n)",
-        false => b"(y/N)"
+        false => b"(y/N)",
     };
     io::stderr().write_all(prompt.as_bytes())?;
     io::stderr().write_all(text)?;
@@ -147,10 +145,14 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                     );
                     if !args.yes {
                         if progress.total_size != info.file_size {
-                            if !confirm(predicate!(args), &format!(
-                                "原文件大小: {}\n现文件大小: {}\n文件大小不一致，是否继续？",
-                                progress.total_size, info.file_size
-                            ), false)? {
+                            if !confirm(
+                                predicate!(args),
+                                &format!(
+                                    "原文件大小: {}\n现文件大小: {}\n文件大小不一致，是否继续？",
+                                    progress.total_size, info.file_size
+                                ),
+                                false,
+                            )? {
                                 println!("下载取消");
                                 return Ok(());
                             }
@@ -165,16 +167,24 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                             }
                         } else if let Some(progress_etag) = progress.etag.as_ref() {
                             if progress_etag.starts_with("W/") {
-                                if !confirm(predicate!(args), &format!(
-                                    "使用弱 ETag: {}，无法保证文件一致是否继续？",
-                                    progress_etag
-                                ), false)? {
+                                if !confirm(
+                                    predicate!(args),
+                                    &format!(
+                                        "使用弱 ETag: {}，无法保证文件一致是否继续？",
+                                        progress_etag
+                                    ),
+                                    false,
+                                )? {
                                     println!("下载取消");
                                     return Ok(());
                                 }
                             }
                         } else {
-                            if !confirm(predicate!(args), "此文件无 ETag，无法保证文件一致是否继续？", false)? {
+                            if !confirm(
+                                predicate!(args),
+                                "此文件无 ETag，无法保证文件一致是否继续？",
+                                false,
+                            )? {
                                 println!("下载取消");
                                 return Ok(());
                             }

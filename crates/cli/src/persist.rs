@@ -36,7 +36,10 @@ impl Database {
                 if e.sqlite_error_code() != Some(ErrorCode::CannotOpen) {
                     Err(e)?;
                 }
-                println!("无法打开 {}, 将在当前工作目录创建数据库", db_path.display());
+                println!(
+                    "无法打开 {}, 尝试在当前工作目录创建数据库",
+                    db_path.display()
+                );
                 Connection::open("./fast-down.db")?
             }
         };
