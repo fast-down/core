@@ -75,7 +75,7 @@ impl Painter {
             if should_stop || !running.load(Ordering::Relaxed) {
                 break;
             }
-            thread::sleep(duration);
+            thread::sleep(duration).await;
         });
         Box::new(move || {
             running_clone.store(false, Ordering::Relaxed);

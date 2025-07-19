@@ -94,7 +94,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
             Ok(info) => break info,
             Err(err) => {
                 println!("获取文件信息失败: {}", err);
-                thread::sleep(args.retry_gap);
+                thread::sleep(args.retry_gap).await;
             }
         }
     };

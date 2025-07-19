@@ -1,102 +1,95 @@
 use super::DownloadResult;
 use crate::{ConnectErrorKind, Event, ProgressEntry, SeqWriter};
-use bytes::{Bytes, BytesMut};
-use reqwest::{blocking::Client, IntoUrl};
+use bytes::Bytes;
+use reqwest::{Client, IntoUrl};
 use std::{
-    io::{ErrorKind, Read},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    thread,
     time::Duration,
 };
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub client: Client,
     pub retry_gap: Duration,
-    pub download_buffer_size: usize,
 }
 
-pub fn download(
+pub async fn download(
     url: impl IntoUrl,
     mut writer: impl SeqWriter + 'static,
     options: DownloadOptions,
 ) -> Result<DownloadResult, reqwest::Error> {
     let url = url.into_url()?;
-    let (tx, event_chain) = crossbeam_channel::unbounded();
-    let (tx_write, rx_write) = crossbeam_channel::unbounded::<(ProgressEntry, Bytes)>();
+    let (tx, event_chain) = mpsc::channel(40);
+    let (tx_write, mut rx_write) = mpsc::channel::<(ProgressEntry, Bytes)>(40);
     let tx_clone = tx.clone();
-    let handle = thread::spawn(move || {
-        for (spin, data) in rx_write {
+    let handle = tokio::spawn(async move {
+        while let Some((spin, data)) = rx_write.recv().await {
             loop {
-                match writer.write_sequentially(data.clone()) {
+                match writer.write_sequentially(&data).await {
                     Ok(_) => break,
-                    Err(e) => tx_clone.send(Event::WriteError(e)).unwrap(),
+                    Err(e) => tx_clone.send(Event::WriteError(e)).await.unwrap(),
                 }
-                thread::sleep(options.retry_gap);
+                tokio::time::sleep(options.retry_gap).await;
             }
-            tx_clone.send(Event::WriteProgress(spin)).unwrap();
+            tx_clone.send(Event::WriteProgress(spin)).await.unwrap();
         }
         loop {
-            match writer.flush() {
+            match writer.flush().await {
                 Ok(_) => break,
-                Err(e) => tx_clone.send(Event::WriteError(e)).unwrap(),
+                Err(e) => tx_clone.send(Event::WriteError(e)).await.unwrap(),
             };
-            thread::sleep(options.retry_gap);
+            tokio::time::sleep(options.retry_gap).await;
         }
     });
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
-    thread::spawn(move || {
+    tokio::spawn(async move {
         let mut downloaded: u64 = 0;
         let mut response = loop {
             if !running.load(Ordering::Relaxed) {
-                tx.send(Event::Abort(0)).unwrap();
+                tx.send(Event::Abort(0)).await.unwrap();
                 return;
             }
-            tx.send(Event::Connecting(0)).unwrap();
-            match options.client.get(url.clone()).send() {
+            tx.send(Event::Connecting(0)).await.unwrap();
+            match options.client.get(url.clone()).send().await {
                 Ok(response) => break response,
                 Err(e) => tx
                     .send(Event::ConnectError(0, ConnectErrorKind::Reqwest(e)))
+                    .await
                     .unwrap(),
             }
-            thread::sleep(options.retry_gap);
+            tokio::time::sleep(options.retry_gap).await;
         };
-        tx.send(Event::Downloading(0)).unwrap();
-        let mut buffer = BytesMut::with_capacity(options.download_buffer_size);
-        unsafe { buffer.set_len(options.download_buffer_size) };
+        tx.send(Event::Downloading(0)).await.unwrap();
         loop {
-            let len = loop {
+            let chunk = loop {
                 if !running.load(Ordering::Relaxed) {
-                    tx.send(Event::Abort(0)).unwrap();
+                    tx.send(Event::Abort(0)).await.unwrap();
                     return;
                 }
-                match response.read(&mut buffer) {
-                    Ok(len) => break len,
-                    Err(e) => {
-                        let kind = e.kind();
-                        tx.send(Event::DownloadError(0, e)).unwrap();
-                        if kind != ErrorKind::Interrupted {
-                            return;
-                        }
-                    }
-                };
-                thread::sleep(options.retry_gap);
+                match response.chunk().await {
+                    Ok(chunk) => break chunk,
+                    Err(e) => tx.send(Event::DownloadError(0, e)).await.unwrap(),
+                }
+                tokio::time::sleep(options.retry_gap).await;
             };
-            if len == 0 {
+            if chunk.is_none() {
                 break;
             }
-            let span = downloaded..(downloaded + len as u64);
-            tx.send(Event::DownloadProgress(span.clone())).unwrap();
-            tx_write
-                .send((span, buffer.clone().split_to(len).freeze()))
+            let chunk = chunk.unwrap();
+            let len = chunk.len() as u64;
+            let span = downloaded..(downloaded + len);
+            tx.send(Event::DownloadProgress(span.clone()))
+                .await
                 .unwrap();
+            tx_write.send((span, chunk)).await.unwrap();
             downloaded += len as u64;
         }
-        tx.send(Event::Finished(0)).unwrap();
+        tx.send(Event::Finished(0)).await.unwrap();
     });
     Ok(DownloadResult::new(
         event_chain,
@@ -113,26 +106,28 @@ mod tests {
     use super::*;
     use crate::writer::file::SeqFileWriter;
     use crate::Total;
-    use std::fs::File;
     use tempfile::NamedTempFile;
+    use tokio::fs::File;
+    use tokio::io::AsyncReadExt;
 
     fn build_mock_data(size: usize) -> Vec<u8> {
         (0..size).map(|i| (i % 256) as u8).collect()
     }
 
-    #[test]
-    fn test_downloads_small_file_correctly() {
+    #[tokio::test]
+    async fn test_downloads_small_file_correctly() {
         // 测试 9B 小文件
         let mock_body = b"test data";
-        let mut server = mockito::Server::new();
+        let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/small")
             .with_status(200)
             .with_body(mock_body)
-            .create();
+            .create_async()
+            .await;
 
         let temp_file = NamedTempFile::new().unwrap();
-        let file = temp_file.reopen().unwrap();
+        let file = temp_file.reopen().unwrap().into();
 
         let client = Client::new();
         let result = download(
@@ -141,19 +136,25 @@ mod tests {
             DownloadOptions {
                 client,
                 retry_gap: Duration::from_secs(1),
-                download_buffer_size: 8 * 1024,
             },
         )
+        .await
         .unwrap();
 
-        let progress_events: Vec<_> = result.clone().collect();
+        let mut progress_events = Vec::new();
+        let mut rx = result.event_chain.lock().await;
+        while let Some(event) = rx.recv().await {
+            progress_events.push(event);
+        }
         dbg!(&progress_events);
-        result.join().unwrap();
+        result.join().await.unwrap();
 
         let mut file_content = Vec::new();
         File::open(temp_file.path())
+            .await
             .unwrap()
             .read_to_end(&mut file_content)
+            .await
             .unwrap();
         assert_eq!(file_content, mock_body);
 
@@ -179,22 +180,23 @@ mod tests {
                 .sum::<u64>(),
             mock_body.len() as u64
         );
-        mock.assert();
+        mock.assert_async().await;
     }
 
-    #[test]
-    fn test_downloads_empty_file_correctly() {
+    #[tokio::test]
+    async fn test_downloads_empty_file_correctly() {
         // 测试空文件下载
         let mock_body = b"";
-        let mut server = mockito::Server::new();
+        let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/empty")
             .with_status(200)
             .with_body(mock_body)
-            .create();
+            .create_async()
+            .await;
 
         let temp_file = NamedTempFile::new().unwrap();
-        let file = temp_file.reopen().unwrap();
+        let file = temp_file.reopen().unwrap().into();
 
         let client = Client::new();
         let result = download(
@@ -203,19 +205,26 @@ mod tests {
             DownloadOptions {
                 client,
                 retry_gap: Duration::from_secs(1),
-                download_buffer_size: 8 * 1024,
             },
         )
+        .await
         .unwrap();
 
-        let progress_events: Vec<_> = result.clone().collect();
-        result.join().unwrap();
+        let mut progress_events = Vec::new();
+        let mut rx = result.event_chain.lock().await;
+        while let Some(event) = rx.recv().await {
+            progress_events.push(event);
+        }
+        dbg!(&progress_events);
+        result.join().await.unwrap();
 
         // 验证空文件
         let mut file_content = Vec::new();
         File::open(temp_file.path())
+            .await
             .unwrap()
             .read_to_end(&mut file_content)
+            .await
             .unwrap();
         assert!(file_content.is_empty());
 
@@ -242,21 +251,22 @@ mod tests {
                 .sum::<u64>(),
             mock_body.len() as u64
         );
-        mock.assert();
+        mock.assert_async().await;
     }
 
-    #[test]
-    fn test_downloads_large_file_correctly() {
+    #[tokio::test]
+    async fn test_downloads_large_file_correctly() {
         let mock_body = build_mock_data(5000);
-        let mut server = mockito::Server::new();
+        let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/large")
             .with_status(200)
             .with_body(&mock_body)
-            .create();
+            .create_async()
+            .await;
 
         let temp_file = NamedTempFile::new().unwrap();
-        let file = temp_file.reopen().unwrap();
+        let file = temp_file.reopen().unwrap().into();
 
         let client = Client::new();
         let result = download(
@@ -265,19 +275,26 @@ mod tests {
             DownloadOptions {
                 client,
                 retry_gap: Duration::from_secs(1),
-                download_buffer_size: 8 * 1024,
             },
         )
+        .await
         .unwrap();
 
-        let progress_events: Vec<_> = result.clone().collect();
-        result.join().unwrap();
+        let mut progress_events = Vec::new();
+        let mut rx = result.event_chain.lock().await;
+        while let Some(event) = rx.recv().await {
+            progress_events.push(event);
+        }
+        dbg!(&progress_events);
+        result.join().await.unwrap();
 
         // 验证文件内容
         let mut file_content = Vec::new();
         File::open(temp_file.path())
+            .await
             .unwrap()
             .read_to_end(&mut file_content)
+            .await
             .unwrap();
         assert_eq!(file_content, mock_body);
 
@@ -304,21 +321,22 @@ mod tests {
                 .sum::<u64>(),
             mock_body.len() as u64
         );
-        mock.assert();
+        mock.assert_async().await;
     }
 
-    #[test]
-    fn test_downloads_exact_buffer_size_file() {
+    #[tokio::test]
+    async fn test_downloads_exact_buffer_size_file() {
         let mock_body = build_mock_data(4096);
-        let mut server = mockito::Server::new();
+        let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/exact_buffer_size_file")
             .with_status(200)
             .with_body(&mock_body)
-            .create();
+            .create_async()
+            .await;
 
         let temp_file = NamedTempFile::new().unwrap();
-        let file = temp_file.reopen().unwrap();
+        let file = temp_file.reopen().unwrap().into();
 
         let client = Client::new();
         let result = download(
@@ -327,19 +345,26 @@ mod tests {
             DownloadOptions {
                 client,
                 retry_gap: Duration::from_secs(1),
-                download_buffer_size: 8 * 1024,
             },
         )
+        .await
         .unwrap();
 
-        let progress_events: Vec<_> = result.clone().collect();
-        result.join().unwrap();
+        let mut progress_events = Vec::new();
+        let mut rx = result.event_chain.lock().await;
+        while let Some(event) = rx.recv().await {
+            progress_events.push(event);
+        }
+        dbg!(&progress_events);
+        result.join().await.unwrap();
 
         // 验证文件内容
         let mut file_content = Vec::new();
         File::open(temp_file.path())
+            .await
             .unwrap()
             .read_to_end(&mut file_content)
+            .await
             .unwrap();
         assert_eq!(file_content, mock_body);
 
@@ -366,6 +391,6 @@ mod tests {
                 .sum::<u64>(),
             mock_body.len() as u64
         );
-        mock.assert();
+        mock.assert_async().await;
     }
 }

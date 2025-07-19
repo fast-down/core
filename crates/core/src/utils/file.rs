@@ -1,20 +1,15 @@
 use crate::file;
 use crate::writer::file::SeqFileWriter;
 use crate::{auto, DownloadResult, ProgressEntry};
-use reqwest::{blocking::Client, IntoUrl};
-use std::{
-    fs::{self, OpenOptions},
-    io::ErrorKind,
-    path::Path,
-    time::Duration,
-};
+use reqwest::{Client, IntoUrl};
+use std::{io::ErrorKind, path::Path, time::Duration};
+use tokio::fs::{self, OpenOptions};
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub threads: usize,
     pub client: Client,
     pub can_fast_download: bool,
-    pub download_buffer_size: usize,
     pub write_buffer_size: usize,
     pub download_chunks: Vec<ProgressEntry>,
     pub retry_gap: Duration,
@@ -44,13 +39,13 @@ impl std::error::Error for DownloadErrorKind {
     }
 }
 
-pub fn download(
+pub async fn download(
     url: impl IntoUrl,
     save_path: &Path,
     options: DownloadOptions,
 ) -> Result<DownloadResult, DownloadErrorKind> {
     let save_folder = save_path.parent().unwrap();
-    if let Err(e) = fs::create_dir_all(save_folder) {
+    if let Err(e) = fs::create_dir_all(save_folder).await {
         if e.kind() != ErrorKind::AlreadyExists {
             return Err(DownloadErrorKind::Io(e));
         }
@@ -60,9 +55,12 @@ pub fn download(
         .write(true)
         .create(true)
         .open(&save_path)
+        .await
         .map_err(|e| DownloadErrorKind::Io(e))?;
     let seq_file_writer = SeqFileWriter::new(
-        file.try_clone().map_err(|e| DownloadErrorKind::Io(e))?,
+        file.try_clone()
+            .await
+            .map_err(|e| DownloadErrorKind::Io(e))?,
         options.write_buffer_size,
     );
     #[cfg(target_pointer_width = "64")]
@@ -71,6 +69,7 @@ pub fn download(
         options.file_size,
         options.write_buffer_size,
     )
+    .await
     .map_err(|e| DownloadErrorKind::Io(e))?;
     #[cfg(not(target_pointer_width = "64"))]
     let rand_file_writer = file::rand_file_writer_std::RandFileWriter::new(
@@ -78,6 +77,7 @@ pub fn download(
         options.file_size,
         options.write_buffer_size,
     )
+    .await
     .map_err(|e| DownloadErrorKind::Io(e))?;
     auto::download(
         url,
@@ -87,11 +87,11 @@ pub fn download(
             threads: options.threads,
             client: options.client,
             can_fast_download: options.can_fast_download,
-            download_buffer_size: options.download_buffer_size,
             download_chunks: options.download_chunks,
             retry_gap: options.retry_gap,
             file_size: options.file_size,
         },
     )
+    .await
     .map_err(|e| DownloadErrorKind::Reqwest(e))
 }
