@@ -8,19 +8,80 @@
 
 `fast-down` **全网最快**多线程下载库
 
-![CLI 界面](./docs/cli.png)
+![CLI 界面](/docs/cli.png)
+
+**[访问官网](https://fast.s121.top/)**
 
 ## 优势
 
-1. 下载全网最快
-2. 支持断点续传
-3. 代码安全健壮
-4. 自研调度算法：超强 [fast-steal](https://github.com/share121/fast-steal) 任务窃取算法
-5. 跨平台软件 (Windows, Linux, MacOS)
-6. 错误自动恢复，下载过程中随意断网都可以保证文件正确下载
-7. 详细进度跟踪
+1. **⚡️ 极速下载**\
+   自研 [fast-steal](https://github.com/share121/fast-steal)
+   任务窃取算法，实测下载速度是 NDM 的 **2.43 倍**
+2. **🔄 超强重试**\
+   下载时，切换 WiFi、关闭 WiFi、切换代理，都能保证**文件内容正确**
+3. **⛓️‍💥 断点续传**\
+   下到一半**随时暂停**，之后还能**继续传输**
+4. **⛓️‍💥 增量续传**\
+   服务器日志今天下载完成，明天又多了 1000 行，增量续传功能实现**只传输新增的
+   1000 行**
+5. **💰 开源免费**\
+   所有代码全部公开，由
+   [share121](https://github.com/share121)、[Cyan](https://github.com/CyanChanges)
+   与其他贡献者一起维护
+6. **💻 跨平台**
+   <table>
+        <thead>
+            <tr>
+                <th>架构</th>
+                <th>Windows</th>
+                <th>Linux</th>
+                <th>Mac OS</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>64 位</td>
+                <td>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows-64bit.zip">下载</a>
+                </td>
+                <td>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-linux-64bit.zip">下载</a>
+                </td>
+                <td>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-macos-64bit.zip">下载</a>
+                </td>
+            </tr>
+            <tr>
+                <td>32 位</td>
+                <td>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows-32bit.zip">下载</a>
+                </td>
+                <td>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-linux-32bit.zip">下载</a>
+                </td>
+                <td>
+                    <span aria-hidden="true">❌</span><span style="position: absolute; left: -9999px">不支持</span>
+                </td>
+            </tr>
+            <tr>
+                <td>Arm64</td>
+                <td>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows-arm64.zip">下载</a>
+                </td>
+                <td>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-linux-arm64.zip">下载</a>
+                </td>
+                <td>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-macos-arm64.zip">下载</a>
+                </td>
+            </tr>
+        </tbody>
+    </table>
+
+## 使用方法
 
 ```bash
+> fast --help
 超级快的下载器命令行界面
 
 Usage: fast [OPTIONS] <URL>

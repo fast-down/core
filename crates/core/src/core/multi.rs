@@ -52,7 +52,7 @@ pub async fn download(
     let task_list = Arc::new(TaskList::from(options.download_chunks));
     let tasks = Arc::new(
         Task::from(&*task_list)
-            .split_task(8)
+            .split_task(options.threads as u64)
             .map(|t| Arc::new(t))
             .collect::<Vec<_>>(),
     );

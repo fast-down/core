@@ -158,7 +158,7 @@ pub struct DownloadArgs {
 impl Args {
     pub fn parse() -> Result<Args> {
         match Cli::try_parse().or_else(|err| match err.kind() {
-            clap::error::ErrorKind::InvalidSubcommand => {
+            clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument => {
                 CliDefault::try_parse().map(|cli_default| Cli {
                     command: Commands::Download(cli_default.cmd),
                 })
@@ -172,7 +172,7 @@ impl Args {
                         force: false,
                         resume: false,
                         save_folder: ".".to_string(),
-                        threads: 32,
+                        threads: 8,
                         file_name: cli.file_name,
                         proxy: None,
                         headers: HeaderMap::new(),
