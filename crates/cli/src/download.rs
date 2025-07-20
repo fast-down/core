@@ -19,25 +19,20 @@ use tokio::{
 };
 use url::Url;
 
-enum AutoConfirm {
-    Enable(bool),
-    Disable,
-}
-
 macro_rules! predicate {
     ($args:expr) => {
         if ($args.yes) {
-            AutoConfirm::Enable(true)
+            Some(true)
         } else if ($args.no) {
-            AutoConfirm::Enable(false)
+            Some(false)
         } else {
-            AutoConfirm::Disable
+            None
         }
     };
 }
 
 #[inline]
-async fn confirm(predicate: impl Into<AutoConfirm>, prompt: &str, default: bool) -> Result<bool> {
+async fn confirm(predicate: impl Into<Option<bool>>, prompt: &str, default: bool) -> Result<bool> {
     fn get_text(value: bool) -> u8 {
         match value {
             true => b'Y',
@@ -45,14 +40,14 @@ async fn confirm(predicate: impl Into<AutoConfirm>, prompt: &str, default: bool)
         }
     }
     let text = match default {
-        true => b"(Y/n)",
-        false => b"(y/N)",
+        true => b"(Y/n) ",
+        false => b"(y/N) ",
     };
     let mut stderr = io::stderr();
     stderr.write_all(prompt.as_bytes()).await?;
     stderr.write_all(text).await?;
-    if let AutoConfirm::Enable(value) = predicate.into() {
-        stderr.write(&[get_text(value), b'\n']).await?;
+    if let Some(value) = predicate.into() {
+        stderr.write_all(&[get_text(value), b'\n']).await?;
         return Ok(value);
     }
     stderr.flush().await?;
