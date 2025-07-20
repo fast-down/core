@@ -58,7 +58,6 @@ pub async fn download(
     );
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
-    let client = Arc::new(options.client);
     let url = Arc::new(url);
     for (id, task) in tasks.iter().enumerate() {
         let task = task.clone();
@@ -67,7 +66,7 @@ pub async fn download(
         let mutex = mutex.clone();
         let tx = tx.clone();
         let running = running.clone();
-        let client = client.clone();
+        let client = options.client.clone();
         let url = url.clone();
         let tx_write = tx_write.clone();
         tokio::spawn(async move {
