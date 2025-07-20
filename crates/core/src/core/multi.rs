@@ -87,70 +87,80 @@ pub async fn download(
                 }
                 let download_range = &task_list.get_range(start..task.end());
                 for range in download_range {
-                    let header_range_value = format!("bytes={}-{}", range.start, range.end - 1);
-                    let mut response = loop {
-                        if !running.load(Ordering::Relaxed) {
-                            tx.send(Event::Abort(id)).await.unwrap();
-                            return;
-                        }
-                        tx.send(Event::Connecting(id)).await.unwrap();
-                        match client
-                            .get(url.as_str())
-                            .header(header::RANGE, &header_range_value)
-                            .send()
-                            .await
-                        {
-                            Ok(response) if response.status() == StatusCode::PARTIAL_CONTENT => {
-                                break response
-                            }
-                            Ok(response) => tx.send(Event::ConnectError(
-                                id,
-                                ConnectErrorKind::StatusCode(response.status()),
-                            )),
-                            Err(e) => {
-                                tx.send(Event::ConnectError(id, ConnectErrorKind::Reqwest(e)))
-                            }
-                        }
-                        .await
-                        .unwrap();
-                        tokio::time::sleep(options.retry_gap).await;
-                    };
-                    tx.send(Event::Downloading(id)).await.unwrap();
-                    let mut downloaded = 0;
-                    loop {
-                        let chunk = loop {
+                    'retry: loop {
+                        let header_range_value = format!("bytes={}-{}", range.start, range.end - 1);
+                        let mut response = loop {
                             if !running.load(Ordering::Relaxed) {
                                 tx.send(Event::Abort(id)).await.unwrap();
                                 return;
                             }
-                            match response.chunk().await {
-                                Ok(chunk) => break chunk,
-                                Err(e) => tx.send(Event::DownloadError(id, e)).await.unwrap(),
+                            tx.send(Event::Connecting(id)).await.unwrap();
+                            match client
+                                .get(url.as_str())
+                                .header(header::RANGE, &header_range_value)
+                                .send()
+                                .await
+                            {
+                                Ok(response)
+                                    if response.status() == StatusCode::PARTIAL_CONTENT =>
+                                {
+                                    break response
+                                }
+                                Ok(response) => tx.send(Event::ConnectError(
+                                    id,
+                                    ConnectErrorKind::StatusCode(response.status()),
+                                )),
+                                Err(e) => {
+                                    tx.send(Event::ConnectError(id, ConnectErrorKind::Reqwest(e)))
+                                }
                             }
+                            .await
+                            .unwrap();
                             tokio::time::sleep(options.retry_gap).await;
                         };
-                        if chunk.is_none() {
-                            break;
+                        tx.send(Event::Downloading(id)).await.unwrap();
+                        let mut downloaded = 0;
+                        loop {
+                            let mut count = 0;
+                            let chunk = loop {
+                                if !running.load(Ordering::Relaxed) {
+                                    tx.send(Event::Abort(id)).await.unwrap();
+                                    return;
+                                }
+                                count += 1;
+                                if count > 3 {
+                                    continue 'retry;
+                                }
+                                match response.chunk().await {
+                                    Ok(chunk) => break chunk,
+                                    Err(e) => tx.send(Event::DownloadError(id, e)).await.unwrap(),
+                                }
+                                tokio::time::sleep(options.retry_gap).await;
+                            };
+                            if chunk.is_none() {
+                                break;
+                            }
+                            let mut chunk = chunk.unwrap();
+                            let len = chunk.len() as u64;
+                            task.fetch_add_start(len);
+                            start += len;
+                            let range_start = range.start + downloaded;
+                            downloaded += len;
+                            let range_end = range.start + downloaded;
+                            let span = range_start..range_end.min(task_list.get(task.end()));
+                            let len = span.total();
+                            tx.send(Event::DownloadProgress(span.clone()))
+                                .await
+                                .unwrap();
+                            tx_write
+                                .send((span, chunk.split_to(len as usize)))
+                                .await
+                                .unwrap();
+                            if start >= task.end() {
+                                continue 'a;
+                            }
                         }
-                        let mut chunk = chunk.unwrap();
-                        let len = chunk.len() as u64;
-                        task.fetch_add_start(len);
-                        start += len;
-                        let range_start = range.start + downloaded;
-                        downloaded += len;
-                        let range_end = range.start + downloaded;
-                        let span = range_start..range_end.min(task_list.get(task.end()));
-                        let len = span.total();
-                        tx.send(Event::DownloadProgress(span.clone()))
-                            .await
-                            .unwrap();
-                        tx_write
-                            .send((span, chunk.split_to(len as usize)))
-                            .await
-                            .unwrap();
-                        if start >= task.end() {
-                            continue 'a;
-                        }
+                        break;
                     }
                 }
             }

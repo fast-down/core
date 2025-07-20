@@ -300,12 +300,10 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
                 }
             }
             Event::Abort(id) => {
-                if args.verbose {
-                    painter
-                        .lock()
-                        .await
-                        .print(&format!("线程 {} 已中断\n", id))?;
-                }
+                painter
+                    .lock()
+                    .await
+                    .print(&format!("线程 {} 已中断\n", id))?;
             }
             Event::Downloading(id) => {
                 if args.verbose {
