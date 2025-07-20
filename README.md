@@ -57,10 +57,10 @@
                     <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows-32bit.zip">下载</a>
                 </td>
                 <td>
-                    <span aria-hidden="true">❌</span><span style="position: absolute; left: -9999px">不支持</span>
+                    ❌不支持
                 </td>
                 <td>
-                    <span aria-hidden="true">❌</span><span style="position: absolute; left: -9999px">不支持</span>
+                    ❌不支持
                 </td>
             </tr>
             <tr>
