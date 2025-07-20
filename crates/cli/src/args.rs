@@ -74,10 +74,6 @@ struct DownloadCli {
     #[arg(short = 'H', long = "header", value_name = "Key: Value")]
     headers: Vec<String>,
 
-    /// 下载缓冲区大小 (单位: B)
-    #[arg(long)]
-    download_buffer_size: Option<usize>,
-
     /// 写入缓冲区大小 (单位: B)
     #[arg(long)]
     write_buffer_size: Option<usize>,
@@ -144,7 +140,6 @@ pub struct DownloadArgs {
     pub file_name: Option<String>,
     pub proxy: Option<String>,
     pub headers: HeaderMap,
-    pub download_buffer_size: usize,
     pub write_buffer_size: usize,
     pub repaint_gap: Duration,
     pub progress_width: u16,
@@ -176,7 +171,6 @@ impl Args {
                         file_name: cli.file_name,
                         proxy: None,
                         headers: HeaderMap::new(),
-                        download_buffer_size: 8 * 1024,
                         write_buffer_size: 8 * 1024 * 1024,
                         progress_width: terminal::size()
                             .ok()
@@ -217,9 +211,6 @@ impl Args {
                         if !value.is_empty() {
                             args.proxy = Some(value);
                         }
-                    }
-                    if let Ok(value) = config.get_int("General.download_buffer_size") {
-                        args.download_buffer_size = value.try_into()?;
                     }
                     if let Ok(value) = config.get_int("General.write_buffer_size") {
                         args.write_buffer_size = value.try_into()?;
@@ -287,9 +278,6 @@ impl Args {
                     }
                     if let Some(value) = cli.proxy {
                         args.proxy = Some(value);
-                    }
-                    if let Some(value) = cli.download_buffer_size {
-                        args.download_buffer_size = value;
                     }
                     if let Some(value) = cli.write_buffer_size {
                         args.write_buffer_size = value;
