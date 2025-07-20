@@ -8,10 +8,10 @@ license = "MIT"
 authors = ["share121 <2854631158@qq.com>"]
 repository = "https://github.com/share121/fast-down"
 readme = "README.md"
-exclude = ["/.github", "/docs"]
+exclude = ["/.github"]
 
 [workspace.dependencies]
-fast-down = { version = "2.0.0", path = "crates/core" }
+fast-down = { version = "2.0.1", path = "crates/core" }
 color-eyre = "0.6.3"
 reqwest = { version = "0.12.12", features = [
   "gzip",

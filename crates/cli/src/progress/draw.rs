@@ -1,5 +1,4 @@
 use crate::fmt;
-use color_eyre::Result;
 use crossterm::{
     cursor,
     style::Print,
@@ -11,11 +10,11 @@ use std::{
     io::{self, Stderr, Stdout, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
-    thread,
     time::{Duration, Instant},
 };
+use tokio::sync::Mutex;
 
 const BLOCK_CHARS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 
@@ -66,16 +65,18 @@ impl Painter {
     pub fn start_update_thread(painter_arc: Arc<Mutex<Self>>) -> Box<impl Fn()> {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
-        thread::spawn(move || loop {
-            let mut painter = painter_arc.lock().unwrap();
-            painter.update().unwrap();
-            let should_stop = painter.total > 0 && painter.curr_size >= painter.total;
-            let duration = painter.repaint_duration;
-            drop(painter);
-            if should_stop || !running.load(Ordering::Relaxed) {
-                break;
+        tokio::spawn(async move {
+            loop {
+                let mut painter = painter_arc.lock().await;
+                painter.update().unwrap();
+                let should_stop = painter.total > 0 && painter.curr_size >= painter.total;
+                let duration = painter.repaint_duration;
+                drop(painter);
+                if should_stop || !running.load(Ordering::Relaxed) {
+                    break;
+                }
+                tokio::time::sleep(duration).await;
             }
-            thread::sleep(duration).await;
         });
         Box::new(move || {
             running_clone.store(false, Ordering::Relaxed);
@@ -87,7 +88,7 @@ impl Painter {
         self.progress.merge_progress(p);
     }
 
-    pub fn update(&mut self) -> Result<()> {
+    pub fn update(&mut self) -> Result<(), std::io::Error> {
         let repaint_elapsed = self.last_repaint_time.elapsed();
         self.last_repaint_time = Instant::now();
         let repaint_elapsed_ms = repaint_elapsed.as_millis();
@@ -167,7 +168,7 @@ impl Painter {
         Ok(())
     }
 
-    pub fn print(&mut self, msg: &str) -> Result<()> {
+    pub fn print(&mut self, msg: &str) -> Result<(), std::io::Error> {
         if self.has_progress {
             self.stderr
                 .queue(cursor::MoveUp(1))?

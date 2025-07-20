@@ -1,6 +1,5 @@
 use super::DownloadResult;
-use crate::{ConnectErrorKind, Event, ProgressEntry, SeqWriter};
-use bytes::Bytes;
+use crate::{ConnectErrorKind, Event, SeqWriter};
 use reqwest::{Client, IntoUrl};
 use std::{
     sync::{
@@ -23,8 +22,8 @@ pub async fn download(
     options: DownloadOptions,
 ) -> Result<DownloadResult, reqwest::Error> {
     let url = url.into_url()?;
-    let (tx, event_chain) = mpsc::channel(40);
-    let (tx_write, mut rx_write) = mpsc::channel::<(ProgressEntry, Bytes)>(40);
+    let (tx, event_chain) = mpsc::channel(1024);
+    let (tx_write, mut rx_write) = mpsc::channel(1024);
     let tx_clone = tx.clone();
     let handle = tokio::spawn(async move {
         while let Some((spin, data)) = rx_write.recv().await {

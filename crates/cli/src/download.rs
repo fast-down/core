@@ -1,23 +1,21 @@
-use crate::args::DownloadArgs;
-use crate::fmt;
-use crate::persist::Database;
-use crate::progress::{self, Painter as ProgressPainter};
+use crate::{
+    args::DownloadArgs,
+    fmt,
+    persist::Database,
+    progress::{self, Painter as ProgressPainter},
+};
 use color_eyre::eyre::{eyre, Result};
-use fast_down::file::DownloadOptions;
-use fast_down::{Event, MergeProgress, ProgressEntry, Total};
+use fast_down::{file::DownloadOptions, Event, MergeProgress, ProgressEntry, Total};
 use path_clean;
 use reqwest::{
-    blocking::Client,
     header::{self, HeaderValue},
-    Proxy,
+    Client, Proxy,
 };
-use std::{
-    env,
-    io::{self, Write},
-    path::Path,
-    sync::{Arc, Mutex},
-    thread,
-    time::Instant,
+use std::{env, path::Path, sync::Arc, time::Instant};
+use tokio::{
+    io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    runtime::Handle,
+    sync::Mutex,
 };
 use url::Url;
 
@@ -39,7 +37,7 @@ macro_rules! predicate {
 }
 
 #[inline]
-fn confirm(predicate: impl Into<AutoConfirm>, prompt: &str, default: bool) -> Result<bool> {
+async fn confirm(predicate: impl Into<AutoConfirm>, prompt: &str, default: bool) -> Result<bool> {
     fn get_text(value: bool) -> u8 {
         match value {
             true => b'Y',
@@ -50,15 +48,16 @@ fn confirm(predicate: impl Into<AutoConfirm>, prompt: &str, default: bool) -> Re
         true => b"(Y/n)",
         false => b"(y/N)",
     };
-    io::stderr().write_all(prompt.as_bytes())?;
-    io::stderr().write_all(text)?;
+    let mut stderr = io::stderr();
+    stderr.write_all(prompt.as_bytes()).await?;
+    stderr.write_all(text).await?;
     if let AutoConfirm::Enable(value) = predicate.into() {
-        io::stderr().write(&[get_text(value), b'\n'])?;
+        stderr.write(&[get_text(value), b'\n']).await?;
         return Ok(value);
     }
-    io::stderr().flush()?;
+    stderr.flush().await?;
     let mut input = String::with_capacity(4);
-    io::stdin().read_line(&mut input)?;
+    BufReader::new(io::stdin()).read_line(&mut input).await?;
     match input.trim() {
         "y" | "Y" => Ok(true),
         "n" | "N" => Ok(false),
@@ -67,7 +66,7 @@ fn confirm(predicate: impl Into<AutoConfirm>, prompt: &str, default: bool) -> Re
     }
 }
 
-pub fn download(mut args: DownloadArgs) -> Result<()> {
+pub async fn download(mut args: DownloadArgs) -> Result<()> {
     if args.browser {
         let url = Url::parse(&args.url)?;
         args.headers
@@ -86,17 +85,15 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
     if let Some(ref proxy) = args.proxy {
         client = client.proxy(Proxy::all(proxy)?);
     }
-    let client: Client = client.build()?;
-    let db = Database::new()?;
+    let client = client.build()?;
+    let db = Database::new().await?;
 
     let info = loop {
-        match fast_down::get_url_info(&args.url, &client) {
+        match fast_down::get_url_info(&args.url, &client).await {
             Ok(info) => break info,
-            Err(err) => {
-                println!("获取文件信息失败: {}", err);
-                thread::sleep(args.retry_gap).await;
-            }
+            Err(err) => println!("获取文件信息失败: {}", err),
         }
+        tokio::time::sleep(args.retry_gap).await;
     };
     let threads = if info.can_fast_download {
         args.threads
@@ -111,7 +108,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
         }
     }
     save_path = path_clean::clean(save_path);
-    let save_path_str = save_path.to_str().unwrap().to_string();
+    let save_path_str = Arc::new(save_path.to_str().unwrap().to_string());
 
     println!(
         "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}\nETag: {:?}\nLast-Modified: {:?}\n",
@@ -130,7 +127,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
 
     if save_path.try_exists()? {
         if args.resume && info.can_fast_download {
-            if let Ok(Some(progress)) = db.get_entry(&save_path_str) {
+            if let Ok(Some(progress)) = db.get_entry(save_path_str.clone()).await {
                 let downloaded = progress.progress.total();
                 if downloaded < info.file_size {
                     download_chunks = progress::invert(&progress.progress, info.file_size);
@@ -152,7 +149,9 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                                     progress.total_size, info.file_size
                                 ),
                                 false,
-                            )? {
+                            )
+                            .await?
+                            {
                                 println!("下载取消");
                                 return Ok(());
                             }
@@ -161,7 +160,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                             if !confirm(predicate!(args), &format!(
                                 "原文件 ETag: {:?}\n现文件 ETag: {:?}\n文件 ETag 不一致，是否继续？",
                                 progress.etag, info.etag
-                            ), false)? {
+                            ), false).await? {
                                 println!("下载取消");
                                 return Ok(());
                             }
@@ -174,7 +173,9 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                                         progress_etag
                                     ),
                                     false,
-                                )? {
+                                )
+                                .await?
+                                {
                                     println!("下载取消");
                                     return Ok(());
                                 }
@@ -184,7 +185,9 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                                 predicate!(args),
                                 "此文件无 ETag，无法保证文件一致是否继续？",
                                 false,
-                            )? {
+                            )
+                            .await?
+                            {
                                 println!("下载取消");
                                 return Ok(());
                             }
@@ -194,7 +197,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                                 predicate!(args),
                                 &format!("原文件最后编辑时间: {:?}\n现文件最后编辑时间: {:?}\n文件最后编辑时间不一致，是否继续？ ", progress.last_modified, info.last_modified),
                                 false
-                            )? {
+                            ).await? {
                                 println!("下载取消");
                                 return Ok(());
                             }
@@ -204,7 +207,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
             }
         }
         if !args.yes && !resume_download && !args.force {
-            if !confirm(predicate!(args), "文件已存在，是否覆盖？", false)? {
+            if !confirm(predicate!(args), "文件已存在，是否覆盖？", false).await? {
                 println!("下载取消");
                 return Ok(());
             }
@@ -212,37 +215,40 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
     }
 
     let result = fast_down::file::download(
-        &info.final_url,
+        info.final_url.clone(),
         &save_path,
         DownloadOptions {
             threads,
             can_fast_download: info.can_fast_download,
             file_size: info.file_size,
             client,
-            download_buffer_size: args.download_buffer_size,
             download_chunks,
             retry_gap: args.retry_gap,
             write_buffer_size: args.write_buffer_size,
         },
-    )?;
+    )
+    .await?;
 
-    let (event_chain, join_handle, cancel) = result.try_into_inner().unwrap();
-    let canceler = std::sync::LazyLock::new(move || cancel());
+    let result_clone = result.clone();
+    let rt_handle = Handle::current();
     ctrlc::set_handler(move || {
-        std::sync::LazyLock::force(&canceler);
+        rt_handle.block_on(async {
+            result_clone.cancel().await;
+        })
     })?;
 
     let mut last_db_update = Instant::now();
 
     if !resume_download {
         db.init_entry(
-            &save_path_str,
+            save_path_str.clone(),
             info.file_size,
             info.etag,
             info.last_modified,
-            &info.file_name,
-            &info.final_url,
-        )?;
+            info.file_name,
+            info.final_url.to_string(),
+        )
+        .await?;
     }
 
     let painter = Arc::new(Mutex::new(ProgressPainter::new(
@@ -254,46 +260,39 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
     )));
     let cancel = ProgressPainter::start_update_thread(painter.clone());
     let start = Instant::now();
-
-    for e in &event_chain {
+    let mut rx = result.event_chain.lock().await;
+    while let Some(e) = rx.recv().await {
         match e {
-            Event::DownloadProgress(p) => {
-                painter.lock().unwrap().add(p);
-            }
+            Event::DownloadProgress(p) => painter.lock().await.add(p),
             Event::WriteProgress(p) => {
                 write_progress.merge_progress(p);
                 if last_db_update.elapsed().as_secs() >= 1 {
                     last_db_update = Instant::now();
                     db.update_entry(
-                        &save_path_str,
-                        &write_progress,
+                        save_path_str.clone(),
+                        write_progress.clone(),
                         start.elapsed().as_millis() as u64,
-                    )?;
+                    )
+                    .await?;
                 }
             }
-            Event::ConnectError(id, err) => {
-                painter
-                    .lock()
-                    .unwrap()
-                    .print(&format!("线程 {} 连接失败, 错误原因: {:?}\n", id, err))?;
-            }
-            Event::DownloadError(id, err) => {
-                painter
-                    .lock()
-                    .unwrap()
-                    .print(&format!("线程 {} 下载失败, 错误原因: {:?}\n", id, err))?;
-            }
-            Event::WriteError(err) => {
-                painter
-                    .lock()
-                    .unwrap()
-                    .print(&format!("写入文件失败, 错误原因: {:?}\n", err))?;
-            }
+            Event::ConnectError(id, err) => painter
+                .lock()
+                .await
+                .print(&format!("线程 {} 连接失败, 错误原因: {:?}\n", id, err))?,
+            Event::DownloadError(id, err) => painter
+                .lock()
+                .await
+                .print(&format!("线程 {} 下载失败, 错误原因: {:?}\n", id, err))?,
+            Event::WriteError(err) => painter
+                .lock()
+                .await
+                .print(&format!("写入文件失败, 错误原因: {:?}\n", err))?,
             Event::Connecting(id) => {
                 if args.verbose {
                     painter
                         .lock()
-                        .unwrap()
+                        .await
                         .print(&format!("线程 {} 正在连接中……\n", id))?;
                 }
             }
@@ -301,7 +300,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                 if args.verbose {
                     painter
                         .lock()
-                        .unwrap()
+                        .await
                         .print(&format!("线程 {} 完成任务\n", id))?;
                 }
             }
@@ -309,7 +308,7 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                 if args.verbose {
                     painter
                         .lock()
-                        .unwrap()
+                        .await
                         .print(&format!("线程 {} 已中断\n", id))?;
                 }
             }
@@ -317,19 +316,20 @@ pub fn download(mut args: DownloadArgs) -> Result<()> {
                 if args.verbose {
                     painter
                         .lock()
-                        .unwrap()
+                        .await
                         .print(&format!("线程 {} 正在下载中……\n", id))?;
                 }
             }
         }
     }
     db.update_entry(
-        &save_path_str,
-        &write_progress,
+        save_path_str.clone(),
+        write_progress.clone(),
         start.elapsed().as_millis() as u64,
-    )?;
-    painter.lock().unwrap().update()?;
+    )
+    .await?;
+    painter.lock().await.update()?;
     cancel();
-    join_handle.join().unwrap();
+    result.join().await.unwrap();
     Ok(())
 }
