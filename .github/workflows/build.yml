@@ -68,16 +68,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl-tools (linux only)
-        if: contains(matrix.build, 'linux')
+      - name: Install dependencies (linux only but not linux-32bit)
+        if: contains(matrix.build, 'linux') && matrix.build != 'linux-32bit'
         run: sudo apt install musl-tools
 
       - name: Install dependencies (linux 32bit only)
         if: matrix.build == 'linux-32bit'
         run: |
+          sudo dpkg --add-architecture i386
           sudo apt update
-          sudo apt install gcc-multilib
-          sudo apt install libc6-dev-i386
+          sudo apt install musl-tools:i386
 
       - name: Configure sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.9
