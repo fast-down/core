@@ -108,8 +108,6 @@ Options:
           代理地址 (格式: http://proxy:port 或 socks5://proxy:port)
   -H, --header <Key: Value>
           自定义请求头 (可多次使用)
-      --download-buffer-size <DOWNLOAD_BUFFER_SIZE>
-          下载缓冲区大小 (单位: B)
       --write-buffer-size <WRITE_BUFFER_SIZE>
           写入缓冲区大小 (单位: B)
       --progress-width <PROGRESS_WIDTH>
