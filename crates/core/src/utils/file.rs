@@ -16,27 +16,12 @@ pub struct DownloadOptions {
     pub file_size: u64,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum DownloadErrorKind {
-    Reqwest(reqwest::Error),
-    Io(std::io::Error),
-}
-impl std::fmt::Display for DownloadErrorKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DownloadErrorKind::Reqwest(err) => write!(f, "HTTP request failed: {}", err),
-            DownloadErrorKind::Io(err) => write!(f, "IO error: {}", err),
-        }
-    }
-}
-
-impl std::error::Error for DownloadErrorKind {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            DownloadErrorKind::Reqwest(err) => Some(err),
-            DownloadErrorKind::Io(err) => Some(err),
-        }
-    }
+    #[error("Reqwest error: {0}")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub async fn download(

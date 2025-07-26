@@ -1,5 +1,5 @@
 use color_eyre::Result;
 
-pub fn update() -> Result<()> {
+pub async fn update() -> Result<()> {
     Ok(())
 }

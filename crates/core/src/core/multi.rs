@@ -70,7 +70,7 @@ pub async fn download(
         let url = url.clone();
         let tx_write = tx_write.clone();
         tokio::spawn(async move {
-            'a: loop {
+            'steal_task: loop {
                 if !running.load(Ordering::Relaxed) {
                     tx.send(Event::Abort(id)).await.unwrap();
                     return;
@@ -157,7 +157,7 @@ pub async fn download(
                                 .await
                                 .unwrap();
                             if start >= task.end() {
-                                continue 'a;
+                                continue 'steal_task;
                             }
                         }
                         break;

@@ -16,10 +16,11 @@ static GLOBAL: MiMalloc = MiMalloc;
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
+    println!("fast-down v{}", env!("CARGO_PKG_VERSION"));
     let args = Args::parse()?;
     match args {
         Args::Download(download_args) => download::download(download_args).await,
-        Args::Update => update::update(),
+        Args::Update => update::update().await,
         Args::Clean => clean::clean().await,
     }
 }

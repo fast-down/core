@@ -8,7 +8,7 @@ use std::{env, str::FromStr, time::Duration};
 /// 超级快的下载器
 #[derive(Parser, Debug)]
 #[command(name = "fast-down")]
-#[command(author, version, about, long_about = None)]
+#[command(author, about)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -16,7 +16,7 @@ struct Cli {
 
 #[derive(Parser, Debug)]
 #[command(name = "fast-down")]
-#[command(author, version, about, long_about = None)]
+#[command(author, about)]
 struct CliDefault {
     #[command(flatten)]
     cmd: DownloadCli,
