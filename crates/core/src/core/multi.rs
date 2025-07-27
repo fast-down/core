@@ -18,6 +18,7 @@ pub struct DownloadOptions {
     pub client: Client,
     pub download_chunks: Vec<ProgressEntry>,
     pub retry_gap: Duration,
+    pub write_channel_size: usize,
 }
 
 pub async fn download(
@@ -26,24 +27,25 @@ pub async fn download(
     options: DownloadOptions,
 ) -> Result<DownloadResult, reqwest::Error> {
     let url = url.into_url()?;
-    let (tx, event_chain) = mpsc::channel(1024);
-    let (tx_write, mut rx_write) = mpsc::channel::<(ProgressEntry, Bytes)>(1024);
+    let (tx, event_chain) = mpsc::unbounded_channel();
+    let (tx_write, mut rx_write) =
+        mpsc::channel::<(ProgressEntry, Bytes)>(options.write_channel_size);
     let tx_clone = tx.clone();
     let handle = tokio::spawn(async move {
         while let Some((spin, data)) = rx_write.recv().await {
             loop {
                 match writer.write_randomly(spin.clone(), &data).await {
                     Ok(_) => break,
-                    Err(e) => tx_clone.send(Event::WriteError(e)).await.unwrap(),
+                    Err(e) => tx_clone.send(Event::WriteError(e)).unwrap(),
                 }
                 tokio::time::sleep(options.retry_gap).await;
             }
-            tx_clone.send(Event::WriteProgress(spin)).await.unwrap();
+            tx_clone.send(Event::WriteProgress(spin)).unwrap();
         }
         loop {
             match writer.flush().await {
                 Ok(_) => break,
-                Err(e) => tx_clone.send(Event::WriteError(e)).await.unwrap(),
+                Err(e) => tx_clone.send(Event::WriteError(e)).unwrap(),
             };
             tokio::time::sleep(options.retry_gap).await;
         }
@@ -72,7 +74,7 @@ pub async fn download(
         tokio::spawn(async move {
             'steal_task: loop {
                 if !running.load(Ordering::Relaxed) {
-                    tx.send(Event::Abort(id)).await.unwrap();
+                    tx.send(Event::Abort(id)).unwrap();
                     return;
                 }
                 let mut start = task.start();
@@ -82,7 +84,7 @@ pub async fn download(
                         continue;
                     }
                     drop(guard);
-                    tx.send(Event::Finished(id)).await.unwrap();
+                    tx.send(Event::Finished(id)).unwrap();
                     return;
                 }
                 let download_range = &task_list.get_range(start..task.end());
@@ -91,10 +93,10 @@ pub async fn download(
                         let header_range_value = format!("bytes={}-{}", range.start, range.end - 1);
                         let mut response = loop {
                             if !running.load(Ordering::Relaxed) {
-                                tx.send(Event::Abort(id)).await.unwrap();
+                                tx.send(Event::Abort(id)).unwrap();
                                 return;
                             }
-                            tx.send(Event::Connecting(id)).await.unwrap();
+                            tx.send(Event::Connecting(id)).unwrap();
                             match client
                                 .get(url.as_str())
                                 .header(header::RANGE, &header_range_value)
@@ -114,17 +116,16 @@ pub async fn download(
                                     tx.send(Event::ConnectError(id, ConnectErrorKind::Reqwest(e)))
                                 }
                             }
-                            .await
                             .unwrap();
                             tokio::time::sleep(options.retry_gap).await;
                         };
-                        tx.send(Event::Downloading(id)).await.unwrap();
+                        tx.send(Event::Downloading(id)).unwrap();
                         let mut downloaded = 0;
                         loop {
                             let mut count = 0;
                             let chunk = loop {
                                 if !running.load(Ordering::Relaxed) {
-                                    tx.send(Event::Abort(id)).await.unwrap();
+                                    tx.send(Event::Abort(id)).unwrap();
                                     return;
                                 }
                                 count += 1;
@@ -133,7 +134,7 @@ pub async fn download(
                                 }
                                 match response.chunk().await {
                                     Ok(chunk) => break chunk,
-                                    Err(e) => tx.send(Event::DownloadError(id, e)).await.unwrap(),
+                                    Err(e) => tx.send(Event::DownloadError(id, e)).unwrap(),
                                 }
                                 tokio::time::sleep(options.retry_gap).await;
                             };
@@ -149,9 +150,7 @@ pub async fn download(
                             let range_end = range.start + downloaded;
                             let span = range_start..range_end.min(task_list.get(task.end()));
                             let len = span.total();
-                            tx.send(Event::DownloadProgress(span.clone()))
-                                .await
-                                .unwrap();
+                            tx.send(Event::DownloadProgress(span.clone())).unwrap();
                             tx_write
                                 .send((span, chunk.split_to(len as usize)))
                                 .await
@@ -256,6 +255,7 @@ mod tests {
                 threads: 32,
                 download_chunks: download_chunks.clone(),
                 retry_gap: Duration::from_secs(1),
+                write_channel_size: 1024,
             },
         )
         .await
@@ -355,6 +355,7 @@ mod tests {
                 threads: 32,
                 download_chunks: download_chunks.clone(),
                 retry_gap: Duration::from_secs(1),
+                write_channel_size: 1024,
             },
         )
         .await
@@ -454,6 +455,7 @@ mod tests {
                     threads: 32,
                     download_chunks: vec![0..mock_body.len() as u64],
                     retry_gap: Duration::from_secs(1),
+                    write_channel_size: 1024,
                 },
             )
             .await
@@ -514,6 +516,7 @@ mod tests {
                 threads: 8,
                 download_chunks: download_chunks.clone(),
                 retry_gap: Duration::from_secs(1),
+                write_channel_size: 1024,
             },
         )
         .await

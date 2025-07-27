@@ -220,6 +220,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
             download_chunks,
             retry_gap: args.retry_gap,
             write_buffer_size: args.write_buffer_size,
+            write_channel_size: args.write_channel_size,
         },
     )
     .await?;

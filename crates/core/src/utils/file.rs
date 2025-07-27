@@ -14,6 +14,7 @@ pub struct DownloadOptions {
     pub download_chunks: Vec<ProgressEntry>,
     pub retry_gap: Duration,
     pub file_size: u64,
+    pub write_channel_size: usize,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -75,6 +76,7 @@ pub async fn download(
             download_chunks: options.download_chunks,
             retry_gap: options.retry_gap,
             file_size: options.file_size,
+            write_channel_size: options.write_channel_size,
         },
     )
     .await

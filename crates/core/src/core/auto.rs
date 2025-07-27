@@ -11,6 +11,7 @@ pub struct DownloadOptions {
     pub download_chunks: Vec<ProgressEntry>,
     pub retry_gap: Duration,
     pub file_size: u64,
+    pub write_channel_size: usize,
 }
 
 pub async fn download(
@@ -28,6 +29,7 @@ pub async fn download(
                 threads: options.threads,
                 download_chunks: options.download_chunks,
                 retry_gap: options.retry_gap,
+                write_channel_size: options.write_channel_size,
             },
         )
         .await
@@ -38,6 +40,7 @@ pub async fn download(
             single::DownloadOptions {
                 client: options.client,
                 retry_gap: options.retry_gap,
+                write_channel_size: options.write_channel_size,
             },
         )
         .await

@@ -1,7 +1,7 @@
 use crate::Event;
 use std::sync::Arc;
 use tokio::{
-    sync::{mpsc::Receiver, Mutex},
+    sync::{mpsc::UnboundedReceiver, Mutex},
     task::{JoinError, JoinHandle},
 };
 
@@ -14,13 +14,17 @@ pub type CancelFn = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone)]
 pub struct DownloadResult {
-    pub event_chain: Arc<Mutex<Receiver<Event>>>,
+    pub event_chain: Arc<Mutex<UnboundedReceiver<Event>>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     cancel_fn: Arc<Mutex<Option<CancelFn>>>,
 }
 
 impl DownloadResult {
-    pub fn new(event_chain: Receiver<Event>, handle: JoinHandle<()>, cancel_fn: CancelFn) -> Self {
+    pub fn new(
+        event_chain: UnboundedReceiver<Event>,
+        handle: JoinHandle<()>,
+        cancel_fn: CancelFn,
+    ) -> Self {
         Self {
             event_chain: Arc::new(Mutex::new(event_chain)),
             handle: Arc::new(Mutex::new(Some(handle))),
