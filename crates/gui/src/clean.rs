@@ -1,9 +1,9 @@
 use crate::persist::Database;
 use color_eyre::Result;
 
-pub fn clean() -> Result<()> {
-    let db = Database::new()?;
-    let len = db.clean()?;
+pub async fn clean() -> Result<()> {
+    let db = Database::new().await?;
+    let len = db.clean().await?;
     println!("已清理 {len} 行链接");
     Ok(())
 }

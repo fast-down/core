@@ -10,7 +10,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
@@ -27,25 +27,25 @@ pub async fn download(
     options: DownloadOptions,
 ) -> Result<DownloadResult, reqwest::Error> {
     let url = url.into_url()?;
-    let (tx, event_chain) = mpsc::unbounded_channel();
-    let (tx_write, mut rx_write) =
-        mpsc::channel::<(ProgressEntry, Bytes)>(options.write_channel_size);
+    let (tx, event_chain) = async_channel::unbounded();
+    let (tx_write, rx_write) =
+        async_channel::bounded::<(ProgressEntry, Bytes)>(options.write_channel_size);
     let tx_clone = tx.clone();
     let handle = tokio::spawn(async move {
-        while let Some((spin, data)) = rx_write.recv().await {
+        while let Ok((spin, data)) = rx_write.recv().await {
             loop {
                 match writer.write_randomly(spin.clone(), &data).await {
                     Ok(_) => break,
-                    Err(e) => tx_clone.send(Event::WriteError(e)).unwrap(),
+                    Err(e) => tx_clone.send(Event::WriteError(e)).await.unwrap(),
                 }
                 tokio::time::sleep(options.retry_gap).await;
             }
-            tx_clone.send(Event::WriteProgress(spin)).unwrap();
+            tx_clone.send(Event::WriteProgress(spin)).await.unwrap();
         }
         loop {
             match writer.flush().await {
                 Ok(_) => break,
-                Err(e) => tx_clone.send(Event::WriteError(e)).unwrap(),
+                Err(e) => tx_clone.send(Event::WriteError(e)).await.unwrap(),
             };
             tokio::time::sleep(options.retry_gap).await;
         }
@@ -74,7 +74,7 @@ pub async fn download(
         tokio::spawn(async move {
             'steal_task: loop {
                 if !running.load(Ordering::Relaxed) {
-                    tx.send(Event::Abort(id)).unwrap();
+                    tx.send(Event::Abort(id)).await.unwrap();
                     return;
                 }
                 let mut start = task.start();
@@ -84,7 +84,7 @@ pub async fn download(
                         continue;
                     }
                     drop(guard);
-                    tx.send(Event::Finished(id)).unwrap();
+                    tx.send(Event::Finished(id)).await.unwrap();
                     return;
                 }
                 let download_range = &task_list.get_range(start..task.end());
@@ -93,10 +93,10 @@ pub async fn download(
                         let header_range_value = format!("bytes={}-{}", range.start, range.end - 1);
                         let mut response = loop {
                             if !running.load(Ordering::Relaxed) {
-                                tx.send(Event::Abort(id)).unwrap();
+                                tx.send(Event::Abort(id)).await.unwrap();
                                 return;
                             }
-                            tx.send(Event::Connecting(id)).unwrap();
+                            tx.send(Event::Connecting(id)).await.unwrap();
                             match client
                                 .get(url.as_str())
                                 .header(header::RANGE, &header_range_value)
@@ -116,16 +116,17 @@ pub async fn download(
                                     tx.send(Event::ConnectError(id, ConnectErrorKind::Reqwest(e)))
                                 }
                             }
+                            .await
                             .unwrap();
                             tokio::time::sleep(options.retry_gap).await;
                         };
-                        tx.send(Event::Downloading(id)).unwrap();
+                        tx.send(Event::Downloading(id)).await.unwrap();
                         let mut downloaded = 0;
                         loop {
                             let mut count = 0;
                             let chunk = loop {
                                 if !running.load(Ordering::Relaxed) {
-                                    tx.send(Event::Abort(id)).unwrap();
+                                    tx.send(Event::Abort(id)).await.unwrap();
                                     return;
                                 }
                                 count += 1;
@@ -134,7 +135,7 @@ pub async fn download(
                                 }
                                 match response.chunk().await {
                                     Ok(chunk) => break chunk,
-                                    Err(e) => tx.send(Event::DownloadError(id, e)).unwrap(),
+                                    Err(e) => tx.send(Event::DownloadError(id, e)).await.unwrap(),
                                 }
                                 tokio::time::sleep(options.retry_gap).await;
                             };
@@ -150,7 +151,9 @@ pub async fn download(
                             let range_end = range.start + downloaded;
                             let span = range_start..range_end.min(task_list.get(task.end()));
                             let len = span.total();
-                            tx.send(Event::DownloadProgress(span.clone())).unwrap();
+                            tx.send(Event::DownloadProgress(span.clone()))
+                                .await
+                                .unwrap();
                             tx_write
                                 .send((span, chunk.split_to(len as usize)))
                                 .await
@@ -263,8 +266,7 @@ mod tests {
 
         let mut download_progress: Vec<ProgressEntry> = Vec::new();
         let mut write_progress: Vec<ProgressEntry> = Vec::new();
-        let mut rx = result.event_chain.lock().await;
-        while let Some(e) = rx.recv().await {
+        while let Ok(e) = result.event_chain.recv().await {
             match e {
                 Event::DownloadProgress(p) => {
                     download_progress.merge_progress(p);
@@ -363,8 +365,7 @@ mod tests {
 
         let mut download_progress: Vec<ProgressEntry> = Vec::new();
         let mut write_progress: Vec<ProgressEntry> = Vec::new();
-        let mut rx = result.event_chain.lock().await;
-        while let Some(e) = rx.recv().await {
+        while let Ok(e) = result.event_chain.recv().await {
             match e {
                 Event::DownloadProgress(p) => {
                     download_progress.merge_progress(p);
@@ -466,8 +467,7 @@ mod tests {
                 result_clone.cancel().await;
             });
             let mut download_progress: Vec<ProgressEntry> = Vec::new();
-            let mut rx = result.event_chain.lock().await;
-            while let Some(e) = rx.recv().await {
+            while let Ok(e) = result.event_chain.recv().await {
                 match e {
                     Event::DownloadProgress(p) => {
                         download_progress.merge_progress(p);
@@ -524,8 +524,7 @@ mod tests {
 
         let mut download_progress: Vec<ProgressEntry> = Vec::new();
         let mut write_progress: Vec<ProgressEntry> = Vec::new();
-        let mut rx = result.event_chain.lock().await;
-        while let Some(e) = rx.recv().await {
+        while let Ok(e) = result.event_chain.recv().await {
             match e {
                 Event::DownloadProgress(p) => {
                     download_progress.merge_progress(p);

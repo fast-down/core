@@ -231,7 +231,7 @@ impl Args {
                         args.retry_gap = Duration::from_millis(value.try_into()?);
                     }
                     if let Ok(value) = config.get_int("General.repaint_gap") {
-                        args.retry_gap = Duration::from_millis(value.try_into()?);
+                        args.repaint_gap = Duration::from_millis(value.try_into()?);
                     }
                     if let Ok(value) = config.get_bool("General.browser") {
                         args.browser = value;

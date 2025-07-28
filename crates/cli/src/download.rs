@@ -256,8 +256,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     )));
     let cancel = ProgressPainter::start_update_thread(painter.clone());
     let start = Instant::now();
-    let mut rx = result.event_chain.lock().await;
-    while let Some(e) = rx.recv().await {
+    while let Ok(e) = result.event_chain.recv().await {
         match e {
             Event::DownloadProgress(p) => painter.lock().await.add(p),
             Event::WriteProgress(p) => {

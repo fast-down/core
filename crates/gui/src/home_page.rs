@@ -1,12 +1,15 @@
-use crate::args::DownloadArgs;
-use crate::manager::{Manager, ManagerData, Message};
-use crate::persist::{Database, DatabaseEntry};
-use crate::{fmt, progress};
+use crate::{
+    args::DownloadArgs,
+    fmt,
+    manager::{Manager, ManagerData, Message},
+    persist::{Database, DatabaseEntry},
+    progress,
+};
 use color_eyre::Result;
 use fast_down::Total;
 use slint::{Model, Timer, VecModel};
-use std::sync::RwLock;
 use std::{rc::Rc, sync::Arc};
+use tokio::sync::RwLock;
 
 slint::include_modules!();
 
@@ -40,13 +43,13 @@ impl From<&DatabaseEntry> for DownloadData {
     }
 }
 
-pub fn home_page(args: DownloadArgs) -> Result<()> {
+pub async fn home_page(args: DownloadArgs) -> Result<()> {
     let args = Arc::new(args);
     dbg!(&args);
     let ui = AppWindow::new()?;
 
-    let db = Database::new()?;
-    let entries = db.get_all_entries()?;
+    let db = Database::new().await?;
+    let entries = db.get_all_entries().await?;
     let manager = Arc::new(Manager::new(
         args.clone(),
         entries
@@ -60,7 +63,7 @@ pub fn home_page(args: DownloadArgs) -> Result<()> {
             })
             .collect::<Vec<_>>(),
     ));
-    let download_list_model = Rc::new(VecModel::from_iter(entries.iter().map(|e| e.into())));
+    let download_list_model = Rc::new(VecModel::from_iter(entries.iter().map(Into::into)));
     ui.set_download_list(download_list_model.clone().into());
 
     ui.on_add_url({
@@ -81,7 +84,11 @@ pub fn home_page(args: DownloadArgs) -> Result<()> {
                     speed: "0.00 B/s".into(),
                 },
             );
-            manager.add_task(url.to_string()).unwrap();
+            let manager = manager.clone();
+            slint::spawn_local(async move {
+                manager.add_task(url.to_string()).await.unwrap();
+            })
+            .unwrap();
         }
     });
 
@@ -90,7 +97,11 @@ pub fn home_page(args: DownloadArgs) -> Result<()> {
         let download_list_model = download_list_model.clone();
         move |index| {
             let index = index as usize;
-            manager.stop(index).unwrap();
+            let manager = manager.clone();
+            slint::spawn_local(async move {
+                manager.stop(index).await.unwrap();
+            })
+            .unwrap();
             let mut data = download_list_model.row_data(index).unwrap();
             data.is_downloading = false;
             download_list_model.set_row_data(index, data);
@@ -105,7 +116,11 @@ pub fn home_page(args: DownloadArgs) -> Result<()> {
             let mut data = download_list_model.row_data(index).unwrap();
             data.is_downloading = true;
             download_list_model.set_row_data(index, data);
-            manager.resume(index).unwrap();
+            let manager = manager.clone();
+            slint::spawn_local(async move {
+                manager.resume(index).await.unwrap();
+            })
+            .unwrap();
         }
     });
 
@@ -114,7 +129,11 @@ pub fn home_page(args: DownloadArgs) -> Result<()> {
         let download_list_model = download_list_model.clone();
         move |index| {
             let index = index as usize;
-            manager.remove_task(index).unwrap();
+            let manager = manager.clone();
+            slint::spawn_local(async move {
+                manager.remove_task(index).await.unwrap();
+            })
+            .unwrap();
             download_list_model.remove(index);
         }
     });
@@ -139,11 +158,6 @@ pub fn home_page(args: DownloadArgs) -> Result<()> {
                             Message::Stopped(index) => {
                                 let mut data = download_list_model.row_data(index).unwrap();
                                 data.is_downloading = false;
-                                download_list_model.set_row_data(index, data);
-                            }
-                            Message::Started(index) => {
-                                let mut data = download_list_model.row_data(index).unwrap();
-                                data.is_downloading = true;
                                 download_list_model.set_row_data(index, data);
                             }
                             Message::FileName(index, file_name) => {

@@ -15,23 +15,17 @@ categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
 fast-down = { workspace = true }
-clap = { version = "4.5.36", features = ["derive"] }
+clap = { workspace = true }
 color-eyre = { workspace = true }
 reqwest = { workspace = true }
-tokio = { version = "1.46.1", default-features = false, features = [
-  "io-std",
-  "rt-multi-thread",
-] }
-path-clean = "1.0.1"
-ctrlc = "3.4.6"
-url = "2.5.4"
-config = { version = "0.15.11", default-features = false, features = [
-  "toml",
-  "convert-case",
-] }
+tokio = { workspace = true }
+path-clean = { workspace = true }
+ctrlc = { workspace = true }
+url = { workspace = true }
+config = { workspace = true }
+mimalloc = { workspace = true }
+tokio-rusqlite = { workspace = true }
 crossterm = "0.29.0"
-mimalloc = "0.1.46"
-tokio-rusqlite = { version = "0.6.0", features = ["bundled"] }
 
 [[bin]]
 name = "fast"

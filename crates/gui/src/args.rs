@@ -7,7 +7,7 @@ use std::{env, str::FromStr, time::Duration};
 /// 超级快的下载器
 #[derive(Parser, Debug)]
 #[command(name = "fast-down")]
-#[command(author, version, about, long_about = None)]
+#[command(author, about)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -15,7 +15,7 @@ struct Cli {
 
 #[derive(Parser, Debug)]
 #[command(name = "fast-down")]
-#[command(author, version, about, long_about = None)]
+#[command(author, about)]
 struct CliDefault {
     #[command(flatten)]
     cmd: DownloadCli,
@@ -49,13 +49,13 @@ struct DownloadCli {
     #[arg(short = 'H', long = "header", value_name = "Key: Value")]
     headers: Vec<String>,
 
-    /// 下载缓冲区大小 (单位: B)
-    #[arg(long)]
-    download_buffer_size: Option<usize>,
-
     /// 写入缓冲区大小 (单位: B)
     #[arg(long)]
     write_buffer_size: Option<usize>,
+
+    /// 写入通道长度
+    #[arg(long)]
+    write_channel_size: Option<usize>,
 
     /// 重试间隔 (单位: ms)
     #[arg(long)]
@@ -83,8 +83,8 @@ pub struct DownloadArgs {
     pub threads: usize,
     pub proxy: Option<String>,
     pub headers: HeaderMap,
-    pub download_buffer_size: usize,
     pub write_buffer_size: usize,
+    pub write_channel_size: usize,
     pub retry_gap: Duration,
     pub browser: bool,
 }
@@ -92,18 +92,12 @@ pub struct DownloadArgs {
 impl Args {
     pub fn parse() -> Result<Args> {
         match Cli::try_parse().or_else(|err| match err.kind() {
-            clap::error::ErrorKind::InvalidSubcommand => {
+            clap::error::ErrorKind::InvalidSubcommand
+            | clap::error::ErrorKind::UnknownArgument
+            | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
                 CliDefault::try_parse().map(|cli_default| Cli {
                     command: Commands::Download(cli_default.cmd),
                 })
-            }
-            clap::error::ErrorKind::UnknownArgument
-            | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
-                CliDefault::try_parse()
-                    .map(|cli_default| Cli {
-                        command: Commands::Download(cli_default.cmd),
-                    })
-                    .map_err(|_| err)
             }
             _ => Err(err),
         }) {
@@ -111,11 +105,11 @@ impl Args {
                 Commands::Download(cli) => {
                     let mut args = DownloadArgs {
                         save_folder: ".".to_string(),
-                        threads: 32,
+                        threads: 8,
                         proxy: None,
                         headers: HeaderMap::new(),
-                        download_buffer_size: 8 * 1024,
                         write_buffer_size: 8 * 1024 * 1024,
+                        write_channel_size: 1024,
                         retry_gap: Duration::from_millis(500),
                         browser: true,
                     };
@@ -142,11 +136,11 @@ impl Args {
                             args.proxy = Some(value);
                         }
                     }
-                    if let Ok(value) = config.get_int("General.download_buffer_size") {
-                        args.download_buffer_size = value.try_into()?;
-                    }
                     if let Ok(value) = config.get_int("General.write_buffer_size") {
                         args.write_buffer_size = value.try_into()?;
+                    }
+                    if let Ok(value) = config.get_int("General.write_channel_size") {
+                        args.write_channel_size = value.try_into()?;
                     }
                     if let Ok(value) = config.get_int("General.retry_gap") {
                         args.retry_gap = Duration::from_millis(value.try_into()?);
@@ -187,11 +181,11 @@ impl Args {
                     if let Some(value) = cli.proxy {
                         args.proxy = Some(value);
                     }
-                    if let Some(value) = cli.download_buffer_size {
-                        args.download_buffer_size = value;
-                    }
                     if let Some(value) = cli.write_buffer_size {
                         args.write_buffer_size = value;
+                    }
+                    if let Some(value) = cli.write_channel_size {
+                        args.write_channel_size = value;
                     }
                     if let Some(value) = cli.retry_gap {
                         args.retry_gap = Duration::from_millis(value);

@@ -8,7 +8,6 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
@@ -23,24 +22,24 @@ pub async fn download(
     options: DownloadOptions,
 ) -> Result<DownloadResult, reqwest::Error> {
     let url = url.into_url()?;
-    let (tx, event_chain) = mpsc::unbounded_channel();
-    let (tx_write, mut rx_write) = mpsc::channel(options.write_channel_size);
+    let (tx, event_chain) = async_channel::unbounded();
+    let (tx_write, rx_write) = async_channel::bounded(options.write_channel_size);
     let tx_clone = tx.clone();
     let handle = tokio::spawn(async move {
-        while let Some((spin, data)) = rx_write.recv().await {
+        while let Ok((spin, data)) = rx_write.recv().await {
             loop {
                 match writer.write_sequentially(&data).await {
                     Ok(_) => break,
-                    Err(e) => tx_clone.send(Event::WriteError(e)).unwrap(),
+                    Err(e) => tx_clone.send(Event::WriteError(e)).await.unwrap(),
                 }
                 tokio::time::sleep(options.retry_gap).await;
             }
-            tx_clone.send(Event::WriteProgress(spin)).unwrap();
+            tx_clone.send(Event::WriteProgress(spin)).await.unwrap();
         }
         loop {
             match writer.flush().await {
                 Ok(_) => break,
-                Err(e) => tx_clone.send(Event::WriteError(e)).unwrap(),
+                Err(e) => tx_clone.send(Event::WriteError(e)).await.unwrap(),
             };
             tokio::time::sleep(options.retry_gap).await;
         }
@@ -51,28 +50,29 @@ pub async fn download(
         let mut downloaded: u64 = 0;
         let mut response = loop {
             if !running.load(Ordering::Relaxed) {
-                tx.send(Event::Abort(0)).unwrap();
+                tx.send(Event::Abort(0)).await.unwrap();
                 return;
             }
-            tx.send(Event::Connecting(0)).unwrap();
+            tx.send(Event::Connecting(0)).await.unwrap();
             match options.client.get(url.clone()).send().await {
                 Ok(response) => break response,
                 Err(e) => tx
                     .send(Event::ConnectError(0, ConnectErrorKind::Reqwest(e)))
+                    .await
                     .unwrap(),
             }
             tokio::time::sleep(options.retry_gap).await;
         };
-        tx.send(Event::Downloading(0)).unwrap();
+        tx.send(Event::Downloading(0)).await.unwrap();
         loop {
             let chunk = loop {
                 if !running.load(Ordering::Relaxed) {
-                    tx.send(Event::Abort(0)).unwrap();
+                    tx.send(Event::Abort(0)).await.unwrap();
                     return;
                 }
                 match response.chunk().await {
                     Ok(chunk) => break chunk,
-                    Err(e) => tx.send(Event::DownloadError(0, e)).unwrap(),
+                    Err(e) => tx.send(Event::DownloadError(0, e)).await.unwrap(),
                 }
                 tokio::time::sleep(options.retry_gap).await;
             };
@@ -82,11 +82,13 @@ pub async fn download(
             let chunk = chunk.unwrap();
             let len = chunk.len() as u64;
             let span = downloaded..(downloaded + len);
-            tx.send(Event::DownloadProgress(span.clone())).unwrap();
+            tx.send(Event::DownloadProgress(span.clone()))
+                .await
+                .unwrap();
             tx_write.send((span, chunk)).await.unwrap();
             downloaded += len as u64;
         }
-        tx.send(Event::Finished(0)).unwrap();
+        tx.send(Event::Finished(0)).await.unwrap();
     });
     Ok(DownloadResult::new(
         event_chain,
@@ -140,8 +142,7 @@ mod tests {
         .unwrap();
 
         let mut progress_events = Vec::new();
-        let mut rx = result.event_chain.lock().await;
-        while let Some(event) = rx.recv().await {
+        while let Ok(event) = result.event_chain.recv().await {
             progress_events.push(event);
         }
         dbg!(&progress_events);
@@ -210,8 +211,7 @@ mod tests {
         .unwrap();
 
         let mut progress_events = Vec::new();
-        let mut rx = result.event_chain.lock().await;
-        while let Some(event) = rx.recv().await {
+        while let Ok(event) = result.event_chain.recv().await {
             progress_events.push(event);
         }
         dbg!(&progress_events);
@@ -281,8 +281,7 @@ mod tests {
         .unwrap();
 
         let mut progress_events = Vec::new();
-        let mut rx = result.event_chain.lock().await;
-        while let Some(event) = rx.recv().await {
+        while let Ok(event) = result.event_chain.recv().await {
             progress_events.push(event);
         }
         dbg!(&progress_events);
@@ -352,8 +351,7 @@ mod tests {
         .unwrap();
 
         let mut progress_events = Vec::new();
-        let mut rx = result.event_chain.lock().await;
-        while let Some(event) = rx.recv().await {
+        while let Ok(event) = result.event_chain.recv().await {
             progress_events.push(event);
         }
         dbg!(&progress_events);

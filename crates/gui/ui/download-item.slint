@@ -1,18 +1,18 @@
 import { VerticalBox, StyleMetrics, Button, ProgressIndicator } from "std-widgets.slint";
 
 export struct ProgressData {
-  is-blank: bool,
-  width: float,
+    is-blank: bool,
+    width: float,
 }
 
 export struct DownloadData {
-  file-name: string,
-  speed: string,
-  percentage: string,
-  remaining-time: string,
-  elapsed: string,
-  progress: [ProgressData],
-  is-downloading: bool,
+    file-name: string,
+    speed: string,
+    percentage: string,
+    remaining-time: string,
+    elapsed: string,
+    progress: [ProgressData],
+    is-downloading: bool,
 }
 
 export component DownloadItem {

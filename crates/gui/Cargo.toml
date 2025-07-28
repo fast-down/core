@@ -1,6 +1,6 @@
 [package]
 name = "fast-down-gui"
-version = "1.5.0"
+version = "2.0.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -14,23 +14,29 @@ keywords = ["downloader", "parallel", "thread", "concurrency", "performance"]
 categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
-fast-down = { workspace = true, features = ["file"] }
-clap = { version = "4.5.36", features = ["derive"] }
+fast-down = { workspace = true }
+clap = { workspace = true }
 color-eyre = { workspace = true }
 reqwest = { workspace = true }
-serde = { version = "1.0.197", features = ["derive"] }
-path-clean = "1.0.1"
-ctrlc = "3.4.6"
-url = "2.5.4"
-config = "0.15.11"
+tokio = { workspace = true }
+path-clean = { workspace = true }
+ctrlc = { workspace = true }
+url = { workspace = true }
+config = { workspace = true }
+mimalloc = { workspace = true }
+tokio-rusqlite = { workspace = true }
+async-channel = { workspace = true }
 slint = "1.8.0"
-crossbeam-channel = "0.5.14"
+
 
 [dev-dependencies]
-tempfile = "3.18.0"
+tempfile = { workspace = true }
 
 [build-dependencies]
 slint-build = "1.8.0"
+
+[package.metadata.i18n]
+available-locales = ["en", "zh-CN"]
 
 [[bin]]
 name = "fast-down"
