@@ -323,6 +323,6 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     .await?;
     painter.lock().await.update()?;
     cancel();
-    result.join().await.unwrap();
+    result.join().await?;
     Ok(())
 }

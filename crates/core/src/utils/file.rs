@@ -30,7 +30,9 @@ pub async fn download(
     save_path: &Path,
     options: DownloadOptions,
 ) -> Result<DownloadResult, DownloadErrorKind> {
-    let save_folder = save_path.parent().unwrap();
+    let save_folder = save_path
+        .parent()
+        .ok_or(DownloadErrorKind::Io(ErrorKind::NotFound.into()))?;
     if let Err(e) = fs::create_dir_all(save_folder).await {
         if e.kind() != ErrorKind::AlreadyExists {
             return Err(DownloadErrorKind::Io(e));
