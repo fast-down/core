@@ -8,8 +8,16 @@ use reqwest::{
     header::{self, HeaderValue},
     Client, Proxy,
 };
-use std::{env, path::Path, sync::Arc, time::Instant};
-use tokio::sync::RwLock;
+use std::{
+    env,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
+use tokio::sync::Mutex;
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -22,9 +30,18 @@ pub enum Action {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    ProgressUpdate(usize, Vec<ProgressData>),
+    Progress(usize, ProgressChangeData),
     Stopped(usize),
     FileName(usize, String),
+}
+
+#[derive(Debug, Clone)]
+pub struct ProgressChangeData {
+    pub progress: Vec<ProgressData>,
+    pub percentage: String,
+    pub elapsed: String,
+    pub remaining_time: String,
+    pub speed: String,
 }
 
 #[derive(Debug)]
@@ -33,20 +50,23 @@ pub struct Manager {
     pub rx_recv: Receiver<Message>,
 }
 
-#[derive(Clone)]
 pub struct ManagerData {
+    /// fast-down 的原始返回结果
     pub result: Option<DownloadResult>,
     pub url: String,
     pub file_path: Option<String>,
+    pub is_running: Arc<AtomicBool>,
 }
 
 async fn download(
+    is_running: Arc<AtomicBool>,
     args: &DownloadArgs,
     url: &str,
     tx: Sender<Message>,
-    manager_data: Arc<RwLock<ManagerData>>,
-    list: Arc<RwLock<Vec<Arc<RwLock<ManagerData>>>>>,
+    manager_data: Arc<Mutex<ManagerData>>,
+    list: Arc<Mutex<Vec<Arc<Mutex<ManagerData>>>>>,
     is_resume: bool,
+    db: Arc<Database>,
 ) -> Result<()> {
     let mut header = args.headers.clone();
     if args.browser {
@@ -63,14 +83,17 @@ async fn download(
             .or_insert(HeaderValue::from_str(url)?);
     }
     dbg!(&args);
+    dbg!(&header);
     let mut client = Client::builder().default_headers(header);
     if let Some(ref proxy) = args.proxy {
         client = client.proxy(Proxy::all(proxy)?);
     }
     let client = client.build()?;
-    let db = Database::new().await?;
 
     let info = loop {
+        if !is_running.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         match fast_down::get_url_info(url, &client).await {
             Ok(info) => break info,
             Err(err) => println!("获取文件信息失败: {}", err),
@@ -94,21 +117,22 @@ async fn download(
     let mut download_chunks = vec![0..info.file_size];
     let mut download_progress: Vec<ProgressEntry> = Vec::with_capacity(threads);
     let mut write_progress: Vec<ProgressEntry> = Vec::with_capacity(threads);
+    let mut curr_size = 0;
 
     if save_path.try_exists()? {
         if is_resume && info.can_fast_download {
             if let Ok(Some(entry)) = db.get_entry(save_path_str.clone()).await {
-                let downloaded = entry.progress.total();
-                if downloaded < info.file_size {
+                curr_size = entry.progress.total();
+                if curr_size < info.file_size {
                     download_chunks = progress::invert(&entry.progress, info.file_size);
                     download_progress = entry.progress.clone();
                     write_progress = entry.progress.clone();
                     println!("发现未完成的下载，将继续下载剩余部分");
                     println!(
                         "已下载: {} / {} ({}%)",
-                        fmt::format_size(downloaded as f64),
+                        fmt::format_size(curr_size as f64),
                         fmt::format_size(info.file_size as f64),
-                        downloaded * 100 / info.file_size
+                        curr_size * 100 / info.file_size
                     );
                 }
             }
@@ -120,7 +144,7 @@ async fn download(
     let save_path_str = Arc::new(save_path_str);
     let file_name = save_path.file_name().unwrap().to_str().unwrap();
     tx.send(Message::FileName(
-        list.read()
+        list.lock()
             .await
             .iter()
             .position(|e| Arc::ptr_eq(&e, &manager_data))
@@ -153,7 +177,7 @@ async fn download(
         },
     )
     .await?;
-    manager_data.write().await.result.replace(result.clone());
+    manager_data.lock().await.result.replace(result.clone());
     let mut last_db_update = Instant::now();
     if !is_resume {
         db.init_entry(
@@ -161,23 +185,55 @@ async fn download(
             info.file_size,
             info.etag,
             info.last_modified,
-            info.file_name,
+            file_name.into(),
             info.final_url.to_string(),
         )
         .await?;
     }
     let start = Instant::now();
+    let mut last_repaint_time = start;
+    let mut prev_size = curr_size;
+    let mut avg_speed = 0.0;
+    const ALPHA: f64 = 0.9;
     while let Ok(e) = result.event_chain.recv().await {
         match e {
             Event::DownloadProgress(p) => {
+                curr_size += p.total();
                 download_progress.merge_progress(p);
-                tx.send(Message::ProgressUpdate(
-                    list.read()
+                let repaint_elapsed = last_repaint_time.elapsed();
+                last_repaint_time = Instant::now();
+                let repaint_elapsed_ms = repaint_elapsed.as_millis();
+                let curr_dsize = curr_size - prev_size;
+                let get_speed = if repaint_elapsed_ms > 0 {
+                    (curr_dsize * 1000) as f64 / repaint_elapsed_ms as f64
+                } else {
+                    0.0
+                };
+                avg_speed = avg_speed * ALPHA + get_speed * (1.0 - ALPHA);
+                prev_size = curr_size;
+                tx.send(Message::Progress(
+                    list.lock()
                         .await
                         .iter()
                         .position(|e| Arc::ptr_eq(&e, &manager_data))
                         .unwrap(),
-                    progress::add_blank(&download_progress, info.file_size),
+                    ProgressChangeData {
+                        progress: progress::add_blank(&download_progress, info.file_size),
+                        percentage: if info.file_size == 0 {
+                            "Unknown".into()
+                        } else {
+                            format!("{:.2}%", (curr_size as f64 / info.file_size as f64) * 100.0)
+                        },
+                        elapsed: fmt::format_time(start.elapsed().as_secs()),
+                        remaining_time: if info.file_size == 0 {
+                            "Unknown".into()
+                        } else {
+                            fmt::format_time(
+                                ((info.file_size - curr_size) as f64 / avg_speed) as u64,
+                            )
+                        },
+                        speed: fmt::format_size(avg_speed),
+                    },
                 ))
                 .await?;
             }
@@ -193,7 +249,17 @@ async fn download(
                     last_db_update = Instant::now();
                 }
             }
-            _ => {}
+            Event::ConnectError(id, err) => {
+                println!("线程 {} 连接失败, 错误原因: {:?}\n", id, err)
+            }
+            Event::DownloadError(id, err) => {
+                println!("线程 {} 下载失败, 错误原因: {:?}\n", id, err)
+            }
+            Event::WriteError(err) => println!("写入文件失败, 错误原因: {:?}\n", err),
+            Event::Connecting(id) => println!("线程 {} 正在连接中……\n", id),
+            Event::Finished(id) => println!("线程 {} 完成任务\n", id),
+            Event::Abort(id) => println!("线程 {} 已中断\n", id),
+            Event::Downloading(id) => println!("线程 {} 正在下载中……\n", id),
         }
     }
     db.update_entry(
@@ -204,7 +270,7 @@ async fn download(
     .await?;
     result.join().await?;
     tx.send(Message::Stopped(
-        list.read()
+        list.lock()
             .await
             .iter()
             .position(|e| Arc::ptr_eq(&e, &manager_data))
@@ -215,33 +281,38 @@ async fn download(
 }
 
 impl Manager {
-    pub fn new(args: Arc<DownloadArgs>, init: Vec<Arc<RwLock<ManagerData>>>) -> Self {
+    pub fn new(args: Arc<DownloadArgs>, init: Vec<Arc<Mutex<ManagerData>>>) -> Self {
         let (tx_ctrl, rx_ctrl) = async_channel::unbounded();
         let (tx_recv, rx_recv) = async_channel::unbounded();
         tokio::spawn(async move {
-            let list = Arc::new(RwLock::new(init));
-            let db = Database::new().await.unwrap();
+            let list = Arc::new(Mutex::new(init));
+            let db = Arc::new(Database::new().await.unwrap());
             while let Ok(e) = rx_ctrl.recv().await {
                 let list = list.clone();
+                let db = db.clone();
                 match e {
                     Action::Stop(index) => {
-                        let list = list.read().await;
-                        let mut res = list[index].write().await;
+                        let list = list.lock().await;
+                        let mut res = list[index].lock().await;
+                        res.is_running.store(false, Ordering::Relaxed);
                         if let Some(res) = res.result.take() {
                             res.cancel().await;
                         }
                     }
                     Action::Resume(index) => {
-                        let mut list_inner = list.write().await;
+                        let mut list_inner = list.lock().await;
                         let origin_data = list_inner.remove(index);
-                        let mut origin_data = origin_data.write().await;
+                        let mut origin_data = origin_data.lock().await;
+                        origin_data.is_running.store(false, Ordering::Relaxed);
                         if let Some(res) = origin_data.result.take() {
                             res.cancel().await;
                         }
-                        let manager_data = Arc::new(RwLock::new(ManagerData {
+                        let is_running = Arc::new(AtomicBool::new(true));
+                        let manager_data = Arc::new(Mutex::new(ManagerData {
                             result: None,
                             url: origin_data.url.clone(),
                             file_path: origin_data.file_path.clone(),
+                            is_running: is_running.clone(),
                         }));
                         list_inner.insert(index, manager_data.clone());
                         let args = args.clone();
@@ -249,62 +320,81 @@ impl Manager {
                         let list = list.clone();
                         let url = origin_data.url.clone();
                         tokio::spawn(async move {
-                            let tx_clone = tx_recv.clone();
                             let manager_data_clone = manager_data.clone();
-                            let list_clone = list.clone();
-                            download(&args, &url, tx_recv, manager_data, list, true)
-                                .await
-                                .map_err(async move |e| {
-                                    eprintln!("Error: {e:#?}");
-                                    tx_clone
-                                        .send(Message::Stopped(
-                                            list_clone
-                                                .read()
-                                                .await
-                                                .iter()
-                                                .position(|e| Arc::ptr_eq(&e, &manager_data_clone))
-                                                .unwrap(),
-                                        ))
-                                        .await
-                                        .unwrap();
-                                })
+                            let list_clone: Arc<Mutex<Vec<Arc<Mutex<ManagerData>>>>> = list.clone();
+                            if let Err(e) = download(
+                                is_running,
+                                &args,
+                                &url,
+                                tx_recv.clone(),
+                                manager_data,
+                                list,
+                                true,
+                                db,
+                            )
+                            .await
+                            {
+                                eprintln!("Error: {e:#?}");
+                                tx_recv
+                                    .send(Message::Stopped(
+                                        list_clone
+                                            .lock()
+                                            .await
+                                            .iter()
+                                            .position(|e| Arc::ptr_eq(&e, &manager_data_clone))
+                                            .unwrap(),
+                                    ))
+                                    .await
+                                    .unwrap();
+                            }
                         });
                     }
                     Action::AddTask(url) => {
-                        let manager_data = Arc::new(RwLock::new(ManagerData {
+                        let is_running = Arc::new(AtomicBool::new(true));
+                        let manager_data = Arc::new(Mutex::new(ManagerData {
                             result: None,
                             url: url.clone(),
                             file_path: None,
+                            is_running: is_running.clone(),
                         }));
-                        list.write().await.insert(0, manager_data.clone());
+                        list.lock().await.insert(0, manager_data.clone());
                         let args = args.clone();
                         let tx_recv = tx_recv.clone();
                         tokio::spawn(async move {
-                            let tx_clone = tx_recv.clone();
                             let manager_data_clone = manager_data.clone();
                             let list_clone = list.clone();
-                            download(&args, &url, tx_recv, manager_data, list, false)
-                                .await
-                                .map_err(async move |e| {
-                                    eprintln!("Error: {e:#?}");
-                                    tx_clone
-                                        .send(Message::Stopped(
-                                            list_clone
-                                                .read()
-                                                .await
-                                                .iter()
-                                                .position(|e| Arc::ptr_eq(&e, &manager_data_clone))
-                                                .unwrap(),
-                                        ))
-                                        .await
-                                        .unwrap();
-                                })
+                            if let Err(e) = download(
+                                is_running,
+                                &args,
+                                &url,
+                                tx_recv.clone(),
+                                manager_data,
+                                list,
+                                false,
+                                db,
+                            )
+                            .await
+                            {
+                                eprintln!("Error: {e:#?}");
+                                tx_recv
+                                    .send(Message::Stopped(
+                                        list_clone
+                                            .lock()
+                                            .await
+                                            .iter()
+                                            .position(|e| Arc::ptr_eq(&e, &manager_data_clone))
+                                            .unwrap(),
+                                    ))
+                                    .await
+                                    .unwrap();
+                            }
                         });
                     }
                     Action::RemoveTask(index) => {
-                        let mut list = list.write().await;
+                        let mut list = list.lock().await;
                         let origin_data = list.remove(index);
-                        let mut origin_data = origin_data.write().await;
+                        let mut origin_data = origin_data.lock().await;
+                        origin_data.is_running.store(false, Ordering::Relaxed);
                         if let Some(res) = origin_data.result.take() {
                             res.cancel().await;
                         }
