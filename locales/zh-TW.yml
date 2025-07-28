@@ -1,1 +1,43 @@
-err.confirm.invalid-input: 无效输入，下载取消
+err:
+  confirm.invalid-input: 無效輸入, 下載取消...
+  url-info: 獲取元數據失敗
+  cancel: 下載取消
+msg:
+  url-info: |
+    檔案名稱: %{name}
+    檔案大小: %{size} (%{size_in_bytes} 位元組)
+    檔案路徑: %{path}
+    並行數量: %{concurrent}
+    ETag: %{etag}
+    Last-Modified: %{last_modified}
+  resume-download: 未完成的下載, 繼續下載...
+  download: 已下載 %{completed} / %{total} (%{percentage}%)
+  size-mismatch: |
+    記錄的檔案大小: %{saved_size}
+    遠端的檔案大小: %{new_size}
+    大小不匹配, 是否繼續?
+  etag-mismatch: |
+    記錄的 ETag: %{saved_etag}
+    遠端的 ETag: %{new_etag}
+    ETag 不匹配, 無法保證檔案完整性, 是否繼續?
+  weak-etag: |
+    Weak ETag: %{etag}, 無法保證檔案完整性, 是否繼續?
+  no-etag: |
+    伺服器端未提供 ETag, 無法保證檔案完整性, 是否繼續?
+  last-modified-mismatch: |
+    記錄的 Last-Modified: %{saved_last_modified}
+    遠端的 Last-Modified: %{new_last_modified}
+    Last-Modified 不匹配, 是否繼續?
+  file-overwrite: 檔案已經存在, 是否覆蓋？
+verbose:
+  worker-id: 執行緒 %{id}
+  connect-error: 連接失敗
+  download-error: 下載失敗
+  write-error: 寫入失敗
+  connecting: 正在連接
+  downloading: 正在下載
+  finished: 任務完成
+  abort: 任務中斷
+
+progress:
+  desc: "消耗時間: %{time_spent} | 速度: %{speed}/s | 剩餘時間: %{time_left}"

@@ -1714,6 +1714,7 @@ dependencies = [
  "path-clean",
  "reqwest",
  "rust-i18n",
+ "sys-locale",
  "tokio",
  "tokio-rusqlite",
  "url",

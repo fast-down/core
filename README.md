@@ -20,7 +20,7 @@ Languages: **en** [zh-CN](./README_zhCN.md)
    We created [fast-steal](https://github.com/share121/fast-steal)  
    With optimized Work Stealing, **1.43x faster** than NDM.
 2. **🔄 File consistency**\
-   Switching Wi-Fi、Turn Off Wi-Fi、Switch proxies  
+   Switching Wi-Fi, Turn Off Wi-Fi, Switch proxies.  
    We guarantee the consistency.
 3. **⛓️‍💥 Resuming Downloads**\
    You can **interrupt** at any time,  

@@ -27,6 +27,7 @@ mimalloc = { workspace = true }
 tokio-rusqlite = { workspace = true }
 crossterm = "0.29.0"
 rust-i18n = "3.1.5"
+sys-locale = "0.3.2"
 
 [package.metadata.i18n]
 available-locales = ["en", "zh-TW", "zh-CN"]
