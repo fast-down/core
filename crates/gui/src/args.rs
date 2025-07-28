@@ -131,10 +131,10 @@ impl Args {
                     if let Ok(value) = config.get_int("General.threads") {
                         args.threads = value.try_into()?;
                     }
-                    if let Ok(value) = config.get_string("General.proxy") {
-                        if !value.is_empty() {
-                            args.proxy = Some(value);
-                        }
+                    if let Ok(value) = config.get_string("General.proxy")
+                        && !value.is_empty()
+                    {
+                        args.proxy = Some(value);
                     }
                     if let Ok(value) = config.get_int("General.write_buffer_size") {
                         args.write_buffer_size = value.try_into()?;
@@ -158,16 +158,12 @@ impl Args {
                                     }
                                     Err(e) => {
                                         eprintln!(
-                                            "无法解析请求头值\n请求头: {}: {}\n错误原因: {:?}",
-                                            key, value_str, e
+                                            "无法解析请求头值\n请求头: {key}: {value_str}\n错误原因: {e:?}",
                                         );
                                     }
                                 },
                                 Err(e) => {
-                                    eprintln!(
-                                        "无法解析请求头名称\n请求头: {}\n错误原因: {:?}",
-                                        key, e
-                                    );
+                                    eprintln!("无法解析请求头名称\n请求头: {key}\n错误原因: {e:?}",);
                                 }
                             }
                         }
@@ -198,7 +194,7 @@ impl Args {
                     for header in cli.headers {
                         let parts: Vec<_> = header.splitn(2, ':').map(|t| t.trim()).collect();
                         if parts.len() != 2 {
-                            eprintln!("请求头格式错误: {}", header);
+                            eprintln!("请求头格式错误: {header}");
                             continue;
                         }
                         args.headers

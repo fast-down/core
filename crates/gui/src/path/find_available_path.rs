@@ -10,13 +10,13 @@ pub fn find_available_path<P: AsRef<Path>>(original_path: P) -> Result<PathBuf> 
     let extension = original_path
         .extension()
         .and_then(|s| s.to_str())
-        .map(|s| format!(".{}", s))
+        .map(|s| format!(".{s}"))
         .unwrap_or_default();
 
     let parent = original_path.parent().unwrap_or_else(|| Path::new("."));
 
     for i in 1.. {
-        let new_filename = format!("{} ({}){}", stem, i, extension);
+        let new_filename = format!("{stem} ({i}){extension}");
         let new_path = parent.join(new_filename);
 
         if !new_path.try_exists()? {

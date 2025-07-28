@@ -2,11 +2,11 @@ use super::DownloadResult;
 use crate::{ConnectErrorKind, Event, ProgressEntry, RandWriter, Total};
 use bytes::Bytes;
 use fast_steal::{SplitTask, StealTask, Task, TaskList};
-use reqwest::{header, Client, IntoUrl, StatusCode};
+use reqwest::{Client, IntoUrl, StatusCode, header};
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -55,7 +55,7 @@ pub async fn download(
     let tasks = Arc::new(
         Task::from(&*task_list)
             .split_task(options.threads as u64)
-            .map(|t| Arc::new(t))
+            .map(Arc::new)
             .collect::<Vec<_>>(),
     );
     let running = Arc::new(AtomicBool::new(true));
@@ -106,7 +106,7 @@ pub async fn download(
                                 Ok(response)
                                     if response.status() == StatusCode::PARTIAL_CONTENT =>
                                 {
-                                    break response
+                                    break response;
                                 }
                                 Ok(response) => tx.send(Event::ConnectError(
                                     id,

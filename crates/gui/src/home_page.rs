@@ -10,7 +10,7 @@ use fast_down::Total;
 use slint::{Model, Timer, TimerMode, VecModel};
 use std::{
     rc::Rc,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
 use tokio::sync::Mutex;

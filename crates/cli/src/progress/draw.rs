@@ -1,16 +1,15 @@
 use crate::fmt;
 use crossterm::{
-    cursor,
+    ExecutableCommand, QueueableCommand, cursor,
     style::Print,
     terminal::{self, ClearType},
-    ExecutableCommand, QueueableCommand,
 };
 use fast_down::{MergeProgress, ProgressEntry, Total};
 use std::{
     io::{self, Stderr, Stdout, Write},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -154,9 +153,10 @@ impl Painter {
             let bar_str: String = bar_values
                 .iter()
                 .map(|&count| {
-                    BLOCK_CHARS[((count as f64 / per_bytes as f64 * (BLOCK_CHARS.len() - 1) as f64)
-                        .round() as usize)
-                        .min(BLOCK_CHARS.len() - 1)]
+                    BLOCK_CHARS
+                        [((count as f64 / per_bytes * (BLOCK_CHARS.len() - 1) as f64).round()
+                            as usize)
+                            .min(BLOCK_CHARS.len() - 1)]
                 })
                 .collect();
             format!(

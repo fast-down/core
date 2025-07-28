@@ -259,16 +259,16 @@ async fn download(
                 }
             }
             Event::ConnectError(id, err) => {
-                println!("线程 {} 连接失败, 错误原因: {:?}\n", id, err)
+                println!("线程 {id} 连接失败, 错误原因: {err:?}\n")
             }
             Event::DownloadError(id, err) => {
-                println!("线程 {} 下载失败, 错误原因: {:?}\n", id, err)
+                println!("线程 {id} 下载失败, 错误原因: {err:?}\n")
             }
-            Event::WriteError(err) => println!("写入文件失败, 错误原因: {:?}\n", err),
-            Event::Connecting(id) => println!("线程 {} 正在连接中……\n", id),
-            Event::Finished(id) => println!("线程 {} 完成任务\n", id),
-            Event::Abort(id) => println!("线程 {} 已中断\n", id),
-            Event::Downloading(id) => println!("线程 {} 正在下载中……\n", id),
+            Event::WriteError(err) => println!("写入文件失败, 错误原因: {err:?}\n"),
+            Event::Connecting(id) => println!("线程 {id} 正在连接中……\n"),
+            Event::Finished(id) => println!("线程 {id} 完成任务\n"),
+            Event::Abort(id) => println!("线程 {id} 已中断\n"),
+            Event::Downloading(id) => println!("线程 {id} 正在下载中……\n"),
         }
     }
     db.update_entry(
@@ -282,7 +282,7 @@ async fn download(
         list.lock()
             .await
             .iter()
-            .position(|e| Arc::ptr_eq(&e, &manager_data))
+            .position(|e| Arc::ptr_eq(e, &manager_data))
             .unwrap(),
     ))
     .await?;
@@ -350,7 +350,7 @@ impl Manager {
                                             .lock()
                                             .await
                                             .iter()
-                                            .position(|e| Arc::ptr_eq(&e, &manager_data_clone))
+                                            .position(|e| Arc::ptr_eq(e, &manager_data_clone))
                                             .unwrap(),
                                     ))
                                     .await
@@ -391,7 +391,7 @@ impl Manager {
                                             .lock()
                                             .await
                                             .iter()
-                                            .position(|e| Arc::ptr_eq(&e, &manager_data_clone))
+                                            .position(|e| Arc::ptr_eq(e, &manager_data_clone))
                                             .unwrap(),
                                     ))
                                     .await

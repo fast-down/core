@@ -1,4 +1,4 @@
-use super::{multi, single, DownloadResult};
+use super::{DownloadResult, multi, single};
 use crate::{ProgressEntry, RandWriter, SeqWriter};
 use core::time::Duration;
 use reqwest::{Client, IntoUrl};

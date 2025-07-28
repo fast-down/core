@@ -1,6 +1,6 @@
 use crate::file;
 use crate::writer::file::SeqFileWriter;
-use crate::{auto, DownloadResult, ProgressEntry};
+use crate::{DownloadResult, ProgressEntry, auto};
 use reqwest::{Client, IntoUrl};
 use std::{io::ErrorKind, path::Path, time::Duration};
 use tokio::fs::{self, OpenOptions};
@@ -33,22 +33,21 @@ pub async fn download(
     let save_folder = save_path
         .parent()
         .ok_or(DownloadErrorKind::Io(ErrorKind::NotFound.into()))?;
-    if let Err(e) = fs::create_dir_all(save_folder).await {
-        if e.kind() != ErrorKind::AlreadyExists {
-            return Err(DownloadErrorKind::Io(e));
-        }
+    if let Err(e) = fs::create_dir_all(save_folder).await
+        && e.kind() != ErrorKind::AlreadyExists
+    {
+        return Err(DownloadErrorKind::Io(e));
     }
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&save_path)
         .await
-        .map_err(|e| DownloadErrorKind::Io(e))?;
+        .map_err(DownloadErrorKind::Io)?;
     let seq_file_writer = SeqFileWriter::new(
-        file.try_clone()
-            .await
-            .map_err(|e| DownloadErrorKind::Io(e))?,
+        file.try_clone().await.map_err(DownloadErrorKind::Io)?,
         options.write_buffer_size,
     );
     #[cfg(target_pointer_width = "64")]
@@ -58,7 +57,7 @@ pub async fn download(
         options.write_buffer_size,
     )
     .await
-    .map_err(|e| DownloadErrorKind::Io(e))?;
+    .map_err(DownloadErrorKind::Io)?;
     #[cfg(not(target_pointer_width = "64"))]
     let rand_file_writer = file::rand_file_writer_std::RandFileWriter::new(
         file,
@@ -82,5 +81,5 @@ pub async fn download(
         },
     )
     .await
-    .map_err(|e| DownloadErrorKind::Reqwest(e))
+    .map_err(DownloadErrorKind::Reqwest)
 }

@@ -1,7 +1,7 @@
 use content_disposition;
 use reqwest::{
-    header::{self, HeaderMap},
     Client, IntoUrl, StatusCode, Url,
+    header::{self, HeaderMap},
 };
 use sanitize_filename;
 
@@ -49,10 +49,10 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
 
     let from_url = final_url
         .path_segments()
-        .and_then(|segments| segments.last())
+        .and_then(|mut segments| segments.next_back())
         .and_then(|s| urlencoding::decode(s).ok())
         .filter(|s| !s.trim().is_empty())
-        .map(|s| (&s).to_string());
+        .map(|s| s.to_string());
 
     let raw_name = from_disposition
         .or(from_url)
@@ -94,7 +94,7 @@ pub async fn get_url_info(url: impl IntoUrl, client: &Client) -> Result<UrlInfo,
 
     Ok(UrlInfo {
         final_url: final_url.clone(),
-        file_name: get_filename(resp_headers, &final_url),
+        file_name: get_filename(resp_headers, final_url),
         file_size,
         supports_range,
         can_fast_download: file_size > 0 && supports_range,
@@ -118,7 +118,7 @@ async fn get_url_info_fallback(url: Url, client: &Client) -> Result<UrlInfo, req
     let supports_range = status == StatusCode::PARTIAL_CONTENT;
     Ok(UrlInfo {
         final_url: final_url.clone(),
-        file_name: get_filename(resp_headers, &final_url),
+        file_name: get_filename(resp_headers, final_url),
         file_size,
         supports_range,
         can_fast_download: file_size > 0 && supports_range,

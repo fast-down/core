@@ -4,12 +4,11 @@ use crate::{
     persist::Database,
     progress::{self, Painter as ProgressPainter},
 };
-use color_eyre::eyre::{eyre, Result};
-use fast_down::{file::DownloadOptions, Event, MergeProgress, ProgressEntry, Total};
-use path_clean;
+use color_eyre::eyre::{Result, eyre};
+use fast_down::{Event, MergeProgress, ProgressEntry, Total, file::DownloadOptions};
 use reqwest::{
-    header::{self, HeaderValue},
     Client, Proxy,
+    header::{self, HeaderValue},
 };
 use std::{env, path::Path, sync::Arc, time::Instant};
 use tokio::{
@@ -170,25 +169,25 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
                             ), false).await? {
                               return cancel_expected();
                             }
-                        } else if let Some(progress_etag) = progress.etag.as_ref() {
-                            if progress_etag.starts_with("W/") {
-                                if !confirm(
-                                    predicate!(args),
-                                    &t!("msg.weak-etag", etag = progress_etag),
-                                    false,
-                                )
-                                .await?
-                                {
-                                    return cancel_expected();
-                                }
+                        } else if let Some(progress_etag) = progress.etag.as_ref()
+                            && progress_etag.starts_with("W/")
+                        {
+                            if !confirm(
+                                predicate!(args),
+                                &t!("msg.weak-etag", etag = progress_etag),
+                                false,
+                            )
+                            .await?
+                            {
+                                return cancel_expected();
                             }
                         } else {
                             if !confirm(predicate!(args), &t!("msg.no-etag"), false).await? {
                                 return cancel_expected();
                             }
                         }
-                        if progress.last_modified != info.last_modified {
-                            if !confirm(
+                        if progress.last_modified != info.last_modified
+                            && !confirm(
                                 predicate!(args),
                                 &t!(
                                   "msg.last-modified-mismatch",
@@ -198,18 +197,19 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
                                 false,
                             )
                             .await?
-                            {
-                                return cancel_expected();
-                            }
+                        {
+                            return cancel_expected();
                         }
                     }
                 }
             }
         }
-        if !args.yes && !resume_download && !args.force {
-            if !confirm(predicate!(args), &t!("msg.file-overwrite"), false).await? {
-                return cancel_expected();
-            }
+        if !args.yes
+            && !resume_download
+            && !args.force
+            && !confirm(predicate!(args), &t!("msg.file-overwrite"), false).await?
+        {
+            return cancel_expected();
         }
     }
 

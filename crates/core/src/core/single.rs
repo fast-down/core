@@ -3,8 +3,8 @@ use crate::{ConnectErrorKind, Event, SeqWriter};
 use reqwest::{Client, IntoUrl};
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -103,8 +103,8 @@ pub async fn download(
 #[cfg(feature = "file")]
 mod tests {
     use super::*;
-    use crate::writer::file::SeqFileWriter;
     use crate::Total;
+    use crate::writer::file::SeqFileWriter;
     use tempfile::NamedTempFile;
     use tokio::fs::File;
     use tokio::io::AsyncReadExt;
