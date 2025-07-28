@@ -3,7 +3,7 @@ members = ["crates/core", "crates/cli", "crates/gui", "crates/wasm"]
 resolver = "2"
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 license = "MIT"
 authors = ["share121 <2854631158@qq.com>"]
 repository = "https://github.com/share121/fast-down"

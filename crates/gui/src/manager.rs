@@ -2,18 +2,18 @@ use crate::{args::DownloadArgs, fmt, home_page::ProgressData, path, persist::Dat
 use async_channel::{Receiver, SendError, Sender};
 use color_eyre::Result;
 use fast_down::{
-    file::DownloadOptions, DownloadResult, Event, MergeProgress, ProgressEntry, Total,
+    DownloadResult, Event, MergeProgress, ProgressEntry, Total, file::DownloadOptions,
 };
 use reqwest::{
-    header::{self, HeaderValue},
     Client, Proxy,
+    header::{self, HeaderValue},
 };
 use std::{
     env,
     path::Path,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Instant,
 };
@@ -120,21 +120,25 @@ async fn download(
     let mut curr_size = 0;
 
     if save_path.try_exists()? {
-        if is_resume && info.can_fast_download {
-            if let Ok(Some(entry)) = db.get_entry(save_path_str.clone()).await {
-                curr_size = entry.progress.total();
-                if curr_size < info.file_size {
-                    download_chunks = progress::invert(&entry.progress, info.file_size);
-                    download_progress = entry.progress.clone();
-                    write_progress = entry.progress.clone();
-                    println!("发现未完成的下载，将继续下载剩余部分");
-                    println!(
-                        "已下载: {} / {} ({}%)",
-                        fmt::format_size(curr_size as f64),
-                        fmt::format_size(info.file_size as f64),
-                        curr_size * 100 / info.file_size
-                    );
-                }
+        if is_resume
+            && info.can_fast_download
+            && let Ok(Some(entry)) = db.get_entry(save_path_str.clone()).await
+        {
+            curr_size = entry.progress.total();
+            if curr_size < info.file_size {
+                download_chunks = progress::invert(&entry.progress, info.file_size);
+                download_progress = entry.progress.clone();
+                write_progress = entry.progress.clone();
+                println!("发现未完成的下载，将继续下载剩余部分");
+                println!(
+                    "已下载: {} / {} ({}%)",
+                    fmt::format_size(curr_size as f64),
+                    fmt::format_size(info.file_size as f64),
+                    curr_size * 100 / info.file_size
+                );
+            } else {
+                save_path = path::find_available_path(&save_path)?;
+                save_path_str = save_path.to_str().unwrap().to_string();
             }
         } else {
             save_path = path::find_available_path(&save_path)?;
@@ -200,42 +204,47 @@ async fn download(
             Event::DownloadProgress(p) => {
                 curr_size += p.total();
                 download_progress.merge_progress(p);
-                let repaint_elapsed = last_repaint_time.elapsed();
-                last_repaint_time = Instant::now();
-                let repaint_elapsed_ms = repaint_elapsed.as_millis();
-                let curr_dsize = curr_size - prev_size;
-                let get_speed = if repaint_elapsed_ms > 0 {
-                    (curr_dsize * 1000) as f64 / repaint_elapsed_ms as f64
-                } else {
-                    0.0
-                };
-                avg_speed = avg_speed * ALPHA + get_speed * (1.0 - ALPHA);
-                prev_size = curr_size;
-                tx.send(Message::Progress(
-                    list.lock()
-                        .await
-                        .iter()
-                        .position(|e| Arc::ptr_eq(&e, &manager_data))
-                        .unwrap(),
-                    ProgressChangeData {
-                        progress: progress::add_blank(&download_progress, info.file_size),
-                        percentage: if info.file_size == 0 {
-                            "Unknown".into()
-                        } else {
-                            format!("{:.2}%", (curr_size as f64 / info.file_size as f64) * 100.0)
+                if last_repaint_time.elapsed().as_millis() > 100 {
+                    let repaint_elapsed = last_repaint_time.elapsed();
+                    last_repaint_time = Instant::now();
+                    let repaint_elapsed_ms = repaint_elapsed.as_millis();
+                    let curr_dsize = curr_size - prev_size;
+                    let get_speed = if repaint_elapsed_ms > 0 {
+                        (curr_dsize * 1000) as f64 / repaint_elapsed_ms as f64
+                    } else {
+                        0.0
+                    };
+                    avg_speed = avg_speed * ALPHA + get_speed * (1.0 - ALPHA);
+                    prev_size = curr_size;
+                    tx.send(Message::Progress(
+                        list.lock()
+                            .await
+                            .iter()
+                            .position(|e| Arc::ptr_eq(&e, &manager_data))
+                            .unwrap(),
+                        ProgressChangeData {
+                            progress: progress::add_blank(&download_progress, info.file_size),
+                            percentage: if info.file_size == 0 {
+                                "Unknown".into()
+                            } else {
+                                format!(
+                                    "{:.2}%",
+                                    (curr_size as f64 / info.file_size as f64) * 100.0
+                                )
+                            },
+                            elapsed: format!("{}/s", fmt::format_time(start.elapsed().as_secs())),
+                            remaining_time: if info.file_size == 0 {
+                                "Unknown".into()
+                            } else {
+                                fmt::format_time(
+                                    ((info.file_size - curr_size) as f64 / avg_speed) as u64,
+                                )
+                            },
+                            speed: fmt::format_size(avg_speed),
                         },
-                        elapsed: fmt::format_time(start.elapsed().as_secs()),
-                        remaining_time: if info.file_size == 0 {
-                            "Unknown".into()
-                        } else {
-                            fmt::format_time(
-                                ((info.file_size - curr_size) as f64 / avg_speed) as u64,
-                            )
-                        },
-                        speed: fmt::format_size(avg_speed),
-                    },
-                ))
-                .await?;
+                    ))
+                    .await?;
+                }
             }
             Event::WriteProgress(p) => {
                 write_progress.merge_progress(p);

@@ -144,7 +144,7 @@ pub async fn home_page(args: DownloadArgs) -> Result<()> {
     });
 
     let timer = Timer::default();
-    timer.start(TimerMode::Repeated, Duration::from_millis(16), {
+    timer.start(TimerMode::Repeated, Duration::from_millis(100), {
         let ui = ui.as_weak();
         move || {
             let manager = manager.clone();
