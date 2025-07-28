@@ -96,7 +96,7 @@ async fn download(
         }
         match fast_down::get_url_info(url, &client).await {
             Ok(info) => break info,
-            Err(err) => println!("获取文件信息失败: {}", err),
+            Err(err) => println!("获取文件信息失败: {err}"),
         }
         tokio::time::sleep(args.retry_gap).await;
     };
@@ -106,14 +106,15 @@ async fn download(
         1
     };
     let mut save_path = Path::new(&args.save_folder).join(&info.file_name);
-    if save_path.is_relative() {
-        if let Ok(current_dir) = env::current_dir() {
-            save_path = current_dir.join(save_path);
-        }
+    if save_path.is_relative()
+        && let Ok(current_dir) = env::current_dir()
+    {
+        save_path = current_dir.join(save_path);
     }
     save_path = path_clean::clean(save_path);
     let mut save_path_str = save_path.to_str().unwrap().to_string();
 
+    #[allow(clippy::single_range_in_vec_init)]
     let mut download_chunks = vec![0..info.file_size];
     let mut download_progress: Vec<ProgressEntry> = Vec::with_capacity(threads);
     let mut write_progress: Vec<ProgressEntry> = Vec::with_capacity(threads);
@@ -151,7 +152,7 @@ async fn download(
         list.lock()
             .await
             .iter()
-            .position(|e| Arc::ptr_eq(&e, &manager_data))
+            .position(|e| Arc::ptr_eq(e, &manager_data))
             .unwrap(),
         file_name.into(),
     ))
@@ -220,7 +221,7 @@ async fn download(
                         list.lock()
                             .await
                             .iter()
-                            .position(|e| Arc::ptr_eq(&e, &manager_data))
+                            .position(|e| Arc::ptr_eq(e, &manager_data))
                             .unwrap(),
                         ProgressChangeData {
                             progress: progress::add_blank(&download_progress, info.file_size),
@@ -305,7 +306,7 @@ impl Manager {
                         let mut res = list[index].lock().await;
                         res.is_running.store(false, Ordering::Relaxed);
                         if let Some(res) = res.result.take() {
-                            res.cancel().await;
+                            res.cancel();
                         }
                     }
                     Action::Resume(index) => {
@@ -314,7 +315,7 @@ impl Manager {
                         let mut origin_data = origin_data.lock().await;
                         origin_data.is_running.store(false, Ordering::Relaxed);
                         if let Some(res) = origin_data.result.take() {
-                            res.cancel().await;
+                            res.cancel();
                         }
                         let is_running = Arc::new(AtomicBool::new(true));
                         let manager_data = Arc::new(Mutex::new(ManagerData {
@@ -405,7 +406,7 @@ impl Manager {
                         let mut origin_data = origin_data.lock().await;
                         origin_data.is_running.store(false, Ordering::Relaxed);
                         if let Some(res) = origin_data.result.take() {
-                            res.cancel().await;
+                            res.cancel();
                         }
                         if let Some(file_path) = origin_data.file_path.as_ref() {
                             db.remove_entry(file_path.clone()).await.unwrap();

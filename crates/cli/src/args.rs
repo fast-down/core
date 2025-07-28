@@ -25,7 +25,7 @@ struct CliDefault {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// 下载文件 (默认)
-    Download(DownloadCli),
+    Download(Box<DownloadCli>),
     /// 清除已下载完成的链接
     Clean,
     /// 更新 fast-down
@@ -129,7 +129,7 @@ struct DownloadCli {
 
 #[derive(Debug)]
 pub enum Args {
-    Download(DownloadArgs),
+    Download(Box<DownloadArgs>),
     Update,
     Clean,
 }
@@ -160,7 +160,7 @@ impl Args {
         match Cli::try_parse().or_else(|err| match err.kind() {
             clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument => {
                 CliDefault::try_parse().map(|cli_default| Cli {
-                    command: Commands::Download(cli_default.cmd),
+                    command: Commands::Download(Box::new(cli_default.cmd)),
                 })
             }
             _ => Err(err),
@@ -213,10 +213,10 @@ impl Args {
                     if let Ok(value) = config.get_int("General.threads") {
                         args.threads = value.try_into()?;
                     }
-                    if let Ok(value) = config.get_string("General.proxy") {
-                        if !value.is_empty() {
-                            args.proxy = Some(value);
-                        }
+                    if let Ok(value) = config.get_string("General.proxy")
+                        && !value.is_empty()
+                    {
+                        args.proxy = Some(value);
                     }
                     if let Ok(value) = config.get_int("General.write_buffer_size") {
                         args.write_buffer_size = value.try_into()?;
@@ -255,16 +255,12 @@ impl Args {
                                     }
                                     Err(e) => {
                                         eprintln!(
-                                            "无法解析请求头值\n请求头: {}: {}\n错误原因: {:?}",
-                                            key, value_str, e
+                                            "无法解析请求头值\n请求头: {key}: {value_str}\n错误原因: {e:?}",
                                         );
                                     }
                                 },
                                 Err(e) => {
-                                    eprintln!(
-                                        "无法解析请求头名称\n请求头: {}\n错误原因: {:?}",
-                                        key, e
-                                    );
+                                    eprintln!("无法解析请求头名称\n请求头: {key}\n错误原因: {e:?}",);
                                 }
                             }
                         }
@@ -326,13 +322,13 @@ impl Args {
                     for header in cli.headers {
                         let parts: Vec<_> = header.splitn(2, ':').map(|t| t.trim()).collect();
                         if parts.len() != 2 {
-                            eprintln!("请求头格式错误: {}", header);
+                            eprintln!("请求头格式错误: {header}");
                             continue;
                         }
                         args.headers
                             .insert(HeaderName::from_str(parts[0])?, parts[1].parse()?);
                     }
-                    Ok(Args::Download(args))
+                    Ok(Args::Download(Box::new(args)))
                 }
                 Commands::Update => Ok(Args::Update),
                 Commands::Clean => Ok(Args::Clean),
