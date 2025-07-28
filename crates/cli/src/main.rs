@@ -10,8 +10,13 @@ use args::Args;
 use color_eyre::Result;
 use mimalloc::MiMalloc;
 
+#[macro_use]
+extern crate rust_i18n;
+
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
+
+i18n!("../../locales");
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -171,7 +171,7 @@ async fn download(
         &save_path,
         DownloadOptions {
             threads,
-            can_fast_download: info.can_fast_download,
+            concurrent: info.can_fast_download,
             file_size: info.file_size,
             client,
             download_chunks,

@@ -1,4 +1,4 @@
-# fast-down
+# fast-down 快下
 
 ![Lastest commit (branch)](https://img.shields.io/github/last-commit/share121/fast-down/main)
 [![Test](https://github.com/share121/fast-down/workflows/Test/badge.svg)](https://github.com/share121/fast-down/actions)
@@ -6,37 +6,35 @@
 [![Documentation](https://docs.rs/fast-down/badge.svg)](https://docs.rs/fast-down)
 ![License](https://img.shields.io/crates/l/fast-down.svg)
 
-`fast-down` **Fastest** concurrent downloader!
+Languages: **zh-CN** [en](./README.md)
 
-Languages: **en** [zh-CN](./README_zhCN.md)
+`fast-down` **全网最快**多线程下载库
 
-![CLI Interface](/docs/cli_en.png)
+![CLI 界面](/docs/cli_zhCN.png)
 
-**[Official Website (Simplified Chinese)](https://fast.s121.top/)**
+**[访问官网](https://fast.s121.top/)**
 
-## Features
+## 优势
 
-1. **⚡️ Fastest Download**\
-   We created [fast-steal](https://github.com/share121/fast-steal)  
-   With optimized Work Stealing, **1.43x faster** than NDM.
-2. **🔄 File consistency**\
-   Switching Wi-Fi、Turn Off Wi-Fi、Switch proxies  
-   We guarantee the consistency.
-3. **⛓️‍💥 Resuming Downloads**\
-   You can **interrupt** at any time,  
-   and **resume downloading** after.
-4. **⛓️‍💥 Incremental Downloads**\
-   1000 more lines server logs?  
-   Don't worry, we only download new lines.
-5. **💰 Free and open-source**\
-   The code stays free and open-source.  
-   Thanks to [share121](https://github.com/share121), [Cyan](https://github.com/CyanChanges)
-   and other fast-down contributors
-6. **💻 Cross platform**
+1. **⚡️ 极速下载**\
+   自研 [fast-steal](https://github.com/share121/fast-steal)
+   任务窃取算法，实测下载速度是 NDM 的 **2.43 倍**
+2. **🔄 超强重试**\
+   下载时，切换 WiFi、关闭 WiFi、切换代理，都能保证**文件内容正确**
+3. **⛓️‍💥 断点续传**\
+   下到一半**随时暂停**，之后还能**继续传输**
+4. **⛓️‍💥 增量续传**\
+   服务器日志今天下载完成，明天又多了 1000 行，增量续传功能实现**只传输新增的
+   1000 行**
+5. **💰 开源免费**\
+   所有代码全部公开，由
+   [share121](https://github.com/share121)、[Cyan](https://github.com/CyanChanges)
+   与其他贡献者一起维护
+6. **💻 跨平台**
    <table>
         <thead>
             <tr>
-                <th>Arch</th>
+                <th>架构</th>
                 <th>Windows</th>
                 <th>Linux</th>
                 <th>Mac OS</th>
@@ -44,45 +42,45 @@ Languages: **en** [zh-CN](./README_zhCN.md)
         </thead>
         <tbody>
             <tr>
-                <td>64 bit</td>
+                <td>64 位</td>
                 <td>
-                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows-64bit.zip">Supported</a>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows-64bit.zip">下载</a>
                 </td>
                 <td>
-                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-linux-64bit.zip">Supported</a>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-linux-64bit.zip">下载</a>
                 </td>
                 <td>
-                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-macos-64bit.zip">Supported</a>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-macos-64bit.zip">下载</a>
                 </td>
             </tr>
             <tr>
-                <td>32 bit</td>
+                <td>32 位</td>
                 <td>
-                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows-32bit.zip">Supported</a>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows-32bit.zip">下载</a>
                 </td>
                 <td>
-                    ❌ Not Supported
+                    ❌不支持
                 </td>
                 <td>
-                    ❌ Not Supported
+                    ❌不支持
                 </td>
             </tr>
             <tr>
                 <td>ARM 64</td>
                 <td>
-                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows-arm64.zip">Supported</a>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-windows-arm64.zip">下载</a>
                 </td>
                 <td>
-                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-linux-arm64.zip">Supported</a>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-linux-arm64.zip">下载</a>
                 </td>
                 <td>
-                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-macos-arm64.zip">Supported</a>
+                    <a target="_blank" href="https://github.com/share121/fast-down/releases/latest/download/fast-down-macos-arm64.zip">下载</a>
                 </td>
             </tr>
         </tbody>
     </table>
 
-## Usage
+## 使用方法
 
 ```bash
 > fast --help

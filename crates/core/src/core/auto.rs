@@ -7,7 +7,7 @@ use reqwest::{Client, IntoUrl};
 pub struct DownloadOptions {
     pub threads: usize,
     pub client: Client,
-    pub can_fast_download: bool,
+    pub concurrent: bool,
     pub download_chunks: Vec<ProgressEntry>,
     pub retry_gap: Duration,
     pub file_size: u64,
@@ -20,7 +20,7 @@ pub async fn download(
     rand_writer: impl RandWriter + 'static,
     options: DownloadOptions,
 ) -> Result<DownloadResult, reqwest::Error> {
-    if options.can_fast_download {
+    if options.concurrent {
         multi::download(
             url,
             rand_writer,

@@ -88,7 +88,18 @@ impl Painter {
         self.progress.merge_progress(p);
     }
 
-    pub fn update(&mut self) -> Result<(), std::io::Error> {
+    fn reset_pos(&mut self) -> io::Result<()> {
+        if self.has_progress {
+            self.stderr
+                .queue(cursor::MoveUp(1))?
+                .queue(terminal::Clear(ClearType::CurrentLine))?
+                .queue(cursor::MoveUp(1))?
+                .queue(terminal::Clear(ClearType::CurrentLine))?;
+        }
+        Ok(())
+    }
+
+    pub fn update(&mut self) -> io::Result<()> {
         let repaint_elapsed = self.last_repaint_time.elapsed();
         self.last_repaint_time = Instant::now();
         let repaint_elapsed_ms = repaint_elapsed.as_millis();
@@ -102,12 +113,16 @@ impl Painter {
         self.prev_size = self.curr_size;
         let progress_str = if self.total == 0 {
             format!(
-                "|{}| {:>6.2}% ({:>8}/Unknown)\n已用时间: {} | 速度: {:>8}/s | 剩余: Unknown\n",
+                "|{}| {:>6.2}% ({:>8}/Unknown)\n{}",
                 BLOCK_CHARS[0].to_string().repeat(self.width as usize),
                 0.0,
                 fmt::format_size(self.curr_size as f64),
-                fmt::format_time(self.start_time.elapsed().as_secs()),
-                fmt::format_size(self.avg_speed)
+                t!(
+                    "progress.desc",
+                    time_spent = fmt::format_time(self.start_time.elapsed().as_secs()),
+                    time_left = "Unknown",
+                    speed = fmt::format_size(self.avg_speed) : {:>8},
+                )
             )
         } else {
             let get_percent = (self.curr_size as f64 / self.total as f64) * 100.0;
@@ -145,37 +160,28 @@ impl Painter {
                 })
                 .collect();
             format!(
-                "|{}| {:>6.2}% ({:>8}/{})\n已用时间: {} | 速度: {:>8}/s | 剩余: {}\n",
+                "|{}| {:>6.2}% ({:>8}/{})\n{}\n",
                 bar_str,
                 get_percent,
                 fmt::format_size(self.curr_size as f64),
                 fmt::format_size(self.total as f64),
-                fmt::format_time(self.start_time.elapsed().as_secs()),
-                fmt::format_size(self.avg_speed),
-                fmt::format_time(get_remaining_time as u64)
+                t!(
+                    "progress.desc",
+                    time_spent = fmt::format_time(self.start_time.elapsed().as_secs()),
+                    time_left = fmt::format_time(get_remaining_time as u64),
+                    speed = fmt::format_size(self.avg_speed) : {:>8},
+                )
             )
         };
-        if self.has_progress {
-            self.stderr
-                .queue(cursor::MoveUp(1))?
-                .queue(terminal::Clear(ClearType::CurrentLine))?
-                .queue(cursor::MoveUp(1))?
-                .queue(terminal::Clear(ClearType::CurrentLine))?;
-        }
+        self.reset_pos()?;
         self.has_progress = true;
         self.stderr.queue(Print(progress_str))?;
         self.stderr.flush()?;
         Ok(())
     }
 
-    pub fn print(&mut self, msg: &str) -> Result<(), std::io::Error> {
-        if self.has_progress {
-            self.stderr
-                .queue(cursor::MoveUp(1))?
-                .queue(terminal::Clear(ClearType::CurrentLine))?
-                .queue(cursor::MoveUp(1))?
-                .queue(terminal::Clear(ClearType::CurrentLine))?;
-        }
+    pub fn print(&mut self, msg: &str) -> io::Result<()> {
+        self.reset_pos()?;
         self.stdout.execute(Print(msg))?;
         self.has_progress = false;
         self.update()?;

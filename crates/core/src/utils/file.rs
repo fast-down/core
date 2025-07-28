@@ -9,7 +9,7 @@ use tokio::fs::{self, OpenOptions};
 pub struct DownloadOptions {
     pub threads: usize,
     pub client: Client,
-    pub can_fast_download: bool,
+    pub concurrent: bool,
     pub write_buffer_size: usize,
     pub download_chunks: Vec<ProgressEntry>,
     pub retry_gap: Duration,
@@ -74,7 +74,7 @@ pub async fn download(
         auto::DownloadOptions {
             threads: options.threads,
             client: options.client,
-            can_fast_download: options.can_fast_download,
+            concurrent: options.concurrent,
             download_chunks: options.download_chunks,
             retry_gap: options.retry_gap,
             file_size: options.file_size,

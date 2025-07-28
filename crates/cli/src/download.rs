@@ -57,8 +57,13 @@ async fn confirm(predicate: impl Into<Option<bool>>, prompt: &str, default: bool
         "y" | "Y" => Ok(true),
         "n" | "N" => Ok(false),
         "" => Ok(default),
-        _ => Err(eyre!("无效输入，下载取消")),
+        _ => Err(eyre!(t!("err.confirm.invalid-input"))),
     }
+}
+
+fn cancel_expected() -> Result<()> {
+    eprintln!("{}", t!("err.cancel"));
+    Ok(())
 }
 
 pub async fn download(mut args: DownloadArgs) -> Result<()> {
@@ -86,7 +91,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     let info = loop {
         match fast_down::get_url_info(&args.url, &client).await {
             Ok(info) => break info,
-            Err(err) => println!("获取文件信息失败: {}", err),
+            Err(err) => println!("{}: {}", t!("err.url-info"), err),
         }
         tokio::time::sleep(args.retry_gap).await;
     };
@@ -106,14 +111,18 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     let save_path_str = Arc::new(save_path.to_str().unwrap().to_string());
 
     println!(
-        "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}\nETag: {:?}\nLast-Modified: {:?}\n",
-        info.file_name,
-        fmt::format_size(info.file_size as f64),
-        info.file_size,
-        save_path.to_str().unwrap(),
-        threads,
-        info.etag,
-        info.last_modified
+        // "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}\nETag: {:?}\nLast-Modified: {:?}\n",
+        "{}",
+        t!(
+          "msg.url-info",
+          name = info.file_name,
+          size = fmt::format_size(info.file_size as f64),
+          size_in_bytes = info.file_size,
+          path = save_path.to_str().unwrap(),
+          concurrent = threads,
+          etag = info.etag.as_deref() : {:?},
+          last_modified = info.last_modified.as_deref() : {:?}
+        )
     );
 
     let mut download_chunks = vec![0..info.file_size];
@@ -128,27 +137,30 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
                     download_chunks = progress::invert(&progress.progress, info.file_size);
                     write_progress = progress.progress.clone();
                     resume_download = true;
-                    println!("发现未完成的下载，将继续下载剩余部分");
+                    println!("{}", t!("msg.resume-download"));
                     println!(
-                        "已下载: {} / {} ({}%)",
-                        fmt::format_size(downloaded as f64),
-                        fmt::format_size(info.file_size as f64),
-                        downloaded * 100 / info.file_size
+                        "{}",
+                        t!(
+                            "msg.download",
+                            completed = fmt::format_size(downloaded as f64),
+                            total = fmt::format_size(info.file_size as f64),
+                            percentage = downloaded * 100 / info.file_size
+                        ),
                     );
                     if !args.yes {
                         if progress.total_size != info.file_size {
                             if !confirm(
                                 predicate!(args),
-                                &format!(
-                                    "原文件大小: {}\n现文件大小: {}\n文件大小不一致，是否继续？",
-                                    progress.total_size, info.file_size
+                                &t!(
+                                    "msg.size-mismatch",
+                                    saved_size = progress.total_size,
+                                    new_size = info.file_size
                                 ),
                                 false,
                             )
                             .await?
                             {
-                                println!("下载取消");
-                                return Ok(());
+                                return cancel_expected();
                             }
                         }
                         if progress.etag != info.etag {
@@ -156,45 +168,38 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
                                 "原文件 ETag: {:?}\n现文件 ETag: {:?}\n文件 ETag 不一致，是否继续？",
                                 progress.etag, info.etag
                             ), false).await? {
-                                println!("下载取消");
-                                return Ok(());
+                              return cancel_expected();
                             }
                         } else if let Some(progress_etag) = progress.etag.as_ref() {
                             if progress_etag.starts_with("W/") {
                                 if !confirm(
                                     predicate!(args),
-                                    &format!(
-                                        "使用弱 ETag: {}，无法保证文件一致是否继续？",
-                                        progress_etag
-                                    ),
+                                    &t!("msg.weak-etag", etag = progress_etag),
                                     false,
                                 )
                                 .await?
                                 {
-                                    println!("下载取消");
-                                    return Ok(());
+                                    return cancel_expected();
                                 }
                             }
                         } else {
-                            if !confirm(
-                                predicate!(args),
-                                "此文件无 ETag，无法保证文件一致是否继续？",
-                                false,
-                            )
-                            .await?
-                            {
-                                println!("下载取消");
-                                return Ok(());
+                            if !confirm(predicate!(args), &t!("msg.no-etag"), false).await? {
+                                return cancel_expected();
                             }
                         }
                         if progress.last_modified != info.last_modified {
                             if !confirm(
                                 predicate!(args),
-                                &format!("原文件最后编辑时间: {:?}\n现文件最后编辑时间: {:?}\n文件最后编辑时间不一致，是否继续？ ", progress.last_modified, info.last_modified),
-                                false
-                            ).await? {
-                                println!("下载取消");
-                                return Ok(());
+                                &t!(
+                                  "msg.last-modified-mismatch",
+                                  saved_last_modified = progress.last_modified : {:?},
+                                  new_last_modified = info.last_modified : {:?}
+                                ),
+                                false,
+                            )
+                            .await?
+                            {
+                                return cancel_expected();
                             }
                         }
                     }
@@ -202,9 +207,8 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
             }
         }
         if !args.yes && !resume_download && !args.force {
-            if !confirm(predicate!(args), "文件已存在，是否覆盖？", false).await? {
-                println!("下载取消");
-                return Ok(());
+            if !confirm(predicate!(args), &t!("msg.file-overwrite"), false).await? {
+                return cancel_expected();
             }
         }
     }
@@ -214,7 +218,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
         &save_path,
         DownloadOptions {
             threads,
-            can_fast_download: info.can_fast_download,
+            concurrent: info.can_fast_download,
             file_size: info.file_size,
             client,
             download_chunks,
@@ -271,47 +275,56 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
                     .await?;
                 }
             }
-            Event::ConnectError(id, err) => painter
-                .lock()
-                .await
-                .print(&format!("线程 {} 连接失败, 错误原因: {:?}\n", id, err))?,
-            Event::DownloadError(id, err) => painter
-                .lock()
-                .await
-                .print(&format!("线程 {} 下载失败, 错误原因: {:?}\n", id, err))?,
-            Event::WriteError(err) => painter
-                .lock()
-                .await
-                .print(&format!("写入文件失败, 错误原因: {:?}\n", err))?,
+            Event::ConnectError(id, err) => painter.lock().await.print(&format!(
+                "{} {}\n {:?}\n",
+                t!("verbose.worker-id", id = id),
+                t!("verbose.connect-error"),
+                err
+            ))?,
+            Event::DownloadError(id, err) => painter.lock().await.print(&format!(
+                "{} {}\n {:?}\n",
+                t!("verbose.worker-id", id = id),
+                t!("verbose.download-error"),
+                err
+            ))?,
+            Event::WriteError(err) => painter.lock().await.print(&format!(
+                "{}\n{:?}\n",
+                t!("verbose.write-error"),
+                err
+            ))?,
             Event::Connecting(id) => {
                 if args.verbose {
-                    painter
-                        .lock()
-                        .await
-                        .print(&format!("线程 {} 正在连接中……\n", id))?;
+                    painter.lock().await.print(&format!(
+                        "{} {}\n",
+                        t!("verbose.worker-id", id = id),
+                        t!("verbose.connecting")
+                    ))?;
+                }
+            }
+            Event::Downloading(id) => {
+                if args.verbose {
+                    painter.lock().await.print(&format!(
+                        "{} {}\n",
+                        t!("verbose.worker-id", id = id),
+                        t!("verbose.downloading")
+                    ))?;
                 }
             }
             Event::Finished(id) => {
                 if args.verbose {
-                    painter
-                        .lock()
-                        .await
-                        .print(&format!("线程 {} 完成任务\n", id))?;
+                    painter.lock().await.print(&format!(
+                        "{} {}\n",
+                        t!("verbose.worker-id", id = id),
+                        t!("verbose.finished")
+                    ))?;
                 }
             }
             Event::Abort(id) => {
-                painter
-                    .lock()
-                    .await
-                    .print(&format!("线程 {} 已中断\n", id))?;
-            }
-            Event::Downloading(id) => {
-                if args.verbose {
-                    painter
-                        .lock()
-                        .await
-                        .print(&format!("线程 {} 正在下载中……\n", id))?;
-                }
+                painter.lock().await.print(&format!(
+                    "{} {}\n",
+                    t!("verbose.worker-id", id = id),
+                    t!("verbose.abort")
+                ))?;
             }
         }
     }
