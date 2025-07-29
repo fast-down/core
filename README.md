@@ -16,22 +16,16 @@ Languages: **en** [中文简体](./README_zhCN.md)
 
 ## Features
 
-1. **⚡️ Fastest Download**\
-   We created [fast-steal](https://github.com/share121/fast-steal)\
-   With optimized Work Stealing, **2.43 x faster** than NDM.
-2. **🔄 File consistency**\
-   Switching Wi-Fi, Turn Off Wi-Fi, Switch proxies.\
-   **We guarantee the consistency**.
-3. **⛓️‍💥 Resuming Downloads**\
-   You can **interrupt** at any time,\
-   and **resume downloading** after.
-4. **⛓️‍💥 Incremental Downloads**\
-   1000 more lines server logs?\
-   Don't worry, we **only download new lines**.
-5. **💰 Free and open-source**\
-   The code stays free and open-source.\
-   Thanks to [share121](https://github.com/share121),
-   [Cyan](https://github.com/CyanChanges) and other fast-down contributors
+1. **⚡️ Fastest Download**  
+   We created [fast-steal](https://github.com/share121/fast-steal) With optimized Work Stealing, **2.43 x faster** than NDM.
+2. **🔄 File consistency**  
+   Switching Wi-Fi, Turn Off Wi-Fi, Switch proxies. **We guarantee the consistency**.
+3. **⛓️‍💥 Resuming Downloads**  
+   You can **interrupt** at any time, and **resume downloading** after.
+4. **⛓️‍💥 Incremental Downloads**  
+   1000 more lines server logs? Don't worry, we **only download new lines**.
+5. **💰 Free and open-source**  
+   The code stays free and open-source. Thanks to [share121](https://github.com/share121), [Cyan](https://github.com/CyanChanges) and other fast-down contributors.
 6. **💻 Cross platform**
    <table>
         <thead>
