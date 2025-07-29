@@ -81,7 +81,7 @@ pub async fn home_page(args: DownloadArgs) -> Result<()> {
                 0,
                 DownloadData {
                     elapsed: "00:00:00".into(),
-                    file_name: url.clone().into(),
+                    file_name: url.clone(),
                     is_downloading: true,
                     percentage: "0.00%".into(),
                     progress: progress_model.into(),

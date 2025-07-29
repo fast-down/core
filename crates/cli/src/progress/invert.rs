@@ -2,6 +2,7 @@ use fast_down::ProgressEntry;
 
 pub fn invert(progress: &[ProgressEntry], total_size: u64) -> Vec<ProgressEntry> {
     if progress.is_empty() {
+        #[allow(clippy::single_range_in_vec_init)]
         return vec![0..total_size];
     }
     let mut result = Vec::with_capacity(progress.len());

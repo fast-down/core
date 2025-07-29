@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
     println!("fast-down v{}", env!("CARGO_PKG_VERSION"));
     let args = Args::parse()?;
     match args {
-        Args::Download(download_args) => download::download(download_args).await,
+        Args::Download(download_args) => download::download(*download_args).await,
         Args::Update => update::update().await,
         Args::Clean => clean::clean().await,
     }

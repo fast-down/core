@@ -101,10 +101,10 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     };
     let mut save_path =
         Path::new(&args.save_folder).join(args.file_name.as_ref().unwrap_or(&info.file_name));
-    if save_path.is_relative() {
-        if let Ok(current_dir) = env::current_dir() {
-            save_path = current_dir.join(save_path);
-        }
+    if save_path.is_relative()
+        && let Ok(current_dir) = env::current_dir()
+    {
+        save_path = current_dir.join(save_path);
     }
     save_path = path_clean::clean(save_path);
     let save_path_str = Arc::new(save_path.to_str().unwrap().to_string());
@@ -124,89 +124,84 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
         )
     );
 
+    #[allow(clippy::single_range_in_vec_init)]
     let mut download_chunks = vec![0..info.file_size];
     let mut resume_download = false;
     let mut write_progress: Vec<ProgressEntry> = Vec::with_capacity(threads);
 
-    if save_path.try_exists()? {
-        if args.resume && info.can_fast_download {
-            if let Ok(Some(progress)) = db.get_entry(save_path_str.clone()).await {
-                let downloaded = progress.progress.total();
-                if downloaded < info.file_size {
-                    download_chunks = progress::invert(&progress.progress, info.file_size);
-                    write_progress = progress.progress.clone();
-                    resume_download = true;
-                    println!("{}", t!("msg.resume-download"));
-                    println!(
-                        "{}",
-                        t!(
-                            "msg.download",
-                            completed = fmt::format_size(downloaded as f64),
-                            total = fmt::format_size(info.file_size as f64),
-                            percentage = downloaded * 100 / info.file_size
+    if save_path.try_exists()? && args.resume && info.can_fast_download {
+        if let Ok(Some(progress)) = db.get_entry(save_path_str.clone()).await {
+            let downloaded = progress.progress.total();
+            if downloaded < info.file_size {
+                download_chunks = progress::invert(&progress.progress, info.file_size);
+                write_progress = progress.progress.clone();
+                resume_download = true;
+                println!("{}", t!("msg.resume-download"));
+                println!(
+                    "{}",
+                    t!(
+                        "msg.download",
+                        completed = fmt::format_size(downloaded as f64),
+                        total = fmt::format_size(info.file_size as f64),
+                        percentage = downloaded * 100 / info.file_size
+                    ),
+                );
+                if !args.yes
+                    && progress.total_size != info.file_size
+                    && !confirm(
+                        predicate!(args),
+                        &t!(
+                            "msg.size-mismatch",
+                            saved_size = progress.total_size,
+                            new_size = info.file_size
                         ),
-                    );
-                    if !args.yes {
-                        if progress.total_size != info.file_size {
-                            if !confirm(
-                                predicate!(args),
-                                &t!(
-                                    "msg.size-mismatch",
-                                    saved_size = progress.total_size,
-                                    new_size = info.file_size
-                                ),
-                                false,
-                            )
-                            .await?
-                            {
-                                return cancel_expected();
-                            }
-                        }
-                        if progress.etag != info.etag {
-                            if !confirm(
-                predicate!(args),
-                &format!(
-                  "原文件 ETag: {:?}\n现文件 ETag: {:?}\n文件 ETag 不一致，是否继续？",
-                  progress.etag, info.etag
-                ),
-                false,
-              )
-              .await?
-              {
-                return cancel_expected();
-              }
-                        } else if let Some(progress_etag) = progress.etag.as_ref()
-                            && progress_etag.starts_with("W/")
-                        {
-                            if !confirm(
-                                predicate!(args),
-                                &t!("msg.weak-etag", etag = progress_etag),
-                                false,
-                            )
-                            .await?
-                            {
-                                return cancel_expected();
-                            }
-                        } else {
-                            if !confirm(predicate!(args), &t!("msg.no-etag"), false).await? {
-                                return cancel_expected();
-                            }
-                        }
-                        if progress.last_modified != info.last_modified
-                            && !confirm(
-                                predicate!(args),
-                                &t!(
-                                  "msg.last-modified-mismatch",
-                                  saved_last_modified = progress.last_modified : {:?},
-                                  new_last_modified = info.last_modified : {:?}
-                                ),
-                                false,
-                            )
-                            .await?
-                        {
-                            return cancel_expected();
-                        }
+                        false,
+                    )
+                    .await?
+                {
+                    return cancel_expected();
+                }
+                if progress.etag != info.etag {
+                    if !confirm(
+                        predicate!(args),
+                        &format!(
+                            "原文件 ETag: {:?}\n现文件 ETag: {:?}\n文件 ETag 不一致，是否继续？",
+                            progress.etag, info.etag
+                        ),
+                        false,
+                    )
+                    .await?
+                    {
+                        return cancel_expected();
                     }
+                } else if let Some(progress_etag) = progress.etag.as_ref()
+                    && progress_etag.starts_with("W/")
+                {
+                    if !confirm(
+                        predicate!(args),
+                        &t!("msg.weak-etag", etag = progress_etag),
+                        false,
+                    )
+                    .await?
+                    {
+                        return cancel_expected();
+                    }
+                } else if !confirm(predicate!(args), &t!("msg.no-etag"), false).await? {
+                    return cancel_expected();
+                }
+                if progress.last_modified != info.last_modified
+                    && !confirm(
+                        predicate!(args),
+                        &t!(
+                          "msg.last-modified-mismatch",
+                          saved_last_modified = progress.last_modified : {:?},
+                          new_last_modified = info.last_modified : {:?}
+                        ),
+                        false,
+                    )
+                    .await?
+                {
+                    return cancel_expected();
                 }
             }
         }
