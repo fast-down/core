@@ -168,13 +168,7 @@ pub async fn download(
             }
         });
     }
-    Ok(DownloadResult::new(
-        event_chain,
-        handle,
-        Box::new(move || {
-            running_clone.store(false, Ordering::Relaxed);
-        }),
-    ))
+    Ok(DownloadResult::new(event_chain, handle, running_clone))
 }
 
 #[cfg(test)]
