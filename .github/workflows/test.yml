@@ -24,6 +24,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.channel }}
+          components: clippy
 
       - name: Configure sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -33,10 +34,13 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
       - name: Test
-        run: cargo test --all-features --verbose
+        run: cargo test --all-targets --all-features --verbose
 
       - name: Build
-        run: cargo build --all-features --verbose
+        run: cargo build --all-targets --all-features --verbose
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --verbose -- -Dwarnings
 
   check-minimal:
     name: Check minimal versions

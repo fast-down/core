@@ -3,15 +3,13 @@ use crate::writer::file::SeqFileWriter;
 use crate::{DownloadResult, ProgressEntry, auto};
 use reqwest::{Client, IntoUrl};
 use std::{io::ErrorKind, path::Path, time::Duration};
+use std::num::NonZeroUsize;
 use tokio::fs::{self, OpenOptions};
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
-    pub threads: usize,
-    pub client: Client,
-    pub concurrent: bool,
+    pub concurrent: Option<NonZeroUsize>,
     pub write_buffer_size: usize,
-    pub download_chunks: Vec<ProgressEntry>,
     pub retry_gap: Duration,
     pub file_size: u64,
     pub write_channel_size: usize,
@@ -26,7 +24,9 @@ pub enum DownloadErrorKind {
 }
 
 pub async fn download(
+    client: Client,
     url: impl IntoUrl,
+    download_chunks: Vec<ProgressEntry>,
     save_path: &Path,
     options: DownloadOptions,
 ) -> Result<DownloadResult, DownloadErrorKind> {
@@ -67,14 +67,13 @@ pub async fn download(
     .await
     .map_err(|e| DownloadErrorKind::Io(e))?;
     auto::download(
+        client,
         url,
+        download_chunks,
         seq_file_writer,
         rand_file_writer,
         auto::DownloadOptions {
-            threads: options.threads,
-            client: options.client,
             concurrent: options.concurrent,
-            download_chunks: options.download_chunks,
             retry_gap: options.retry_gap,
             file_size: options.file_size,
             write_channel_size: options.write_channel_size,
