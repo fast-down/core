@@ -6,9 +6,9 @@
 [![Documentation](https://docs.rs/fast-down/badge.svg)](https://docs.rs/fast-down)
 ![License](https://img.shields.io/crates/l/fast-down.svg)
 
-Languages: **zh-CN** [en](./README.md)
-
 `fast-down` **全网最快**多线程下载库
+
+语言: **中文简体** [en](./README.md)
 
 ![CLI 界面](/docs/cli_zhCN.png)
 
@@ -136,6 +136,4 @@ Options:
           不详细输出
   -h, --help
           Print help
-  -V, --version
-          Print version
 ```
