@@ -3,6 +3,7 @@ use crate::{ConnectErrorKind, Event, ProgressEntry, RandWriter, Total};
 use bytes::Bytes;
 use fast_steal::{SplitTask, StealTask, Task, TaskList};
 use reqwest::{Client, IntoUrl, StatusCode, header};
+use std::num::NonZeroUsize;
 use std::{
     sync::{
         Arc,
@@ -10,7 +11,6 @@ use std::{
     },
     time::Duration,
 };
-use std::num::NonZeroUsize;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]

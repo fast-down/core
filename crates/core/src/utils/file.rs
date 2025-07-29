@@ -2,8 +2,8 @@ use crate::file;
 use crate::writer::file::SeqFileWriter;
 use crate::{DownloadResult, ProgressEntry, auto};
 use reqwest::{Client, IntoUrl};
-use std::{io::ErrorKind, path::Path, time::Duration};
 use std::num::NonZeroUsize;
+use std::{io::ErrorKind, path::Path, time::Duration};
 use tokio::fs::{self, OpenOptions};
 
 #[derive(Debug, Clone)]

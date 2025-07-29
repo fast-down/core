@@ -1,8 +1,8 @@
 use super::{DownloadResult, multi, single};
 use crate::{ProgressEntry, RandWriter, SeqWriter};
 use core::time::Duration;
-use std::num::NonZeroUsize;
 use reqwest::{Client, IntoUrl};
+use std::num::NonZeroUsize;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
