@@ -44,7 +44,7 @@ impl DownloadResult {
         Ok(())
     }
 
-    pub async fn cancel(&self) {
+    pub fn cancel(&self) {
         self.is_running.store(false, Ordering::Relaxed);
     }
 }

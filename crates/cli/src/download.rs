@@ -113,14 +113,14 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
         // "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}\nETag: {:?}\nLast-Modified: {:?}\n",
         "{}",
         t!(
-          "msg.url-info",
-          name = info.file_name,
-          size = fmt::format_size(info.file_size as f64),
-          size_in_bytes = info.file_size,
-          path = save_path.to_str().unwrap(),
-          concurrent = threads,
-          etag = info.etag.as_deref() : {:?},
-          last_modified = info.last_modified.as_deref() : {:?}
+            "msg.url-info",
+            name = info.file_name,
+            size = fmt::format_size(info.file_size as f64),
+            size_in_bytes = info.file_size,
+            path = save_path.to_str().unwrap(),
+            concurrent = threads,
+            etag = info.etag.as_deref() : {:?},
+            last_modified = info.last_modified.as_deref() : {:?}
         )
     );
 
@@ -233,7 +233,8 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     let rt_handle = Handle::current();
     ctrlc::set_handler(move || {
         rt_handle.block_on(async {
-            result_clone.cancel().await;
+            result_clone.cancel();
+            result_clone.join().await.unwrap();
         })
     })?;
 
@@ -258,7 +259,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
         0.9,
         args.repaint_gap,
     )));
-    let cancel = ProgressPainter::start_update_thread(painter.clone());
+    let painter_handle = ProgressPainter::start_update_thread(painter.clone());
     let start = Instant::now();
     while let Ok(e) = result.event_chain.recv().await {
         match e {
@@ -335,7 +336,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     )
     .await?;
     painter.lock().await.update()?;
-    cancel();
+    painter_handle.cancel();
     result.join().await?;
     Ok(())
 }

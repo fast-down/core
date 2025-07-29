@@ -17,6 +17,14 @@ use tokio::sync::Mutex;
 
 const BLOCK_CHARS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 
+#[derive(Debug, Clone)]
+pub struct PainterHandle(Arc<AtomicBool>);
+impl PainterHandle {
+    pub fn cancel(&self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 #[derive(Debug)]
 pub struct Painter {
     pub progress: Vec<ProgressEntry>,
@@ -61,7 +69,7 @@ impl Painter {
         }
     }
 
-    pub fn start_update_thread(painter_arc: Arc<Mutex<Self>>) -> Box<impl Fn()> {
+    pub fn start_update_thread(painter_arc: Arc<Mutex<Self>>) -> PainterHandle {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
         tokio::spawn(async move {
@@ -77,9 +85,7 @@ impl Painter {
                 tokio::time::sleep(duration).await;
             }
         });
-        Box::new(move || {
-            running_clone.store(false, Ordering::Relaxed);
-        })
+        PainterHandle(running_clone)
     }
 
     pub fn add(&mut self, p: ProgressEntry) {

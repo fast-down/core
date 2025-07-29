@@ -458,7 +458,7 @@ mod tests {
             let result_clone = result.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(1000)).await;
-                result_clone.cancel().await;
+                result_clone.cancel();
             });
             let mut download_progress: Vec<ProgressEntry> = Vec::new();
             while let Ok(e) = result.event_chain.recv().await {
