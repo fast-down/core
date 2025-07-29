@@ -1,6 +1,6 @@
 use crate::Event;
 use async_channel::Receiver;
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 use tokio::{
     sync::Mutex,
     task::{JoinError, JoinHandle},
@@ -18,6 +18,16 @@ pub struct DownloadResult {
     pub event_chain: Receiver<Event>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     cancel_fn: Arc<Mutex<Option<CancelFn>>>,
+}
+
+impl Debug for DownloadResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DownloadResult")
+            .field("event_chain", &self.event_chain)
+            .field("handle", &self.handle)
+            .field("cancel_fn", &"Box<dyn FnOnce() + Send>")
+            .finish()
+    }
 }
 
 impl DownloadResult {
