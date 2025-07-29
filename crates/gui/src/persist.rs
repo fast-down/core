@@ -144,26 +144,28 @@ impl Database {
     }
 
     pub async fn get_all_entries(&self) -> Result<Vec<DatabaseEntry>, tokio_rusqlite::Error> {
-        self.conn
-            .call(|conn| {
-                conn
-                    .prepare("SELECT total_size, etag, last_modified, progress, file_name, elapsed, url, file_path FROM write_progress ORDER BY id DESC")?
-                    .query_map([], |row| {
-                        let progress: String = row.get(3)?;
-                        Ok(DatabaseEntry {
-                            total_size: row.get(0)?,
-                            etag: row.get(1)?,
-                            last_modified: row.get(2)?,
-                            progress: progress::from_str(&progress),
-                            file_name: row.get(4)?,
-                            elapsed: row.get(5)?,
-                            url: row.get(6)?,
-                            file_path: row.get(7)?,
-                        })
-                    })?
-                    .collect::<Result<_, _>>().map_err(Into::into)
+        self
+      .conn
+      .call(|conn| {
+        conn
+          .prepare("SELECT total_size, etag, last_modified, progress, file_name, elapsed, url, file_path FROM write_progress ORDER BY id DESC")?
+          .query_map([], |row| {
+            let progress: String = row.get(3)?;
+            Ok(DatabaseEntry {
+              total_size: row.get(0)?,
+              etag: row.get(1)?,
+              last_modified: row.get(2)?,
+              progress: progress::from_str(&progress),
+              file_name: row.get(4)?,
+              elapsed: row.get(5)?,
+              url: row.get(6)?,
+              file_path: row.get(7)?,
             })
-            .await
+          })?
+          .collect::<Result<_, _>>()
+          .map_err(Into::into)
+      })
+      .await
     }
 
     pub async fn clean(&self) -> Result<usize, tokio_rusqlite::Error> {

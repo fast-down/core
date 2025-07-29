@@ -42,7 +42,7 @@ mod tests {
             add_blank(&vec![], 10),
             vec![ProgressData {
                 is_blank: true,
-                width: 1.0,
+                width: 1.0
             }]
         );
         assert_eq!(
@@ -50,11 +50,11 @@ mod tests {
             vec![
                 ProgressData {
                     is_blank: false,
-                    width: 0.5,
+                    width: 0.5
                 },
                 ProgressData {
                     is_blank: true,
-                    width: 0.5,
+                    width: 0.5
                 }
             ]
         );
@@ -63,11 +63,11 @@ mod tests {
             vec![
                 ProgressData {
                     is_blank: true,
-                    width: 0.5,
+                    width: 0.5
                 },
                 ProgressData {
                     is_blank: false,
-                    width: 0.5,
+                    width: 0.5
                 }
             ]
         );

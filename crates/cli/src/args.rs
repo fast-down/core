@@ -215,7 +215,7 @@ impl Args {
                     }
                     if let Ok(value) = config.get_string("General.proxy") {
                         if !value.is_empty() {
-                            args.proxy = Some(value);
+                            args.proxy.replace(value);
                         }
                     }
                     if let Ok(value) = config.get_int("General.write_buffer_size") {
@@ -286,7 +286,7 @@ impl Args {
                         args.threads = value;
                     }
                     if let Some(value) = cli.proxy {
-                        args.proxy = Some(value);
+                        args.proxy.replace(value);
                     }
                     if let Some(value) = cli.write_buffer_size {
                         args.write_buffer_size = value;
@@ -301,7 +301,7 @@ impl Args {
                         args.retry_gap = Duration::from_millis(value);
                     }
                     if let Some(value) = cli.repaint_gap {
-                        args.retry_gap = Duration::from_millis(value);
+                        args.repaint_gap = Duration::from_millis(value);
                     }
                     if cli.browser {
                         args.browser = true;

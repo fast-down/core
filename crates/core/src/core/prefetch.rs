@@ -212,12 +212,13 @@ mod tests {
 
         // Test sanitization
         let mock3 = server
-            .mock("GET", "/test3")
-            .with_header(
-                "Content-Disposition",
-                "attachment; filename*=UTF-8''%E6%82%AA%E3%81%84%3C%3E%E3%83%95%E3%82%A1%E3%82%A4%E3%83%AB%3F%E5%90%8D.txt"
-            )
-            .create_async().await;
+      .mock("GET", "/test3")
+      .with_header(
+        "Content-Disposition",
+        "attachment; filename*=UTF-8''%E6%82%AA%E3%81%84%3C%3E%E3%83%95%E3%82%A1%E3%82%A4%E3%83%AB%3F%E5%90%8D.txt",
+      )
+      .create_async()
+      .await;
         let url_info = get_url_info(&format!("{}/test3", server.url()), &Client::new())
             .await
             .unwrap();

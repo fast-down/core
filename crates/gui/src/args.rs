@@ -134,7 +134,7 @@ impl Args {
                     if let Ok(value) = config.get_string("General.proxy")
                         && !value.is_empty()
                     {
-                        args.proxy = Some(value);
+                        args.proxy.replace(value);
                     }
                     if let Ok(value) = config.get_int("General.write_buffer_size") {
                         args.write_buffer_size = value.try_into()?;

@@ -163,12 +163,18 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
                             }
                         }
                         if progress.etag != info.etag {
-                            if !confirm(predicate!(args), &format!(
-                                "原文件 ETag: {:?}\n现文件 ETag: {:?}\n文件 ETag 不一致，是否继续？",
-                                progress.etag, info.etag
-                            ), false).await? {
-                              return cancel_expected();
-                            }
+                            if !confirm(
+                predicate!(args),
+                &format!(
+                  "原文件 ETag: {:?}\n现文件 ETag: {:?}\n文件 ETag 不一致，是否继续？",
+                  progress.etag, info.etag
+                ),
+                false,
+              )
+              .await?
+              {
+                return cancel_expected();
+              }
                         } else if let Some(progress_etag) = progress.etag.as_ref()
                             && progress_etag.starts_with("W/")
                         {
