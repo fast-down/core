@@ -25,11 +25,13 @@ fn init_locale() {
     }
 }
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_locale();
     color_eyre::install()?;
-    println!("fast-down v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!("fast-down v{VERSION}");
     let args = Args::parse()?;
     match args {
         Args::Download(download_args) => download::download(*download_args).await,

@@ -11,6 +11,7 @@ use reqwest::{
     header::{self, HeaderValue},
 };
 use std::{env, path::Path, sync::Arc, time::Instant};
+use std::num::NonZeroUsize;
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Handle,
@@ -65,6 +66,8 @@ fn cancel_expected() -> Result<()> {
     Ok(())
 }
 
+
+
 pub async fn download(mut args: DownloadArgs) -> Result<()> {
     if args.browser {
         let url = Url::parse(&args.url)?;
@@ -94,11 +97,9 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
         }
         tokio::time::sleep(args.retry_gap).await;
     };
-    let threads = if info.can_fast_download {
-        args.threads
-    } else {
-        1
-    };
+    let concurrent = if info.can_fast_download {
+        NonZeroUsize::new(args.threads)
+    } else { None };
     let mut save_path =
         Path::new(&args.save_folder).join(args.file_name.as_ref().unwrap_or(&info.file_name));
     if save_path.is_relative()
@@ -118,7 +119,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
             size = fmt::format_size(info.file_size as f64),
             size_in_bytes = info.file_size,
             path = save_path.to_str().unwrap(),
-            concurrent = threads,
+            concurrent = concurrent.unwrap_or(NonZeroUsize::new(1).unwrap()),
             etag = info.etag.as_deref() : {:?},
             last_modified = info.last_modified.as_deref() : {:?}
         )
@@ -127,7 +128,9 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     #[allow(clippy::single_range_in_vec_init)]
     let mut download_chunks = vec![0..info.file_size];
     let mut resume_download = false;
-    let mut write_progress: Vec<ProgressEntry> = Vec::with_capacity(threads);
+    let mut write_progress: Vec<ProgressEntry> = Vec::with_capacity(
+        concurrent.map(NonZeroUsize::get).unwrap_or(1)
+    );
 
     if save_path.try_exists()? && args.resume && info.can_fast_download {
         if let Ok(Some(progress)) = db.get_entry(save_path_str.clone()).await {
@@ -215,14 +218,13 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     }
 
     let result = fast_down::file::download(
+        client,
         info.final_url.clone(),
+        download_chunks,
         &save_path,
         DownloadOptions {
-            threads,
-            concurrent: info.can_fast_download,
+            concurrent,
             file_size: info.file_size,
-            client,
-            download_chunks,
             retry_gap: args.retry_gap,
             write_buffer_size: args.write_buffer_size,
             write_channel_size: args.write_channel_size,

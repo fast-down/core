@@ -10,19 +10,20 @@ use std::{
     },
     time::Duration,
 };
+use std::num::NonZeroUsize;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
-    pub threads: usize,
-    pub client: Client,
-    pub download_chunks: Vec<ProgressEntry>,
+    pub threads: NonZeroUsize,
     pub retry_gap: Duration,
     pub write_channel_size: usize,
 }
 
 pub async fn download(
+    client: Client,
     url: impl IntoUrl,
+    download_chunks: Vec<ProgressEntry>,
     mut writer: impl RandWriter + 'static,
     options: DownloadOptions,
 ) -> Result<DownloadResult, reqwest::Error> {
@@ -51,10 +52,10 @@ pub async fn download(
         }
     });
     let mutex = Arc::new(Mutex::new(()));
-    let task_list = Arc::new(TaskList::from(options.download_chunks));
+    let task_list = Arc::new(TaskList::from(download_chunks));
     let tasks = Arc::new(
         Task::from(&*task_list)
-            .split_task(options.threads as u64)
+            .split_task(options.threads.get() as u64)
             .map(Arc::new)
             .collect::<Vec<_>>(),
     );
@@ -68,7 +69,7 @@ pub async fn download(
         let mutex = mutex.clone();
         let tx = tx.clone();
         let running = running.clone();
-        let client = options.client.clone();
+        let client = client.clone();
         let url = url.clone();
         let tx_write = tx_write.clone();
         tokio::spawn(async move {
@@ -243,14 +244,14 @@ mod tests {
         let client = Client::new();
         let download_chunks = vec![0..mock_body.len() as u64];
         let result = download(
+            client,
             format!("{}/mutli-2", server.url()),
+            download_chunks.clone(),
             RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024)
                 .await
                 .unwrap(),
             DownloadOptions {
-                client,
-                threads: 32,
-                download_chunks: download_chunks.clone(),
+                threads: NonZeroUsize::new(32).unwrap(),
                 retry_gap: Duration::from_secs(1),
                 write_channel_size: 1024,
             },
@@ -342,14 +343,14 @@ mod tests {
         let client = Client::new();
         let download_chunks = vec![10..80, 100..300, 1000..2000];
         let result = download(
+            client,
             format!("{}/multi-2", server.url()),
+            download_chunks.clone(),
             RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024)
                 .await
                 .unwrap(),
             DownloadOptions {
-                client,
-                threads: 32,
-                download_chunks: download_chunks.clone(),
+                threads: NonZeroUsize::new(32).unwrap(),
                 retry_gap: Duration::from_secs(1),
                 write_channel_size: 1024,
             },
@@ -441,14 +442,14 @@ mod tests {
             let file = temp_file.reopen().unwrap().into();
             let client = Client::new();
             let result = download(
+                client,
                 format!("{}/mutli-3", server.url()),
+                vec![0..mock_body.len() as u64],
                 RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024)
                     .await
                     .unwrap(),
                 DownloadOptions {
-                    client,
-                    threads: 32,
-                    download_chunks: vec![0..mock_body.len() as u64],
+                    threads: NonZeroUsize::new(32).unwrap(),
                     retry_gap: Duration::from_secs(1),
                     write_channel_size: 1024,
                 },
@@ -501,14 +502,14 @@ mod tests {
         let client = Client::new();
         let download_chunks = reverse_progress(&write_progress, mock_body.len() as u64);
         let result = download(
+            client,
             format!("{}/mutli-3", server.url()),
+            download_chunks.clone(),
             RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024)
                 .await
                 .unwrap(),
             DownloadOptions {
-                client,
-                threads: 8,
-                download_chunks: download_chunks.clone(),
+                threads: NonZeroUsize::new(8).unwrap(),
                 retry_gap: Duration::from_secs(1),
                 write_channel_size: 1024,
             },

@@ -11,12 +11,12 @@ use std::{
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
-    pub client: Client,
     pub retry_gap: Duration,
     pub write_channel_size: usize,
 }
 
 pub async fn download(
+    client: Client,
     url: impl IntoUrl,
     mut writer: impl SeqWriter + 'static,
     options: DownloadOptions,
@@ -54,7 +54,7 @@ pub async fn download(
                 return;
             }
             tx.send(Event::Connecting(0)).await.unwrap();
-            match options.client.get(url.clone()).send().await {
+            match client.get(url.clone()).send().await {
                 Ok(response) => break response,
                 Err(e) => tx
                     .send(Event::ConnectError(0, ConnectErrorKind::Reqwest(e)))
@@ -124,10 +124,10 @@ mod tests {
 
         let client = Client::new();
         let result = download(
+            client,
             format!("{}/small", server.url()),
             SeqFileWriter::new(file, 8 * 1024 * 1024),
             DownloadOptions {
-                client,
                 retry_gap: Duration::from_secs(1),
                 write_channel_size: 1024,
             },
@@ -193,10 +193,10 @@ mod tests {
 
         let client = Client::new();
         let result = download(
+            client,
             format!("{}/empty", server.url()),
             SeqFileWriter::new(file, 8 * 1024 * 1024),
             DownloadOptions {
-                client,
                 retry_gap: Duration::from_secs(1),
                 write_channel_size: 1024,
             },
@@ -263,10 +263,10 @@ mod tests {
 
         let client = Client::new();
         let result = download(
+            client,
             format!("{}/large", server.url()),
             SeqFileWriter::new(file, 8 * 1024 * 1024),
             DownloadOptions {
-                client,
                 retry_gap: Duration::from_secs(1),
                 write_channel_size: 1024,
             },
@@ -333,10 +333,10 @@ mod tests {
 
         let client = Client::new();
         let result = download(
+            client,
             format!("{}/exact_buffer_size_file", server.url()),
             SeqFileWriter::new(file, 8 * 1024 * 1024),
             DownloadOptions {
-                client,
                 retry_gap: Duration::from_secs(1),
                 write_channel_size: 1024,
             },

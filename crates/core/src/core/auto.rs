@@ -1,33 +1,33 @@
 use super::{DownloadResult, multi, single};
 use crate::{ProgressEntry, RandWriter, SeqWriter};
 use core::time::Duration;
+use std::num::NonZeroUsize;
 use reqwest::{Client, IntoUrl};
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
-    pub threads: usize,
-    pub client: Client,
-    pub concurrent: bool,
-    pub download_chunks: Vec<ProgressEntry>,
+    pub concurrent: Option<NonZeroUsize>,
     pub retry_gap: Duration,
     pub file_size: u64,
     pub write_channel_size: usize,
 }
 
 pub async fn download(
+    client: Client,
     url: impl IntoUrl,
+    download_chunks: Vec<ProgressEntry>,
     seq_writer: impl SeqWriter + 'static,
     rand_writer: impl RandWriter + 'static,
     options: DownloadOptions,
 ) -> Result<DownloadResult, reqwest::Error> {
-    if options.concurrent {
+    if let Some(threads) = options.concurrent {
         multi::download(
+            client,
             url,
+            download_chunks,
             rand_writer,
             multi::DownloadOptions {
-                client: options.client,
-                threads: options.threads,
-                download_chunks: options.download_chunks,
+                threads,
                 retry_gap: options.retry_gap,
                 write_channel_size: options.write_channel_size,
             },
@@ -35,10 +35,10 @@ pub async fn download(
         .await
     } else {
         single::download(
+            client,
             url,
             seq_writer,
             single::DownloadOptions {
-                client: options.client,
                 retry_gap: options.retry_gap,
                 write_channel_size: options.write_channel_size,
             },
