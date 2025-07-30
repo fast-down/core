@@ -17,9 +17,9 @@ pub enum Event {
     ConnectError(WorkerId, ConnectErrorKind),
     Downloading(WorkerId),
     DownloadError(WorkerId, reqwest::Error),
-    DownloadProgress(ProgressEntry),
-    WriteError(std::io::Error),
-    WriteProgress(ProgressEntry),
+    DownloadProgress(WorkerId, ProgressEntry),
+    WriteError(WorkerId, std::io::Error),
+    WriteProgress(WorkerId, ProgressEntry),
     Finished(WorkerId),
     Abort(WorkerId),
 }

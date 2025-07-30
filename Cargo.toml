@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/cli", "crates/gui", "crates/wasm"]
+members = ["crates/core", "crates/cli", "crates/gui"]
 resolver = "2"
 
 [workspace.package]
@@ -14,26 +14,26 @@ exclude = ["/.github"]
 fast-down = { version = "2.0.4", path = "crates/core" }
 color-eyre = "0.6.5"
 reqwest = { version = "0.12.22", features = [
-  "gzip",
-  "brotli",
-  "zstd",
-  "deflate",
-  "http2",
-  "rustls-tls",
-  "socks",
-  "macos-system-configuration",
+    "gzip",
+    "brotli",
+    "zstd",
+    "deflate",
+    "http2",
+    "rustls-tls",
+    "socks",
+    "macos-system-configuration",
 ], default-features = false }
 clap = { version = "4.5.41", features = ["derive"] }
 tokio = { version = "1.47.0", default-features = false, features = [
-  "io-std",
-  "rt-multi-thread",
+    "io-std",
+    "rt-multi-thread",
 ] }
 path-clean = "1.0.1"
 ctrlc = "3.4.7"
 url = "2.5.4"
 config = { version = "0.15.13", default-features = false, features = [
-  "toml",
-  "convert-case",
+    "toml",
+    "convert-case",
 ] }
 mimalloc = "0.1.47"
 tokio-rusqlite = { version = "0.6.0", features = ["bundled"] }

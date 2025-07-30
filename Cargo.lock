@@ -1728,7 +1728,6 @@ dependencies = [
  "clap",
  "color-eyre",
  "config",
- "ctrlc",
  "fast-down",
  "mimalloc",
  "path-clean",
@@ -1739,13 +1738,6 @@ dependencies = [
  "tokio",
  "tokio-rusqlite",
  "url",
-]
-
-[[package]]
-name = "fast-down-wasm"
-version = "0.1.0"
-dependencies = [
- "wasm-bindgen",
 ]
 
 [[package]]

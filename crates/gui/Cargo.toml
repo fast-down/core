@@ -20,7 +20,6 @@ color-eyre = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 path-clean = { workspace = true }
-ctrlc = { workspace = true }
 url = { workspace = true }
 config = { workspace = true }
 mimalloc = { workspace = true }
