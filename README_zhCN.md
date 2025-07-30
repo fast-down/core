@@ -1,6 +1,6 @@
 # fast-down 快下
 
-![Lastest commit (branch)](https://img.shields.io/github/last-commit/share121/fast-down/main)
+![Latest commit (branch)](https://img.shields.io/github/last-commit/share121/fast-down/main)
 [![Test](https://github.com/share121/fast-down/workflows/Test/badge.svg)](https://github.com/share121/fast-down/actions)
 [![Latest version](https://img.shields.io/crates/v/fast-down.svg)](https://crates.io/crates/fast-down)
 [![Documentation](https://docs.rs/fast-down/badge.svg)](https://docs.rs/fast-down)
