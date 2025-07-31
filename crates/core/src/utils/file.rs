@@ -6,7 +6,7 @@ use crate::{file, multi, single};
 use reqwest::{Client, Url};
 use std::io::Error;
 use std::num::NonZeroUsize;
-use std::{io::ErrorKind, path::Path, time::Duration};
+use std::{io, io::ErrorKind, path::Path, time::Duration};
 use tokio::fs::{self, OpenOptions};
 
 #[derive(Debug, Clone)]
@@ -34,7 +34,7 @@ impl DownloadFile for Client {
         url: Url,
         save_path: &Path,
         options: DownloadOptions,
-    ) -> Result<DownloadResult, Error> {
+    ) -> io::Result<DownloadResult> {
         let save_folder = save_path
             .parent()
             .ok_or(Error::new(ErrorKind::NotFound, "no parent dir"))?;
