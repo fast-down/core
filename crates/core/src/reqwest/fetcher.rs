@@ -1,9 +1,8 @@
 use crate::WorkerId;
 use crate::base::source::{Fetcher, Puller};
 use bytes::Bytes;
-use http::Method;
 use http::header::IntoHeaderName;
-use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::header::HeaderValue;
 use std::ops::Range;
 
 #[derive(Clone)]
@@ -46,7 +45,7 @@ impl ClientFetcherBuilder {
         ClientFetcher {
             client: self.client,
             url: self.url,
-            method: self.method.unwrap_or(Method::GET),
+            method: self.method.unwrap_or(reqwest::Method::GET),
             headers: self.headers,
         }
     }
@@ -67,6 +66,7 @@ impl Fetcher for ClientFetcher {
     type Error = reqwest::Error;
     type Puller = reqwest::Response;
 
+    #[inline(always)]
     async fn fetch(
         &self,
         _: WorkerId,
@@ -90,6 +90,7 @@ impl Fetcher for ClientFetcher {
 impl Puller for reqwest::Response {
     type Error = reqwest::Error;
 
+    #[inline(always)]
     async fn pull(&mut self) -> Result<Option<Bytes>, reqwest::Error> {
         self.chunk().await
     }
@@ -103,7 +104,7 @@ mod tests {
     #[tokio::test]
     async fn test_reqwest_fetcher() {
         let mut server = mockito::Server::new_async().await;
-        let mock = server
+        let _mock = server
             .mock("GET", "/endpoint")
             .with_status(200)
             .with_body(b"Hello World")

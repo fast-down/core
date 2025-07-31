@@ -25,7 +25,7 @@ impl Fetcher for MockFetcher {
 
     async fn fetch(
         &self,
-        id: WorkerId,
+        _id: WorkerId,
         range: Option<&Range<u64>>,
     ) -> Result<Self::Puller, Self::Error> {
         Ok(match range {
