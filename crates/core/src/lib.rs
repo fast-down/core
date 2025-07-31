@@ -4,6 +4,7 @@ mod core;
 pub mod file;
 #[cfg(feature = "reqwest")]
 pub mod reqwest;
+pub mod common;
 
 pub use base::event::*;
 pub use base::merge_progress::*;
