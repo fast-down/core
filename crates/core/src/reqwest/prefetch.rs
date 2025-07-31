@@ -1,6 +1,7 @@
+use crate::reqwest::ClientFetcher;
 use content_disposition;
 use reqwest::{
-    Client, IntoUrl, StatusCode, Url,
+    Client, Error, IntoUrl, StatusCode, Url,
     header::{self, HeaderMap},
 };
 use sanitize_filename;
@@ -109,6 +110,15 @@ impl Prefetch for Client {
             etag: get_header_str(resp_headers, &header::ETAG),
             last_modified: get_header_str(resp_headers, &header::LAST_MODIFIED),
         })
+    }
+}
+
+impl Prefetch for ClientFetcher {
+    fn prefetch(
+        &self,
+        url: impl IntoUrl + Send,
+    ) -> impl Future<Output = Result<UrlInfo, Error>> + Send {
+        Prefetch::prefetch(&self.client, url)
     }
 }
 

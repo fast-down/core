@@ -14,7 +14,7 @@ keywords = ["downloader", "parallel", "thread", "concurrency", "performance"]
 categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
-fast-down = { workspace = true }
+fast-down = { workspace = true, features = ["reqwest"] }
 clap = { workspace = true }
 color-eyre = { workspace = true }
 reqwest = { workspace = true }

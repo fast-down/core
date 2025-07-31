@@ -5,7 +5,7 @@ use crate::{
     progress::{self, Painter as ProgressPainter},
 };
 use color_eyre::eyre::{Result, eyre};
-use fast_down::{Event, MergeProgress, ProgressEntry, Total, file::DownloadOptions};
+use fast_down::{Event, MergeProgress, ProgressEntry, Total};
 use reqwest::{
     Client, Proxy,
     header::{self, HeaderValue},
@@ -89,7 +89,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     let db = Database::new().await?;
 
     let info = loop {
-        match fast_down::get_url_info(&args.url, &client).await {
+        match fast_down::reqwest::get_url_info(&args.url, &client).await {
             Ok(info) => break info,
             Err(err) => println!("{}: {}", t!("err.url-info"), err),
         }
@@ -219,7 +219,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
         }
     }
 
-    let result = fast_down::file::download(
+    let result = fast_down::pusher::download(
         client,
         info.final_url.clone(),
         download_chunks,

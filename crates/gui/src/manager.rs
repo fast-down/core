@@ -2,7 +2,7 @@ use crate::{args::DownloadArgs, fmt, home_page::ProgressData, path, persist::Dat
 use async_channel::{Receiver, SendError, Sender};
 use color_eyre::Result;
 use fast_down::{
-    DownloadResult, Event, MergeProgress, ProgressEntry, Total, file::DownloadOptions,
+    FetchResult, Event, MergeProgress, ProgressEntry, Total, pusher::DownloadOptions,
 };
 use reqwest::{
     Client, Proxy,
@@ -23,7 +23,7 @@ use url::Url;
 #[derive(Debug, Clone)]
 pub struct ManagerData {
     /// fast-down 的原始返回结果
-    pub result: Option<DownloadResult>,
+    pub result: Option<FetchResult>,
     pub url: String,
     pub file_path: Option<String>,
     pub is_running: Arc<AtomicBool>,
@@ -313,7 +313,7 @@ async fn download(
         info.etag,
         info.last_modified
     );
-    let result = fast_down::file::download(
+    let result = fast_down::pusher::download(
         info.final_url.clone(),
         &save_path,
         DownloadOptions {

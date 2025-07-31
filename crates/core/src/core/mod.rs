@@ -1,5 +1,8 @@
 use crate::Event;
+use crate::base::pusher::Pusher;
+use crate::base::source::{Fetcher, Puller};
 use async_channel::Receiver;
+use std::error::Error;
 use std::{
     fmt::Debug,
     sync::{
@@ -12,20 +15,25 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 
+mod macros;
+#[cfg(test)]
+mod mock;
 pub mod multi;
-pub mod prefetch;
 pub mod single;
 
 #[derive(Debug, Clone)]
-pub struct DownloadResult {
-    pub event_chain: Receiver<Event>,
+pub struct FetchResult<Fetch: Fetcher, Pull: Puller, Push: Pusher> {
+    pub event_chain: Receiver<Event<Fetch::Error, Pull::Error, Push::Error>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     is_running: Arc<AtomicBool>,
 }
 
-impl DownloadResult {
+impl<Fetch: Fetcher, Pull: Puller, Push: Pusher> FetchResult<Fetch, Pull, Push>
+where
+    Fetch: Fetcher<Puller = Pull>,
+{
     pub fn new(
-        event_chain: Receiver<Event>,
+        event_chain: Receiver<Event<Fetch::Error, Pull::Error, Push::Error>>,
         handle: JoinHandle<()>,
         is_running: Arc<AtomicBool>,
     ) -> Self {

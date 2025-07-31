@@ -1690,6 +1690,7 @@ dependencies = [
  "bytes",
  "content_disposition",
  "fast-steal",
+ "http",
  "memmap2",
  "mockito",
  "reqwest",
