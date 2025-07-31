@@ -20,7 +20,7 @@ pub async fn download_single<F, P>(
     fetcher: F,
     mut pusher: P,
     options: DownloadOptions,
-) -> FetchResult<F, F::Puller, P>
+) -> FetchResult<F::Error, <F::Puller as Puller>::Error, P::Error>
 where
     F: Fetcher + Send + 'static,
     P: Pusher + Send + 'static,

@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 use url::Url;
-use crate::{multi, single, FetchResult, Fetcher, ProgressEntry, Pusher, RandomPusher};
+use crate::{multi, single, FetchResult, Fetcher, ProgressEntry, Puller, Pusher, RandomPusher};
 use super::{AutoDownload, DownloadOptions};
 
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ impl AutoDownload for UrlInfo {
         pusher: P,
         maybe_chunks: Option<Vec<ProgressEntry>>,
         options: DownloadOptions,
-    ) -> FetchResult<F, F::Puller, P>
+    ) -> FetchResult<F::Error, <F::Puller as Puller>::Error, P::Error>
     where
         F: Fetcher + Send + 'static,
         P: RandomPusher + Send + 'static,

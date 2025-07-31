@@ -21,18 +21,16 @@ pub mod multi;
 pub mod single;
 
 #[derive(Debug, Clone)]
-pub struct FetchResult<Fetch: Fetcher, Pull: Puller, Push: Pusher> {
-    pub event_chain: Receiver<Event<Fetch::Error, Pull::Error, Push::Error>>,
+pub struct FetchResult<FetchError, PullError, PushError> {
+    pub event_chain: Receiver<Event<FetchError, PullError, PushError>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     is_running: Arc<AtomicBool>,
 }
 
-impl<Fetch: Fetcher, Pull: Puller, Push: Pusher> FetchResult<Fetch, Pull, Push>
-where
-    Fetch: Fetcher<Puller = Pull>,
+impl<FetchError, PullError, PushError> FetchResult<FetchError, PullError, PushError>
 {
     pub fn new(
-        event_chain: Receiver<Event<Fetch::Error, Pull::Error, Push::Error>>,
+        event_chain: Receiver<Event<FetchError, PullError, PushError>>,
         handle: JoinHandle<()>,
         is_running: Arc<AtomicBool>,
     ) -> Self {

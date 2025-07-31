@@ -25,7 +25,7 @@ pub async fn download_multi<F, P>(
     fetcher: F,
     mut pusher: P,
     options: DownloadOptions,
-) -> FetchResult<F, F::Puller, P>
+) -> FetchResult<F::Error, <F::Puller as Puller>::Error, P::Error>
 where
     F: Fetcher + Send + 'static,
     P: RandomPusher + Send + 'static,
