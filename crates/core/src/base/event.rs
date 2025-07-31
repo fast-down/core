@@ -10,8 +10,8 @@ pub enum Event<FetchError, PullError, PushError> {
     PullError(WorkerId, PullError),
     PullProgress(WorkerId, ProgressEntry),
     PushError(WorkerId, PushError),
-    FlushError(PushError),
     PushProgress(WorkerId, ProgressEntry),
+    FlushError(PushError),
     Finished(WorkerId),
     Abort(WorkerId),
 }
