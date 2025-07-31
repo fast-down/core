@@ -3,7 +3,8 @@ use crate::single::DownloadSingle;
 use crate::writer::file::SeqFileWriter;
 use crate::{DownloadResult, ProgressEntry};
 use crate::{file, multi, single};
-use reqwest::{Client, IntoUrl};
+use reqwest::{Client, Url};
+use std::io::Error;
 use std::num::NonZeroUsize;
 use std::{io::ErrorKind, path::Path, time::Duration};
 use tokio::fs::{self, OpenOptions};
@@ -15,41 +16,32 @@ pub struct DownloadOptions {
     pub write_channel_size: usize,
     pub retry_gap: Duration,
     pub file_size: u64,
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum DownloadErrorKind {
-    #[error("Reqwest error: {0}")]
-    Reqwest(#[from] reqwest::Error),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    pub download_chunks: Vec<ProgressEntry>,
 }
 
 pub trait DownloadFile {
     fn download(
         &self,
-        url: impl IntoUrl + Send,
-        download_chunks: Vec<ProgressEntry>,
+        url: Url,
         save_path: &Path,
         options: DownloadOptions,
-    ) -> impl Future<Output = Result<DownloadResult, DownloadErrorKind>> + Send;
+    ) -> impl Future<Output = Result<DownloadResult, Error>> + Send;
 }
 
 impl DownloadFile for Client {
     async fn download(
         &self,
-        url: impl IntoUrl + Send,
-        download_chunks: Vec<ProgressEntry>,
+        url: Url,
         save_path: &Path,
         options: DownloadOptions,
-    ) -> Result<DownloadResult, DownloadErrorKind> {
+    ) -> Result<DownloadResult, Error> {
         let save_folder = save_path
             .parent()
-            .ok_or(DownloadErrorKind::Io(ErrorKind::NotFound.into()))?;
+            .ok_or(Error::new(ErrorKind::NotFound, "no parent dir"))?;
         if let Err(e) = fs::create_dir_all(save_folder).await
             && e.kind() != ErrorKind::AlreadyExists
         {
-            return Err(DownloadErrorKind::Io(e));
+            return Err(e);
         }
         let file = OpenOptions::new()
             .read(true)
@@ -57,8 +49,7 @@ impl DownloadFile for Client {
             .create(true)
             .truncate(false)
             .open(&save_path)
-            .await
-            .map_err(DownloadErrorKind::Io)?;
+            .await?;
         if let Some(threads) = options.concurrent {
             #[cfg(target_pointer_width = "64")]
             let rand_file_writer = file::rand_file_writer_mmap::RandFileWriter::new(
@@ -66,40 +57,38 @@ impl DownloadFile for Client {
                 options.file_size,
                 options.write_buffer_size,
             )
-            .await
-            .map_err(DownloadErrorKind::Io)?;
+            .await?;
             #[cfg(not(target_pointer_width = "64"))]
             let rand_file_writer = file::rand_file_writer_std::RandFileWriter::new(
                 file,
                 options.file_size,
                 options.write_buffer_size,
             )
-            .await
-            .map_err(|e| DownloadErrorKind::Io(e))?;
-            self.download_multi(
-                url,
-                download_chunks,
-                rand_file_writer,
-                multi::DownloadOptions {
-                    threads,
-                    retry_gap: options.retry_gap,
-                    write_channel_size: options.write_channel_size,
-                },
-            )
-            .await
-            .map_err(DownloadErrorKind::Reqwest)
+            .await?;
+            Ok(self
+                .download_multi(
+                    url,
+                    rand_file_writer,
+                    multi::DownloadOptions {
+                        threads,
+                        download_chunks: options.download_chunks,
+                        retry_gap: options.retry_gap,
+                        write_channel_size: options.write_channel_size,
+                    },
+                )
+                .await)
         } else {
             let seq_file_writer = SeqFileWriter::new(file, options.write_buffer_size);
-            self.download_single(
-                url,
-                seq_file_writer,
-                single::DownloadOptions {
-                    retry_gap: options.retry_gap,
-                    write_channel_size: options.write_channel_size,
-                },
-            )
-            .await
-            .map_err(DownloadErrorKind::Reqwest)
+            Ok(self
+                .download_single(
+                    url,
+                    seq_file_writer,
+                    single::DownloadOptions {
+                        retry_gap: options.retry_gap,
+                        write_channel_size: options.write_channel_size,
+                    },
+                )
+                .await)
         }
     }
 }

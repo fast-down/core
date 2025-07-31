@@ -2,7 +2,7 @@ use super::DownloadResult;
 use crate::{ConnectErrorKind, Event, ProgressEntry, RandWriter, Total, WorkerId};
 use bytes::Bytes;
 use fast_steal::{SplitTask, StealTask, Task, TaskList};
-use reqwest::{Client, IntoUrl, StatusCode, header};
+use reqwest::{Client, StatusCode, Url, header};
 use std::num::NonZeroUsize;
 use std::{
     sync::{
@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
+    pub download_chunks: Vec<ProgressEntry>,
     pub threads: NonZeroUsize,
     pub retry_gap: Duration,
     pub write_channel_size: usize,
@@ -23,22 +24,19 @@ pub struct DownloadOptions {
 pub trait DownloadMulti {
     fn download_multi(
         &self,
-        url: impl IntoUrl + Send,
-        download_chunks: Vec<ProgressEntry>,
+        url: Url,
         writer: impl RandWriter + 'static,
         options: DownloadOptions,
-    ) -> impl Future<Output = Result<DownloadResult, reqwest::Error>> + Send;
+    ) -> impl Future<Output = DownloadResult> + Send;
 }
 
 impl DownloadMulti for Client {
     async fn download_multi(
         &self,
-        url: impl IntoUrl + Send,
-        download_chunks: Vec<ProgressEntry>,
+        url: Url,
         mut writer: impl RandWriter + 'static,
         options: DownloadOptions,
-    ) -> Result<DownloadResult, reqwest::Error> {
-        let url = url.into_url()?;
+    ) -> DownloadResult {
         let (tx, event_chain) = async_channel::unbounded();
         let (tx_write, rx_write) =
             async_channel::bounded::<(WorkerId, ProgressEntry, Bytes)>(options.write_channel_size);
@@ -63,7 +61,7 @@ impl DownloadMulti for Client {
             }
         });
         let mutex = Arc::new(Mutex::new(()));
-        let task_list = Arc::new(TaskList::from(download_chunks));
+        let task_list = Arc::new(TaskList::from(options.download_chunks));
         let tasks = Arc::new(
             Task::from(&*task_list)
                 .split_task(options.threads.get() as u64)
@@ -184,7 +182,7 @@ impl DownloadMulti for Client {
                 }
             });
         }
-        Ok(DownloadResult::new(event_chain, handle, running_clone))
+        DownloadResult::new(event_chain, handle, running_clone)
     }
 }
 
@@ -262,8 +260,7 @@ mod tests {
         let download_chunks = vec![0..mock_body.len() as u64];
         let result = client
             .download_multi(
-                format!("{}/multi-2", server.url()),
-                download_chunks.clone(),
+                format!("{}/multi-2", server.url()).parse().unwrap(),
                 RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024)
                     .await
                     .unwrap(),
@@ -271,10 +268,10 @@ mod tests {
                     threads: NonZeroUsize::new(32).unwrap(),
                     retry_gap: Duration::from_secs(1),
                     write_channel_size: 1024,
+                    download_chunks: download_chunks.clone(),
                 },
             )
-            .await
-            .unwrap();
+            .await;
 
         let mut download_progress: Vec<ProgressEntry> = Vec::new();
         let mut write_progress: Vec<ProgressEntry> = Vec::new();
@@ -347,8 +344,7 @@ mod tests {
         let download_chunks = vec![10..80, 100..300, 1000..2000];
         let result = client
             .download_multi(
-                format!("{}/multi-2", server.url()),
-                download_chunks.clone(),
+                format!("{}/multi-2", server.url()).parse().unwrap(),
                 RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024)
                     .await
                     .unwrap(),
@@ -356,10 +352,10 @@ mod tests {
                     threads: NonZeroUsize::new(32).unwrap(),
                     retry_gap: Duration::from_secs(1),
                     write_channel_size: 1024,
+                    download_chunks: download_chunks.clone(),
                 },
             )
-            .await
-            .unwrap();
+            .await;
 
         let mut download_progress: Vec<ProgressEntry> = Vec::new();
         let mut write_progress: Vec<ProgressEntry> = Vec::new();
@@ -442,8 +438,7 @@ mod tests {
             let client = Client::new();
             let result = client
                 .download_multi(
-                    format!("{}/multi-3", server.url()),
-                    vec![0..mock_body.len() as u64],
+                    format!("{}/multi-3", server.url()).parse().unwrap(),
                     RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024)
                         .await
                         .unwrap(),
@@ -451,10 +446,10 @@ mod tests {
                         threads: NonZeroUsize::new(32).unwrap(),
                         retry_gap: Duration::from_secs(1),
                         write_channel_size: 1024,
+                        download_chunks: vec![0..mock_body.len() as u64],
                     },
                 )
-                .await
-                .unwrap();
+                .await;
             let result_clone = result.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -492,19 +487,18 @@ mod tests {
         let download_chunks = reverse_progress(&write_progress, mock_body.len() as u64);
         let result = client
             .download_multi(
-                format!("{}/multi-3", server.url()),
-                download_chunks.clone(),
+                format!("{}/multi-3", server.url()).parse().unwrap(),
                 RandFileWriter::new(file, mock_body.len() as u64, 8 * 1024 * 1024)
                     .await
                     .unwrap(),
                 DownloadOptions {
+                    download_chunks: download_chunks.clone(),
                     threads: NonZeroUsize::new(8).unwrap(),
                     retry_gap: Duration::from_secs(1),
                     write_channel_size: 1024,
                 },
             )
-            .await
-            .unwrap();
+            .await;
 
         let mut download_progress: Vec<ProgressEntry> = Vec::new();
         let mut write_progress: Vec<ProgressEntry> = Vec::new();
