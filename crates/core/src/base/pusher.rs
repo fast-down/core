@@ -1,7 +1,6 @@
 use bytes::Bytes;
 use std::future;
 use std::ops::Range;
-use std::task::Poll;
 
 pub trait RandomPusher: Pusher {
     fn push_range(

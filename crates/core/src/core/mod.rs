@@ -2,7 +2,6 @@ use crate::Event;
 use crate::base::pusher::Pusher;
 use crate::base::source::{Fetcher, Puller};
 use async_channel::Receiver;
-use std::error::Error;
 use std::{
     fmt::Debug,
     sync::{

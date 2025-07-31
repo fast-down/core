@@ -16,7 +16,7 @@ pub struct DownloadOptions {
     pub push_queue_cap: usize,
 }
 
-async fn download_single<F, P>(
+pub async fn download_single<F, P>(
     fetcher: F,
     mut pusher: P,
     options: DownloadOptions,
