@@ -1,20 +1,11 @@
+use crate::reqwest::ClientFetcher;
 use content_disposition;
 use reqwest::{
-    Client, IntoUrl, StatusCode, Url,
-    header::{self, HeaderMap},
+    header::{self, HeaderMap}, Client, IntoUrl, StatusCode,
+    Url,
 };
 use sanitize_filename;
-
-#[derive(Debug, Clone)]
-pub struct UrlInfo {
-    pub file_size: u64,
-    pub file_name: String,
-    pub supports_range: bool,
-    pub can_fast_download: bool,
-    pub final_url: Url,
-    pub etag: Option<String>,
-    pub last_modified: Option<String>,
-}
+use crate::common::UrlInfo;
 
 fn get_file_size(headers: &HeaderMap, status: &StatusCode) -> u64 {
     if *status == StatusCode::PARTIAL_CONTENT {
@@ -88,7 +79,7 @@ impl Prefetch for Client {
         let final_url = resp.url();
 
         let resp_headers = resp.headers();
-        let file_size = get_file_size(resp_headers, &status);
+        let size = get_file_size(resp_headers, &status);
 
         let supports_range = match resp.headers().get(header::ACCEPT_RANGES) {
             Some(accept_ranges) => accept_ranges
@@ -102,13 +93,22 @@ impl Prefetch for Client {
 
         Ok(UrlInfo {
             final_url: final_url.clone(),
-            file_name: get_filename(resp_headers, final_url),
-            file_size,
+            name: Some(get_filename(resp_headers, final_url)),
+            size,
             supports_range,
-            can_fast_download: file_size > 0 && supports_range,
+            fast_download: size > 0 && supports_range,
             etag: get_header_str(resp_headers, &header::ETAG),
             last_modified: get_header_str(resp_headers, &header::LAST_MODIFIED),
         })
+    }
+}
+
+impl Prefetch for ClientFetcher {
+    fn prefetch(
+        &self,
+        url: impl IntoUrl + Send,
+    ) -> impl Future<Output = Result<UrlInfo, reqwest::Error>> + Send {
+        Prefetch::prefetch(&self.client, url)
     }
 }
 
@@ -123,14 +123,14 @@ async fn prefetch_fallback(url: Url, client: &Client) -> Result<UrlInfo, reqwest
     let final_url = resp.url();
 
     let resp_headers = resp.headers();
-    let file_size = get_file_size(resp_headers, &status);
+    let size = get_file_size(resp_headers, &status);
     let supports_range = status == StatusCode::PARTIAL_CONTENT;
     Ok(UrlInfo {
         final_url: final_url.clone(),
-        file_name: get_filename(resp_headers, final_url),
-        file_size,
+        name: Some(get_filename(resp_headers, final_url)),
+        size,
         supports_range,
-        can_fast_download: file_size > 0 && supports_range,
+        fast_download: size > 0 && supports_range,
         etag: get_header_str(resp_headers, &header::ETAG),
         last_modified: get_header_str(resp_headers, &header::LAST_MODIFIED),
     })
@@ -165,8 +165,8 @@ mod tests {
             .await
             .expect("Request should succeed");
 
-        assert_eq!(url_info.file_size, 2048);
-        assert_eq!(url_info.file_name, "real-file.txt");
+        assert_eq!(url_info.size, 2048);
+        assert_eq!(url_info.name.as_deref(), Some("real-file.txt"));
         assert_eq!(
             url_info.final_url.as_str(),
             format!("{}/real-file.txt", server.url())
@@ -193,7 +193,7 @@ mod tests {
             .await
             .expect("Request should succeed");
 
-        assert_eq!(url_info.file_size, 2048);
+        assert_eq!(url_info.size, 2048);
         mock.assert_async().await;
     }
 
@@ -211,7 +211,7 @@ mod tests {
             .prefetch(&format!("{}/test1", server.url()))
             .await
             .unwrap();
-        assert_eq!(url_info.file_name, "test.txt");
+        assert_eq!(url_info.name.as_deref(), Some("test.txt"));
         mock1.assert_async().await;
 
         // Test URL path source
@@ -220,7 +220,7 @@ mod tests {
             .prefetch(&format!("{}/test2/file.pdf", server.url()))
             .await
             .unwrap();
-        assert_eq!(url_info.file_name, "file.pdf");
+        assert_eq!(url_info.name.as_deref(), Some("file.pdf"));
         mock2.assert_async().await;
 
         // Test sanitization
@@ -236,7 +236,7 @@ mod tests {
             .prefetch(&format!("{}/test3", server.url()))
             .await
             .unwrap();
-        assert_eq!(url_info.file_name, "悪い__ファイル_名.txt");
+        assert_eq!(url_info.name.as_deref(), Some("悪い__ファイル_名.txt"));
         mock3.assert_async().await;
     }
 

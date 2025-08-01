@@ -1715,6 +1715,7 @@ dependencies = [
  "bytes",
  "content_disposition",
  "fast-steal",
+ "http",
  "memmap2",
  "mockito",
  "reqwest",
@@ -1722,6 +1723,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.12",
  "tokio",
+ "url",
  "urlencoding",
 ]
 

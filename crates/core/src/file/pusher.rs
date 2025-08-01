@@ -1,6 +1,7 @@
-use super::{RandWriter, SeqWriter};
 use crate::ProgressEntry;
+use crate::base::pusher::Pusher;
 use bytes::Bytes;
+use std::io;
 use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufWriter},
@@ -19,13 +20,15 @@ impl SeqFileWriter {
     }
 }
 
-impl SeqWriter for SeqFileWriter {
-    async fn write_sequentially(&mut self, bytes: &Bytes) -> Result<(), std::io::Error> {
-        self.buffer.write_all(bytes).await?;
+impl Pusher for SeqFileWriter {
+    type Error = io::Error;
+
+    async fn push(&mut self, bytes: Bytes) -> Result<(), io::Error> {
+        self.buffer.write_all(&bytes).await?;
         Ok(())
     }
 
-    async fn flush(&mut self) -> Result<(), std::io::Error> {
+    async fn flush(&mut self) -> Result<(), io::Error> {
         self.buffer.flush().await?;
         Ok(())
     }
@@ -33,6 +36,7 @@ impl SeqWriter for SeqFileWriter {
 
 pub mod rand_file_writer_mmap {
     use super::*;
+    use crate::base::pusher::RandomPusher;
     use memmap2::MmapMut;
 
     #[derive(Debug)]
@@ -57,13 +61,27 @@ pub mod rand_file_writer_mmap {
         }
     }
 
-    impl RandWriter for RandFileWriter {
-        async fn write_randomly(
+    impl Pusher for RandFileWriter {
+        type Error = io::Error;
+
+        async fn push(&mut self, bytes: Bytes) -> Result<(), io::Error> {
+            self.mmap.copy_from_slice(&bytes);
+            Ok(())
+        }
+
+        async fn flush(&mut self) -> Result<(), io::Error> {
+            self.mmap.flush_async()?;
+            Ok(())
+        }
+    }
+
+    impl RandomPusher for RandFileWriter {
+        async fn push_range(
             &mut self,
             range: ProgressEntry,
-            bytes: &Bytes,
-        ) -> Result<(), std::io::Error> {
-            self.mmap[range.start as usize..range.end as usize].copy_from_slice(bytes);
+            bytes: Bytes,
+        ) -> Result<(), io::Error> {
+            self.mmap[range.start as usize..range.end as usize].copy_from_slice(&bytes);
             self.downloaded += bytes.len();
             if self.downloaded >= self.write_buffer_size {
                 self.mmap.flush()?;
@@ -71,16 +89,12 @@ pub mod rand_file_writer_mmap {
             }
             Ok(())
         }
-
-        async fn flush(&mut self) -> Result<(), std::io::Error> {
-            self.mmap.flush_async()?;
-            Ok(())
-        }
     }
 }
 
 pub mod rand_file_writer_std {
     use super::*;
+    use crate::base::pusher::RandomPusher;
     use tokio::io::AsyncSeekExt;
 
     #[derive(Debug)]
@@ -97,7 +111,7 @@ pub mod rand_file_writer_std {
             file: File,
             size: u64,
             write_buffer_size: usize,
-        ) -> Result<Self, std::io::Error> {
+        ) -> Result<Self, io::Error> {
             file.set_len(size).await?;
             Ok(Self {
                 buffer: BufWriter::with_capacity(write_buffer_size, file),
@@ -109,27 +123,19 @@ pub mod rand_file_writer_std {
         }
     }
 
-    impl RandWriter for RandFileWriter {
-        async fn write_randomly(
-            &mut self,
-            range: ProgressEntry,
-            bytes: &Bytes,
-        ) -> Result<(), std::io::Error> {
-            let pos = self.cache.partition_point(|(i, _)| i < &range.start);
-            self.cache_size += bytes.len();
-            self.cache.insert(pos, (range.start, bytes.clone()));
-            if self.cache_size >= self.write_buffer_size {
-                self.flush().await?;
-            }
-            Ok(())
+    impl Pusher for RandFileWriter {
+        type Error = io::Error;
+
+        async fn push(&mut self, content: Bytes) -> Result<(), Self::Error> {
+            self.buffer.write(&content).await.map(|_| ())
         }
 
-        async fn flush(&mut self) -> Result<(), std::io::Error> {
+        async fn flush(&mut self) -> Result<(), io::Error> {
             for (start, bytes) in self.cache.drain(..) {
                 let len = bytes.len();
                 self.cache_size -= len;
                 if start != self.p {
-                    self.buffer.seek(std::io::SeekFrom::Start(start)).await?;
+                    self.buffer.seek(io::SeekFrom::Start(start)).await?;
                     self.p = start;
                 }
                 self.buffer.write_all(&bytes).await?;
@@ -139,19 +145,34 @@ pub mod rand_file_writer_std {
             Ok(())
         }
     }
+
+    impl RandomPusher for RandFileWriter {
+        async fn push_range(
+            &mut self,
+            range: ProgressEntry,
+            bytes: Bytes,
+        ) -> Result<(), io::Error> {
+            let pos = self.cache.partition_point(|(i, _)| i < &range.start);
+            self.cache_size += bytes.len();
+            self.cache.insert(pos, (range.start, bytes.clone()));
+            if self.cache_size >= self.write_buffer_size {
+                self.flush().await?;
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
-#[cfg(feature = "file")]
 mod tests {
     use super::*;
-    use crate::{RandWriter, SeqWriter};
+    use crate::{Pusher, RandomPusher};
     use bytes::Bytes;
     use tempfile::NamedTempFile;
     use tokio::io::AsyncReadExt;
 
     #[tokio::test]
-    async fn test_seq_file_writer() -> Result<(), std::io::Error> {
+    async fn test_seq_file_writer() -> Result<(), io::Error> {
         // 创建一个临时文件用于测试
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path().to_path_buf();
@@ -162,8 +183,8 @@ mod tests {
         // 写入数据
         let data1 = Bytes::from("Hello, ");
         let data2 = Bytes::from("world!");
-        writer.write_sequentially(&data1).await?;
-        writer.write_sequentially(&data2).await?;
+        writer.push(data1).await?;
+        writer.push(data2).await?;
         writer.flush().await?;
 
         // 验证文件内容
@@ -194,7 +215,7 @@ mod tests {
         // 写入数据
         let data = Bytes::from("234");
         let range = 2..5;
-        writer.write_randomly(range, &data).await?;
+        writer.push_range(range, data).await?;
         writer.flush().await?;
 
         // 验证文件内容

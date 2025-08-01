@@ -5,10 +5,7 @@ use crate::{
     progress::{self, Painter as ProgressPainter},
 };
 use color_eyre::eyre::{Result, eyre};
-use fast_down::{
-    Event, MergeProgress, Prefetch, ProgressEntry, Total,
-    file::{DownloadFile, DownloadOptions},
-};
+use fast_down::{Event, MergeProgress, ProgressEntry, Total};
 use reqwest::{
     Client, Proxy,
     header::{self, HeaderValue},
@@ -97,7 +94,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     let db = Database::new().await?;
 
     let info = loop {
-        match client.prefetch(&args.url).await {
+        match fast_down::reqwest::get_url_info(&args.url, &client).await {
             Ok(info) => break info,
             Err(err) => println!("{}: {}", t!("err.url-info"), err),
         }
@@ -231,20 +228,20 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
         }
     }
 
-    let result = client
-        .download(
-            info.final_url.clone(),
-            &save_path,
-            DownloadOptions {
-                download_chunks,
-                concurrent,
-                file_size: info.file_size,
-                retry_gap: args.retry_gap,
-                write_buffer_size: args.write_buffer_size,
-                write_channel_size: args.write_channel_size,
-            },
-        )
-        .await?;
+    let result = fast_down::pusher::download(
+        client,
+        info.final_url.clone(),
+        download_chunks,
+        &save_path,
+        DownloadOptions {
+            concurrent,
+            file_size: info.file_size,
+            retry_gap: args.retry_gap,
+            write_buffer_size: args.write_buffer_size,
+            write_channel_size: args.write_channel_size,
+        },
+    )
+    .await?;
 
     let result_clone = result.clone();
     let rt_handle = Handle::current();
