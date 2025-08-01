@@ -24,10 +24,11 @@ ctrlc = { workspace = true }
 url = { workspace = true }
 config = { workspace = true }
 mimalloc = { workspace = true }
-tokio-rusqlite = { workspace = true }
+rust-i18n = { workspace = true }
+sys-locale = { workspace = true }
+rkyv = { workspace = true }
+dashmap = { workspace = true }
 crossterm = "0.29.0"
-rust-i18n = "3.1.5"
-sys-locale = "0.3.2"
 
 [package.metadata.i18n]
 available-locales = ["en", "zh-TW", "zh-CN"]

@@ -18,7 +18,6 @@ reqwest = { version = "0.12.22", features = [
     "brotli",
     "zstd",
     "deflate",
-    "http2",
     "rustls-tls",
     "socks",
     "macos-system-configuration",
@@ -36,9 +35,12 @@ config = { version = "0.15.13", default-features = false, features = [
     "convert-case",
 ] }
 mimalloc = "0.1.47"
-tokio-rusqlite = { version = "0.6.0", features = ["bundled"] }
 tempfile = "3.20.0"
 async-channel = "2.5.0"
+rust-i18n = "3.1.5"
+sys-locale = "0.3.2"
+rkyv = "0.8.10"
+dashmap = "6.1.0"
 
 [profile.release]
 codegen-units = 1

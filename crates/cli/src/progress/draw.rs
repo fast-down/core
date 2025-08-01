@@ -1,12 +1,12 @@
 use crate::fmt;
 use crossterm::{
-    ExecutableCommand, QueueableCommand, cursor,
+    QueueableCommand, cursor,
     style::Print,
     terminal::{self, ClearType},
 };
 use fast_down::{MergeProgress, ProgressEntry, Total};
 use std::{
-    io::{self, Stderr, Stdout, Write},
+    io::{self, Stderr, Stdout},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -28,10 +28,10 @@ impl PainterHandle {
 #[derive(Debug)]
 pub struct Painter {
     pub progress: Vec<ProgressEntry>,
-    pub total: u64,
     pub width: u16,
-    pub start_time: Instant,
+    pub start: Instant,
     pub alpha: f64,
+    pub file_size: u64,
     pub prev_size: u64,
     pub curr_size: u64,
     pub avg_speed: f64,
@@ -45,20 +45,21 @@ pub struct Painter {
 impl Painter {
     pub fn new(
         init_progress: Vec<ProgressEntry>,
-        total: u64,
+        file_size: u64,
         progress_width: u16,
         alpha: f64,
         repaint_duration: Duration,
+        start: Instant,
     ) -> Self {
         debug_assert_ne!(progress_width, 0);
         let init_size = init_progress.total();
         Self {
             progress: init_progress,
-            total,
+            file_size,
             width: progress_width,
             alpha,
             repaint_duration,
-            start_time: Instant::now(),
+            start,
             prev_size: init_size,
             curr_size: init_size,
             avg_speed: 0.0,
@@ -73,11 +74,13 @@ impl Painter {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
         tokio::spawn(async move {
+            let painter = painter_arc.lock().await;
+            let duration = painter.repaint_duration;
+            drop(painter);
             loop {
                 let mut painter = painter_arc.lock().await;
                 painter.update().unwrap();
-                let should_stop = painter.total > 0 && painter.curr_size >= painter.total;
-                let duration = painter.repaint_duration;
+                let should_stop = painter.file_size > 0 && painter.curr_size >= painter.file_size;
                 drop(painter);
                 if should_stop || !running.load(Ordering::Relaxed) {
                     break;
@@ -105,18 +108,17 @@ impl Painter {
     }
 
     pub fn update(&mut self) -> io::Result<()> {
-        let repaint_elapsed = self.last_repaint_time.elapsed();
+        let repaint_elapsed = self.last_repaint_time.elapsed().as_millis();
         self.last_repaint_time = Instant::now();
-        let repaint_elapsed_ms = repaint_elapsed.as_millis();
         let curr_dsize = self.curr_size - self.prev_size;
-        let get_speed = if repaint_elapsed_ms > 0 {
-            (curr_dsize * 1000) as f64 / repaint_elapsed_ms as f64
+        self.prev_size = self.curr_size;
+        let curr_speed = if repaint_elapsed > 0 {
+            (curr_dsize * 1000) as f64 / repaint_elapsed as f64
         } else {
             0.0
         };
-        self.avg_speed = self.avg_speed * self.alpha + get_speed * (1.0 - self.alpha);
-        self.prev_size = self.curr_size;
-        let progress_str = if self.total == 0 {
+        self.avg_speed = self.avg_speed * self.alpha + curr_speed * (1.0 - self.alpha);
+        let progress_str = if self.file_size == 0 {
             format!(
                 "|{}| {:>6.2}% ({:>8}/Unknown)\n{}",
                 BLOCK_CHARS[0].to_string().repeat(self.width as usize),
@@ -124,15 +126,15 @@ impl Painter {
                 fmt::format_size(self.curr_size as f64),
                 t!(
                     "progress.desc",
-                    time_spent = fmt::format_time(self.start_time.elapsed().as_secs()),
+                    time_spent = fmt::format_time(self.start.elapsed().as_secs()),
                     time_left = "Unknown",
                     speed = fmt::format_size(self.avg_speed) : {:>8},
                 )
             )
         } else {
-            let get_percent = (self.curr_size as f64 / self.total as f64) * 100.0;
-            let get_remaining_time = (self.total - self.curr_size) as f64 / self.avg_speed;
-            let per_bytes = self.total as f64 / self.width as f64;
+            let get_percent = (self.curr_size as f64 / self.file_size as f64) * 100.0;
+            let get_remaining_time = (self.file_size - self.curr_size) as f64 / self.avg_speed;
+            let per_bytes = self.file_size as f64 / self.width as f64;
             let mut bar_values = vec![0u64; self.width as usize];
             let mut index = 0;
             for i in 0..self.width {
@@ -170,10 +172,10 @@ impl Painter {
                 bar_str,
                 get_percent,
                 fmt::format_size(self.curr_size as f64),
-                fmt::format_size(self.total as f64),
+                fmt::format_size(self.file_size as f64),
                 t!(
                     "progress.desc",
-                    time_spent = fmt::format_time(self.start_time.elapsed().as_secs()),
+                    time_spent = fmt::format_time(self.start.elapsed().as_secs()),
                     time_left = fmt::format_time(get_remaining_time as u64),
                     speed = fmt::format_size(self.avg_speed) : {:>8},
                 )
@@ -182,13 +184,12 @@ impl Painter {
         self.reset_pos()?;
         self.has_progress = true;
         self.stderr.queue(Print(progress_str))?;
-        self.stderr.flush()?;
         Ok(())
     }
 
     pub fn print(&mut self, msg: &str) -> io::Result<()> {
         self.reset_pos()?;
-        self.stdout.execute(Print(msg))?;
+        self.stdout.queue(Print(msg))?;
         self.has_progress = false;
         self.update()?;
         Ok(())

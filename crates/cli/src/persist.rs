@@ -1,158 +1,115 @@
-use crate::progress;
 use color_eyre::Result;
 use fast_down::ProgressEntry;
-use std::{env, path::Path, sync::Arc};
-use tokio_rusqlite::{Connection, ErrorCode, OptionalExtension};
+use rkyv::{Archive, Deserialize, Serialize, rancor::Error};
+use std::{env, path::PathBuf, sync::Arc};
+use tokio::{fs, sync::Mutex};
 
-#[derive(Debug, Clone)]
+#[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct DatabaseEntry {
-    pub total_size: u64,
+    pub file_path: String,
+    pub file_name: String,
+    pub file_size: u64,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub progress: Vec<ProgressEntry>,
-    #[allow(dead_code)]
-    pub file_name: String,
-    #[allow(dead_code)]
     pub elapsed: u64,
-    #[allow(dead_code)]
     pub url: String,
 }
 
-#[derive(Debug)]
+#[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DatabaseInner(Vec<DatabaseEntry>);
+
+#[derive(Debug, Clone)]
 pub struct Database {
-    conn: Connection,
+    inner: Arc<Mutex<DatabaseInner>>,
+    db_path: Arc<PathBuf>,
 }
 
 impl Database {
     pub async fn new() -> Result<Self> {
-        let self_path = env::current_exe()?;
-        let db_path = self_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("state.db");
-        let conn = match Connection::open(&db_path).await {
-            Ok(conn) => conn,
-            Err(e) => match e {
-                tokio_rusqlite::Error::Rusqlite(e) => {
-                    if e.sqlite_error_code() != Some(ErrorCode::CannotOpen) {
-                        Err(e)?;
-                    }
-                    println!(
-                        "无法打开 {}, 尝试在当前工作目录创建数据库",
-                        db_path.display()
-                    );
-                    Connection::open("./fast-down.db").await?
-                }
-                _ => return Err(e.into()),
-            },
-        };
-        conn.call(|conn| {
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS write_progress (
-                id INTEGER PRIMARY KEY,
-                file_path TEXT NOT NULL UNIQUE,
-                total_size INTEGER NOT NULL,
-                etag TEXT,
-                last_modified TEXT,
-                progress TEXT NOT NULL,
-                file_name TEXT NOT NULL,
-                elapsed INTEGER NOT NULL,
-                url TEXT NOT NULL
-            )",
-                (),
-            )?;
-            Ok(())
+        let db_path = env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|p| p.to_owned()))
+            .unwrap_or(PathBuf::from("."))
+            .join("state.fd");
+        if db_path.try_exists()? {
+            let bytes = fs::read(&db_path).await?;
+            let archived = rkyv::access::<ArchivedDatabaseInner, Error>(&bytes)?;
+            let deserialized = rkyv::deserialize::<_, Error>(archived)?;
+            return Ok(Self {
+                inner: Arc::new(Mutex::new(deserialized)),
+                db_path: Arc::new(db_path),
+            });
+        }
+        Ok(Self {
+            inner: Arc::new(Mutex::new(DatabaseInner(Vec::new()))),
+            db_path: Arc::new(db_path),
         })
-        .await?;
-        Ok(Self { conn })
     }
 
     pub async fn init_entry(
         &self,
-        file_path: Arc<String>,
-        total_size: u64,
+        file_path: String,
+        file_name: String,
+        file_size: u64,
         etag: Option<String>,
         last_modified: Option<String>,
-        file_name: String,
         url: String,
-    ) -> Result<usize, tokio_rusqlite::Error> {
-        self.conn
-            .call(move |conn| {
-                conn.execute(
-                    "INSERT OR REPLACE INTO write_progress
-            (file_path, total_size, etag, last_modified, progress, file_name, elapsed, url)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    (
-                        file_path,
-                        total_size,
-                        etag,
-                        last_modified,
-                        "",
-                        file_name,
-                        0,
-                        url,
-                    ),
-                )
-                .map_err(Into::into)
-            })
-            .await
+    ) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        inner.0.retain_mut(|e| e.file_path != file_path);
+        inner.0.push(DatabaseEntry {
+            file_path,
+            file_name,
+            file_size,
+            etag,
+            last_modified,
+            url,
+            progress: vec![],
+            elapsed: 0,
+        });
+        self.flush(inner.clone()).await
     }
 
-    pub async fn get_entry(
-        &self,
-        file_path: Arc<String>,
-    ) -> Result<Option<DatabaseEntry>, tokio_rusqlite::Error> {
-        self.conn
-            .call(|conn| {
-                conn.query_row(
-                    "SELECT total_size, etag, last_modified, progress, file_name, elapsed, url
-            FROM write_progress WHERE file_path = ?1",
-                    [file_path],
-                    |row| {
-                        let progress: String = row.get(3)?;
-                        Ok(DatabaseEntry {
-                            total_size: row.get(0)?,
-                            etag: row.get(1)?,
-                            last_modified: row.get(2)?,
-                            progress: progress::from_str(&progress),
-                            file_name: row.get(4)?,
-                            elapsed: row.get(5)?,
-                            url: row.get(6)?,
-                        })
-                    },
-                )
-                .optional()
-                .map_err(Into::into)
-            })
+    pub async fn get_entry(&self, file_path: &str) -> Option<DatabaseEntry> {
+        self.inner
+            .lock()
             .await
+            .0
+            .iter()
+            .find(|entry| entry.file_path == file_path)
+            .cloned()
     }
 
     pub async fn update_entry(
         &self,
-        file_path: Arc<String>,
+        file_path: &str,
         progress: Vec<ProgressEntry>,
         elapsed: u64,
-    ) -> Result<usize, tokio_rusqlite::Error> {
-        self.conn
-            .call(move |conn| {
-                conn.execute(
-                    "UPDATE write_progress SET progress = ?1, elapsed = ?2 WHERE file_path = ?3",
-                    (progress::to_string(&progress), elapsed, file_path),
-                )
-                .map_err(Into::into)
-            })
-            .await
+    ) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        let pos = inner
+            .0
+            .iter()
+            .position(|entry| entry.file_path == file_path)
+            .unwrap();
+        inner.0[pos].progress = progress;
+        inner.0[pos].elapsed = elapsed;
+        self.flush(inner.clone()).await
     }
 
-    pub async fn clean(&self) -> Result<usize, tokio_rusqlite::Error> {
-        self.conn
-            .call(|conn| {
-                conn.execute(
-                    "DELETE FROM write_progress WHERE progress = '0-' || (total_size - 1)",
-                    [],
-                )
-                .map_err(Into::into)
-            })
-            .await
+    pub async fn clean_finished(&self) -> Result<usize> {
+        let mut inner = self.inner.lock().await;
+        let origin_len = inner.0.len();
+        #[allow(clippy::single_range_in_vec_init)]
+        inner.0.retain_mut(|e| e.progress != [0..e.file_size]);
+        self.flush(inner.clone()).await?;
+        Ok(origin_len - inner.0.len())
+    }
+
+    async fn flush(&self, data: DatabaseInner) -> Result<()> {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data)?;
+        fs::write(&*self.db_path, bytes).await?;
+        Ok(())
     }
 }

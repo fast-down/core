@@ -90,7 +90,7 @@ impl DownloadMulti for Client {
                     let mut start = task.start();
                     if start >= task.end() {
                         let guard = mutex.lock().await;
-                        if task.steal(&tasks, 2) {
+                        if task.steal(&tasks, 16 * 1024) {
                             continue;
                         }
                         drop(guard);

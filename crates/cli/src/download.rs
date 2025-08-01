@@ -5,13 +5,21 @@ use crate::{
     progress::{self, Painter as ProgressPainter},
 };
 use color_eyre::eyre::{Result, eyre};
-use fast_down::{Event, MergeProgress, ProgressEntry, Total, file::DownloadOptions};
+use fast_down::{
+    Event, MergeProgress, Prefetch, ProgressEntry, Total,
+    file::{DownloadFile, DownloadOptions},
+};
 use reqwest::{
     Client, Proxy,
     header::{self, HeaderValue},
 };
-use std::num::NonZeroUsize;
-use std::{env, path::Path, sync::Arc, time::Instant};
+use std::{
+    env,
+    num::NonZeroUsize,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Handle,
@@ -81,7 +89,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     if args.verbose {
         dbg!(&args);
     }
-    let mut client = Client::builder().default_headers(args.headers);
+    let mut client = Client::builder().default_headers(args.headers).http1_only();
     if let Some(ref proxy) = args.proxy {
         client = client.proxy(Proxy::all(proxy)?);
     }
@@ -89,7 +97,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     let db = Database::new().await?;
 
     let info = loop {
-        match fast_down::get_url_info(&args.url, &client).await {
+        match client.prefetch(&args.url).await {
             Ok(info) => break info,
             Err(err) => println!("{}: {}", t!("err.url-info"), err),
         }
@@ -108,7 +116,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
         save_path = current_dir.join(save_path);
     }
     save_path = path_clean::clean(save_path);
-    let save_path_str = Arc::new(save_path.to_str().unwrap().to_string());
+    let save_path_str = save_path.to_str().unwrap();
 
     println!(
         // "文件名: {}\n文件大小: {} ({} 字节) \n文件路径: {}\n线程数量: {}\nETag: {:?}\nLast-Modified: {:?}\n",
@@ -120,8 +128,8 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
             size_in_bytes = info.file_size,
             path = save_path.to_str().unwrap(),
             concurrent = concurrent.unwrap_or(NonZeroUsize::new(1).unwrap()),
-            etag = info.etag.as_deref() : {:?},
-            last_modified = info.last_modified.as_deref() : {:?}
+            etag = info.etag : {:?},
+            last_modified = info.last_modified : {:?}
         )
     );
 
@@ -130,17 +138,19 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
     let mut resume_download = false;
     let mut write_progress: Vec<ProgressEntry> =
         Vec::with_capacity(concurrent.map(NonZeroUsize::get).unwrap_or(1));
+    let mut elapsed = 0;
 
     if save_path.try_exists()? {
         if args.resume
             && info.can_fast_download
-            && let Ok(Some(entry)) = db.get_entry(save_path_str.clone()).await
+            && let Some(entry) = db.get_entry(save_path_str).await
         {
             let downloaded = entry.progress.total();
             if downloaded < info.file_size {
                 download_chunks = progress::invert(&entry.progress, info.file_size);
                 write_progress = entry.progress.clone();
                 resume_download = true;
+                elapsed = entry.elapsed;
                 println!("{}", t!("msg.resume-download"));
                 println!(
                     "{}",
@@ -151,13 +161,12 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
                         percentage = downloaded * 100 / info.file_size
                     ),
                 );
-                if !args.yes
-                    && entry.total_size != info.file_size
+                if entry.file_size != info.file_size
                     && !confirm(
                         predicate!(args),
                         &t!(
                             "msg.size-mismatch",
-                            saved_size = entry.total_size,
+                            saved_size = entry.file_size,
                             new_size = info.file_size
                         ),
                         false,
@@ -169,9 +178,10 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
                 if entry.etag != info.etag {
                     if !confirm(
                         predicate!(args),
-                        &format!(
-                            "原文件 ETag: {:?}\n现文件 ETag: {:?}\n文件 ETag 不一致，是否继续？",
-                            entry.etag, info.etag
+                        &t!(
+                            "msg.etag-mismatch",
+                            saved_etag = entry.etag : {:?},
+                            new_etag = info.etag : {:?}
                         ),
                         false,
                     )
@@ -179,7 +189,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
                     {
                         return cancel_expected();
                     }
-                } else if let Some(progress_etag) = entry.etag.as_ref()
+                } else if let Some(ref progress_etag) = entry.etag
                     && progress_etag.starts_with("W/")
                 {
                     if !confirm(
@@ -191,16 +201,18 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
                     {
                         return cancel_expected();
                     }
-                } else if !confirm(predicate!(args), &t!("msg.no-etag"), false).await? {
+                } else if entry.etag.is_none()
+                    && !confirm(predicate!(args), &t!("msg.no-etag"), false).await?
+                {
                     return cancel_expected();
                 }
                 if entry.last_modified != info.last_modified
                     && !confirm(
                         predicate!(args),
                         &t!(
-                          "msg.last-modified-mismatch",
-                          saved_last_modified = entry.last_modified : {:?},
-                          new_last_modified = info.last_modified : {:?}
+                            "msg.last-modified-mismatch",
+                            saved_last_modified = entry.last_modified : {:?},
+                            new_last_modified = info.last_modified : {:?}
                         ),
                         false,
                     )
@@ -219,20 +231,20 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
         }
     }
 
-    let result = fast_down::file::download(
-        client,
-        info.final_url.clone(),
-        download_chunks,
-        &save_path,
-        DownloadOptions {
-            concurrent,
-            file_size: info.file_size,
-            retry_gap: args.retry_gap,
-            write_buffer_size: args.write_buffer_size,
-            write_channel_size: args.write_channel_size,
-        },
-    )
-    .await?;
+    let result = client
+        .download(
+            info.final_url.clone(),
+            &save_path,
+            DownloadOptions {
+                download_chunks,
+                concurrent,
+                file_size: info.file_size,
+                retry_gap: args.retry_gap,
+                write_buffer_size: args.write_buffer_size,
+                write_channel_size: args.write_channel_size,
+            },
+        )
+        .await?;
 
     let result_clone = result.clone();
     let rt_handle = Handle::current();
@@ -247,34 +259,35 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
 
     if !resume_download {
         db.init_entry(
-            save_path_str.clone(),
+            save_path_str.to_string(),
+            info.file_name,
             info.file_size,
             info.etag,
             info.last_modified,
-            info.file_name,
             info.final_url.to_string(),
         )
         .await?;
     }
 
+    let start = Instant::now() - Duration::from_millis(elapsed);
     let painter = Arc::new(Mutex::new(ProgressPainter::new(
         write_progress.clone(),
         info.file_size,
         args.progress_width,
         0.9,
         args.repaint_gap,
+        start,
     )));
     let painter_handle = ProgressPainter::start_update_thread(painter.clone());
-    let start = Instant::now();
     while let Ok(e) = result.event_chain.recv().await {
         match e {
-            Event::DownloadProgress(p) => painter.lock().await.add(p),
-            Event::WriteProgress(p) => {
+            Event::DownloadProgress(_, p) => painter.lock().await.add(p),
+            Event::WriteProgress(_, p) => {
                 write_progress.merge_progress(p);
-                if last_db_update.elapsed().as_secs() >= 1 {
+                if last_db_update.elapsed().as_millis() >= 500 {
                     last_db_update = Instant::now();
                     db.update_entry(
-                        save_path_str.clone(),
+                        save_path_str,
                         write_progress.clone(),
                         start.elapsed().as_millis() as u64,
                     )
@@ -293,7 +306,7 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
                 t!("verbose.download-error"),
                 err
             ))?,
-            Event::WriteError(err) => painter.lock().await.print(&format!(
+            Event::WriteError(_, err) => painter.lock().await.print(&format!(
                 "{}\n{:?}\n",
                 t!("verbose.write-error"),
                 err
@@ -335,13 +348,13 @@ pub async fn download(mut args: DownloadArgs) -> Result<()> {
         }
     }
     db.update_entry(
-        save_path_str.clone(),
+        save_path_str,
         write_progress.clone(),
         start.elapsed().as_millis() as u64,
     )
     .await?;
+    result.join().await?;
     painter.lock().await.update()?;
     painter_handle.cancel();
-    result.join().await?;
     Ok(())
 }

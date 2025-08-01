@@ -30,6 +30,8 @@ enum Commands {
     Clean,
     /// 更新 fast-down
     Update,
+    /// 显示数据库
+    List,
 }
 
 #[derive(clap::Args, Debug)]
@@ -128,10 +130,12 @@ struct DownloadCli {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Args {
-    Download(Box<DownloadArgs>),
+    Download(DownloadArgs),
     Update,
     Clean,
+    List,
 }
 
 #[derive(Debug, Clone)]
@@ -177,10 +181,10 @@ impl Args {
                         proxy: None,
                         headers: HeaderMap::new(),
                         write_buffer_size: 8 * 1024 * 1024,
-                        write_channel_size: 1024,
+                        write_channel_size: 10240,
                         progress_width: terminal::size()
                             .ok()
-                            .and_then(|s| s.0.checked_sub(40))
+                            .and_then(|s| s.0.checked_sub(36))
                             .unwrap_or(50),
                         retry_gap: Duration::from_millis(500),
                         repaint_gap: Duration::from_millis(100),
@@ -328,10 +332,11 @@ impl Args {
                         args.headers
                             .insert(HeaderName::from_str(parts[0])?, parts[1].parse()?);
                     }
-                    Ok(Args::Download(Box::new(args)))
+                    Ok(Args::Download(args))
                 }
                 Commands::Update => Ok(Args::Update),
                 Commands::Clean => Ok(Args::Clean),
+                Commands::List => Ok(Args::List),
             },
             Err(err) => err.exit(),
         }

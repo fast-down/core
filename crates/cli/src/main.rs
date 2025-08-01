@@ -2,6 +2,7 @@ mod args;
 mod clean;
 mod download;
 mod fmt;
+mod list;
 mod persist;
 mod progress;
 mod update;
@@ -34,8 +35,9 @@ async fn main() -> Result<()> {
     eprintln!("fast-down v{VERSION}");
     let args = Args::parse()?;
     match args {
-        Args::Download(download_args) => download::download(*download_args).await,
+        Args::Download(download_args) => download::download(download_args).await,
         Args::Update => update::update().await,
         Args::Clean => clean::clean().await,
+        Args::List => list::list().await,
     }
 }
