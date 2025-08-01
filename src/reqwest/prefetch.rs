@@ -1,11 +1,11 @@
+use crate::common::UrlInfo;
 use crate::reqwest::ClientFetcher;
 use content_disposition;
 use reqwest::{
-    header::{self, HeaderMap}, Client, IntoUrl, StatusCode,
-    Url,
+    Client, IntoUrl, StatusCode, Url,
+    header::{self, HeaderMap},
 };
 use sanitize_filename;
-use crate::common::UrlInfo;
 
 fn get_file_size(headers: &HeaderMap, status: &StatusCode) -> u64 {
     if *status == StatusCode::PARTIAL_CONTENT {

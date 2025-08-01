@@ -1,10 +1,10 @@
 mod base;
+pub mod common;
 mod core;
 #[cfg(feature = "file")]
 pub mod file;
 #[cfg(feature = "reqwest")]
 pub mod reqwest;
-pub mod common;
 
 pub use base::event::*;
 pub use base::merge_progress::*;
