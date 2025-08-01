@@ -1,7 +1,5 @@
 use crate::Event;
-use crate::base::pusher::Pusher;
-use crate::base::source::{Fetcher, Puller};
-use async_channel::Receiver;
+use kanal::AsyncReceiver;
 use std::{
     fmt::Debug,
     sync::{
@@ -22,15 +20,14 @@ pub mod single;
 
 #[derive(Debug, Clone)]
 pub struct FetchResult<FetchError, PullError, PushError> {
-    pub event_chain: Receiver<Event<FetchError, PullError, PushError>>,
+    pub event_chain: AsyncReceiver<Event<FetchError, PullError, PushError>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     is_running: Arc<AtomicBool>,
 }
 
-impl<FetchError, PullError, PushError> FetchResult<FetchError, PullError, PushError>
-{
+impl<FetchError, PullError, PushError> FetchResult<FetchError, PullError, PushError> {
     pub fn new(
-        event_chain: Receiver<Event<FetchError, PullError, PushError>>,
+        event_chain: AsyncReceiver<Event<FetchError, PullError, PushError>>,
         handle: JoinHandle<()>,
         is_running: Arc<AtomicBool>,
     ) -> Self {

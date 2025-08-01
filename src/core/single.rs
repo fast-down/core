@@ -25,9 +25,9 @@ where
     F: Fetcher + Send + 'static,
     P: Pusher + Send + 'static,
 {
-    let (tx, event_chain) = async_channel::unbounded();
+    let (tx, event_chain) = kanal::unbounded_async();
     let (tx_write, rx_write) =
-        async_channel::bounded::<(ProgressEntry, Bytes)>(options.push_queue_cap);
+        kanal::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     const ID: usize = 0;
     let handle = tokio::spawn(async move {

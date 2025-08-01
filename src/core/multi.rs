@@ -30,9 +30,9 @@ where
     F: Fetcher + Send + 'static,
     P: RandomPusher + Send + 'static,
 {
-    let (tx, event_chain) = async_channel::unbounded();
+    let (tx, event_chain) = kanal::unbounded_async();
     let (tx_write, rx_write) =
-        async_channel::bounded::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
+        kanal::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     let handle = tokio::spawn(async move {
         while let Ok((id, spin, data)) = rx_write.recv().await {

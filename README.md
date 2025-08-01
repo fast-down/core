@@ -8,10 +8,6 @@
 
 `fast-down` **Fastest** concurrent downloader!
 
-Languages: **en** [中文简体](./README_zhCN.md)
-
-![CLI Interface](/docs/cli_en.png)
-
 **[Official Website (Simplified Chinese)](https://fast.s121.top/)**
 
 ## Features

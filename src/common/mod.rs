@@ -1,11 +1,11 @@
 #[cfg(feature = "common.url")]
 mod url;
 
+use crate::{FetchResult, Fetcher, ProgressEntry, Puller, RandomPusher};
 use std::num::NonZeroUsize;
 use std::time::Duration;
 #[cfg(feature = "common.url")]
 pub use url::UrlInfo;
-use crate::{FetchResult, Fetcher, ProgressEntry, Puller, RandomPusher};
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct DownloadOptions {
@@ -15,13 +15,15 @@ pub struct DownloadOptions {
 }
 
 pub trait AutoDownload {
-    async fn download<F, P>(
+    fn download<F, P>(
         &self,
         fetcher: F,
         pusher: P,
         maybe_chunks: Option<Vec<ProgressEntry>>,
         options: DownloadOptions,
-    ) -> FetchResult<F::Error, <F::Puller as Puller>::Error, P::Error>
+    ) -> impl std::future::Future<
+        Output = FetchResult<F::Error, <F::Puller as Puller>::Error, P::Error>,
+    > + Send
     where
         F: Fetcher + Send + 'static,
         P: RandomPusher + Send + 'static;
