@@ -18,7 +18,7 @@ impl RandReader for MockRandReader {
     type Error = ();
     fn read(
         &mut self,
-        range: &crate::ProgressEntry,
+        range: &ProgressEntry,
     ) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
         let data = &self.0[range.start as usize..range.end as usize];
         stream::iter(data.iter().map(|e| Ok(Bytes::from_iter([*e]))))

@@ -142,7 +142,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rand_file_writer() -> Result<(), std::io::Error> {
+    async fn test_rand_file_writer() -> Result<(), io::Error> {
         // 创建一个临时文件用于测试
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path().to_path_buf();
