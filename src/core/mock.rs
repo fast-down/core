@@ -1,57 +1,90 @@
-use crate::WorkerId;
-use crate::base::pusher::{Pusher, RandomPusher};
-use crate::base::source::{Fetcher, Puller};
+use crate::{ProgressEntry, RandReader, RandWriter, SeqReader, SeqWriter};
 use bytes::Bytes;
-use std::ops::Range;
+use futures::{TryStream, lock::Mutex, stream};
 use std::sync::Arc;
 
-pub(crate) fn build_mock_data(size: usize) -> Vec<u8> {
+pub fn build_mock_data(size: usize) -> Vec<u8> {
     (0..size).map(|i| (i % 256) as u8).collect()
 }
 
-pub(crate) struct MockFetcher(pub(crate) Vec<u8>);
-pub(crate) struct MockPuller(pub(crate) Option<Bytes>);
-pub(crate) struct MockPusher(pub(crate) Arc<std::sync::Mutex<Vec<u8>>>);
-impl Puller for MockPuller {
-    type Error = ();
-
-    async fn pull(&mut self) -> Result<Option<Bytes>, Self::Error> {
-        Ok(self.0.take())
+#[derive(Clone)]
+pub struct MockRandReader(pub Arc<Vec<u8>>);
+impl MockRandReader {
+    pub fn new(data: Vec<u8>) -> Self {
+        Self(Arc::new(data))
     }
 }
-impl Fetcher for MockFetcher {
+impl RandReader for MockRandReader {
     type Error = ();
-    type Puller = MockPuller;
-
-    async fn fetch(
-        &self,
-        _id: WorkerId,
-        range: Option<&Range<u64>>,
-    ) -> Result<Self::Puller, Self::Error> {
-        Ok(match range {
-            Some(range) => match self.0.get((range.start as usize)..(range.end as usize)) {
-                None => MockPuller(None),
-                Some(bytes) => MockPuller(Some(Bytes::copy_from_slice(bytes))),
-            },
-            None => MockPuller(Some(Bytes::copy_from_slice(&self.0))),
-        })
-    }
-
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
+    fn read(
+        &mut self,
+        range: &crate::ProgressEntry,
+    ) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
+        let data = &self.0[range.start as usize..range.end as usize];
+        stream::iter(data.iter().map(|e| Ok(Bytes::from_iter([*e]))))
     }
 }
-impl Pusher for MockPusher {
-    type Error = ();
 
-    async fn push(&mut self, content: Bytes) -> Result<(), Self::Error> {
-        self.0.lock().unwrap().extend_from_slice(&content);
+pub struct MockSeqReader(pub Vec<u8>);
+impl MockSeqReader {
+    pub fn new(data: Vec<u8>) -> Self {
+        Self(data)
+    }
+}
+impl SeqReader for MockSeqReader {
+    type Error = ();
+    fn read(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
+        stream::iter(self.0.iter().map(|e| Ok(Bytes::from_iter([*e]))))
+    }
+}
+
+#[derive(Clone)]
+pub struct MockRandWriter {
+    pub receive: Arc<Mutex<Vec<u8>>>,
+    pub result: Arc<Vec<u8>>,
+}
+impl MockRandWriter {
+    pub fn new(result: Vec<u8>) -> Self {
+        Self {
+            receive: Arc::new(Mutex::new(vec![0; result.len()])),
+            result: Arc::new(result),
+        }
+    }
+    pub async fn assert(&self) {
+        let receive = self.receive.lock().await;
+        assert_eq!(&receive[..], &self.result[..]);
+    }
+}
+impl RandWriter for MockRandWriter {
+    type Error = ();
+    async fn write(&mut self, range: ProgressEntry, content: Bytes) -> Result<(), Self::Error> {
+        self.receive.lock().await[range.start as usize..range.end as usize]
+            .copy_from_slice(&content);
         Ok(())
     }
 }
-impl RandomPusher for MockPusher {
-    async fn push_range(&mut self, range: Range<u64>, content: Bytes) -> Result<(), Self::Error> {
-        self.0.lock().unwrap()[range.start as usize..range.end as usize].copy_from_slice(&content);
+
+#[derive(Clone)]
+pub struct MockSeqWriter {
+    pub receive: Arc<Mutex<Vec<u8>>>,
+    pub result: Arc<Vec<u8>>,
+}
+impl MockSeqWriter {
+    pub fn new(result: Vec<u8>) -> Self {
+        Self {
+            result: Arc::new(result),
+            receive: Arc::new(Mutex::new(vec![])),
+        }
+    }
+    pub async fn assert(&self) {
+        let receive = self.receive.lock().await;
+        assert_eq!(&receive[..], &self.result[..]);
+    }
+}
+impl SeqWriter for MockSeqWriter {
+    type Error = ();
+    async fn write(&mut self, content: Bytes) -> Result<(), Self::Error> {
+        self.receive.lock().await.extend_from_slice(&content);
         Ok(())
     }
 }

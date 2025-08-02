@@ -1,5 +1,5 @@
-mod fetcher;
 mod prefetch;
+mod reader;
 
-pub use fetcher::*;
 pub use prefetch::*;
+pub use reader::*;

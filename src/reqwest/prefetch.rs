@@ -1,5 +1,4 @@
-use crate::common::UrlInfo;
-use crate::reqwest::ClientFetcher;
+use crate::{UrlInfo, reqwest::ReqwestReader};
 use content_disposition;
 use reqwest::{
     Client, IntoUrl, StatusCode, Url,
@@ -103,12 +102,12 @@ impl Prefetch for Client {
     }
 }
 
-impl Prefetch for ClientFetcher {
+impl Prefetch for ReqwestReader {
     fn prefetch(
         &self,
         url: impl IntoUrl + Send,
     ) -> impl Future<Output = Result<UrlInfo, reqwest::Error>> + Send {
-        Prefetch::prefetch(&self.client, url)
+        self.client.prefetch(url)
     }
 }
 

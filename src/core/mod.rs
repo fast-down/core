@@ -1,16 +1,12 @@
 use crate::Event;
-use kanal::AsyncReceiver;
-use std::{
+use core::{
     fmt::Debug,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::atomic::{AtomicBool, Ordering},
 };
-use tokio::{
-    sync::Mutex,
-    task::{JoinError, JoinHandle},
-};
+use futures::lock::Mutex;
+use kanal::AsyncReceiver;
+use std::sync::Arc;
+use tokio::task::{JoinError, JoinHandle};
 
 mod macros;
 #[cfg(test)]
@@ -19,15 +15,15 @@ pub mod multi;
 pub mod single;
 
 #[derive(Debug, Clone)]
-pub struct FetchResult<FetchError, PullError, PushError> {
-    pub event_chain: AsyncReceiver<Event<FetchError, PullError, PushError>>,
+pub struct DownloadResult<ReadError, WriteError> {
+    pub event_chain: AsyncReceiver<Event<ReadError, WriteError>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     is_running: Arc<AtomicBool>,
 }
 
-impl<FetchError, PullError, PushError> FetchResult<FetchError, PullError, PushError> {
+impl<ReadError, WriteError> DownloadResult<ReadError, WriteError> {
     pub fn new(
-        event_chain: AsyncReceiver<Event<FetchError, PullError, PushError>>,
+        event_chain: AsyncReceiver<Event<ReadError, WriteError>>,
         handle: JoinHandle<()>,
         is_running: Arc<AtomicBool>,
     ) -> Self {
