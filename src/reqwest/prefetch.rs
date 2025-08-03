@@ -94,7 +94,7 @@ impl Prefetch for Client {
 
         Ok(UrlInfo {
             final_url: final_url.clone(),
-            name: Some(get_filename(resp_headers, final_url)),
+            name: get_filename(resp_headers, final_url),
             size,
             supports_range,
             fast_download: size > 0 && supports_range,
@@ -128,7 +128,7 @@ async fn prefetch_fallback(url: Url, client: &Client) -> Result<UrlInfo, reqwest
     let supports_range = status == StatusCode::PARTIAL_CONTENT;
     Ok(UrlInfo {
         final_url: final_url.clone(),
-        name: Some(get_filename(resp_headers, final_url)),
+        name: get_filename(resp_headers, final_url),
         size,
         supports_range,
         fast_download: size > 0 && supports_range,
@@ -169,7 +169,7 @@ mod tests {
             .expect("Request should succeed");
 
         assert_eq!(url_info.size, 2048);
-        assert_eq!(url_info.name.as_deref(), Some("real-file.txt"));
+        assert_eq!(url_info.name, "real-file.txt");
         assert_eq!(
             url_info.final_url.as_str(),
             format!("{}/real-file.txt", server.url())
@@ -214,7 +214,7 @@ mod tests {
             .prefetch(&format!("{}/test1", server.url()))
             .await
             .unwrap();
-        assert_eq!(url_info.name.as_deref(), Some("test.txt"));
+        assert_eq!(url_info.name, "test.txt");
         mock1.assert_async().await;
 
         // Test URL path source
@@ -223,7 +223,7 @@ mod tests {
             .prefetch(&format!("{}/test2/file.pdf", server.url()))
             .await
             .unwrap();
-        assert_eq!(url_info.name.as_deref(), Some("file.pdf"));
+        assert_eq!(url_info.name, "file.pdf");
         mock2.assert_async().await;
 
         // Test sanitization
@@ -239,7 +239,7 @@ mod tests {
             .prefetch(&format!("{}/test3", server.url()))
             .await
             .unwrap();
-        assert_eq!(url_info.name.as_deref(), Some("悪い__ファイル_名.txt"));
+        assert_eq!(url_info.name, "悪い__ファイル_名.txt");
         mock3.assert_async().await;
     }
 
