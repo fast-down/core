@@ -59,14 +59,14 @@ impl Stream for ReqwestStream {
         match &mut self.resp {
             ResponseState::Pending(resp) => match resp.try_poll_unpin(cx) {
                 Poll::Ready(resp) => {
-                    match resp {
+                    return match resp {
                         Ok(resp) => {
                             self.resp = ResponseState::Ready(resp);
-                            return self.poll_next(cx);
+                            self.poll_next(cx)
                         }
                         Err(e) => {
                             self.resp = ResponseState::None;
-                            return Poll::Ready(Some(Err(e)));
+                            Poll::Ready(Some(Err(e)))
                         }
                     };
                 }
