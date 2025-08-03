@@ -1,16 +1,17 @@
+extern crate alloc;
 use crate::Event;
+use alloc::sync::Arc;
 use core::{
     fmt::Debug,
     sync::atomic::{AtomicBool, Ordering},
 };
 use futures::lock::Mutex;
 use kanal::AsyncReceiver;
-use std::sync::Arc;
 use tokio::task::{JoinError, JoinHandle};
 
 mod macros;
 #[cfg(test)]
-mod mock;
+pub mod mock;
 pub mod multi;
 pub mod single;
 

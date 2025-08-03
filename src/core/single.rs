@@ -1,9 +1,10 @@
+extern crate alloc;
 use super::macros::{check_running, poll_ok};
 use crate::{DownloadResult, Event, ProgressEntry, SeqReader, SeqWriter};
+use alloc::sync::Arc;
 use bytes::Bytes;
 use core::{sync::atomic::AtomicBool, time::Duration};
 use futures::TryStreamExt;
-use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
@@ -52,18 +53,16 @@ where
         loop {
             check_running!(ID, running, tx);
             match stream.try_next().await {
-                Ok(chunk) => match chunk {
-                    Some(chunk) => {
-                        let len = chunk.len() as u64;
-                        let span = downloaded..(downloaded + len);
-                        tx.send(Event::ReadProgress(ID, span.clone()))
-                            .await
-                            .unwrap();
-                        tx_write.send((span, chunk)).await.unwrap();
-                        downloaded += len;
-                    }
-                    None => break,
-                },
+                Ok(Some(chunk)) => {
+                    let len = chunk.len() as u64;
+                    let span = downloaded..(downloaded + len);
+                    tx.send(Event::ReadProgress(ID, span.clone()))
+                        .await
+                        .unwrap();
+                    tx_write.send((span, chunk)).await.unwrap();
+                    downloaded += len;
+                }
+                Ok(None) => break,
                 Err(e) => tx.send(Event::ReadError(ID, e)).await.unwrap(),
             }
         }
@@ -81,10 +80,10 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn test_sequential_pulling() {
+    async fn test_sequential_download() {
         let mock_data = build_mock_data(3 * 1024);
         let reader = MockSeqReader::new(mock_data.clone());
-        let writer = MockSeqWriter::new(mock_data.clone());
+        let writer = MockSeqWriter::new(&mock_data);
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_single(

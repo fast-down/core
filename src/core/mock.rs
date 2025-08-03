@@ -1,17 +1,18 @@
+extern crate alloc;
 use crate::{ProgressEntry, RandReader, RandWriter, SeqReader, SeqWriter};
+use alloc::sync::Arc;
 use bytes::Bytes;
 use futures::{TryStream, lock::Mutex, stream};
-use std::sync::Arc;
 
 pub fn build_mock_data(size: usize) -> Vec<u8> {
     (0..size).map(|i| (i % 256) as u8).collect()
 }
 
 #[derive(Clone)]
-pub struct MockRandReader(pub Arc<Vec<u8>>);
+pub struct MockRandReader(pub Arc<[u8]>);
 impl MockRandReader {
-    pub fn new(data: Vec<u8>) -> Self {
-        Self(Arc::new(data))
+    pub fn new(data: &[u8]) -> Self {
+        Self(Arc::from(data))
     }
 }
 impl RandReader for MockRandReader {
@@ -41,13 +42,13 @@ impl SeqReader for MockSeqReader {
 #[derive(Clone)]
 pub struct MockRandWriter {
     pub receive: Arc<Mutex<Vec<u8>>>,
-    pub result: Arc<Vec<u8>>,
+    pub result: Arc<[u8]>,
 }
 impl MockRandWriter {
-    pub fn new(result: Vec<u8>) -> Self {
+    pub fn new(result: &[u8]) -> Self {
         Self {
             receive: Arc::new(Mutex::new(vec![0; result.len()])),
-            result: Arc::new(result),
+            result: Arc::from(result),
         }
     }
     pub async fn assert(&self) {
@@ -67,12 +68,12 @@ impl RandWriter for MockRandWriter {
 #[derive(Clone)]
 pub struct MockSeqWriter {
     pub receive: Arc<Mutex<Vec<u8>>>,
-    pub result: Arc<Vec<u8>>,
+    pub result: Arc<[u8]>,
 }
 impl MockSeqWriter {
-    pub fn new(result: Vec<u8>) -> Self {
+    pub fn new(result: &[u8]) -> Self {
         Self {
-            result: Arc::new(result),
+            result: Arc::from(result),
             receive: Arc::new(Mutex::new(vec![])),
         }
     }

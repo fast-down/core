@@ -1,10 +1,11 @@
+extern crate alloc;
 use super::macros::{check_running, poll_ok};
 use crate::{DownloadResult, Event, ProgressEntry, RandReader, RandWriter, Total, WorkerId};
+use alloc::sync::Arc;
 use bytes::Bytes;
 use core::{num::NonZeroUsize, sync::atomic::AtomicBool, time::Duration};
 use fast_steal::{SplitTask, StealTask, Task, TaskList};
 use futures::{TryStreamExt, lock::Mutex};
-use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
@@ -45,12 +46,11 @@ where
         );
     });
     let mutex = Arc::new(Mutex::new(()));
-    let task_list = Arc::new(TaskList::from(options.download_chunks));
-    let tasks = Arc::new(
+    let task_list = Arc::new(TaskList::from(&options.download_chunks[..]));
+    let tasks = Arc::from_iter(
         Task::from(&*task_list)
             .split_task(options.concurrent.get() as u64)
-            .map(Arc::new)
-            .collect::<Vec<_>>(),
+            .map(Arc::new),
     );
     let running = Arc::new(AtomicBool::new(true));
     for (id, task) in tasks.iter().enumerate() {
@@ -84,30 +84,27 @@ where
                     loop {
                         check_running!(id, running, tx);
                         match stream.try_next().await {
-                            Ok(chunk) => match chunk {
-                                Some(mut chunk) => {
-                                    let len = chunk.len() as u64;
-                                    task.fetch_add_start(len);
-                                    start += len;
-                                    let range_start = range.start + downloaded;
-                                    downloaded += len;
-                                    let range_end = range.start + downloaded;
-                                    let span =
-                                        range_start..range_end.min(task_list.get(task.end()));
-                                    let len = span.total() as usize;
-                                    tx.send(Event::ReadProgress(id, span.clone()))
-                                        .await
-                                        .unwrap();
-                                    tx_write
-                                        .send((id, span, chunk.split_to(len)))
-                                        .await
-                                        .unwrap();
-                                    if start >= task.end() {
-                                        continue 'steal_task;
-                                    }
+                            Ok(Some(mut chunk)) => {
+                                let len = chunk.len() as u64;
+                                task.fetch_add_start(len);
+                                start += len;
+                                let range_start = range.start + downloaded;
+                                downloaded += len;
+                                let range_end = range.start + downloaded;
+                                let span = range_start..range_end.min(task_list.get(task.end()));
+                                let len = span.total() as usize;
+                                tx.send(Event::ReadProgress(id, span.clone()))
+                                    .await
+                                    .unwrap();
+                                tx_write
+                                    .send((id, span, chunk.split_to(len)))
+                                    .await
+                                    .unwrap();
+                                if start >= task.end() {
+                                    continue 'steal_task;
                                 }
-                                None => break,
-                            },
+                            }
+                            Ok(None) => break,
                             Err(e) => tx.send(Event::ReadError(id, e)).await.unwrap(),
                         }
                     }
@@ -127,10 +124,10 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn test_concurrent_pulling() {
+    async fn test_concurrent_download() {
         let mock_data = build_mock_data(3 * 1024);
-        let reader = MockRandReader::new(mock_data.clone());
-        let writer = MockRandWriter::new(mock_data.clone());
+        let reader = MockRandReader::new(&mock_data);
+        let writer = MockRandWriter::new(&mock_data);
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_multi(

@@ -1,6 +1,6 @@
 macro_rules! check_running {
     ($id:expr, $running:expr, $tx:expr) => {
-        if !$running.load(std::sync::atomic::Ordering::Relaxed) {
+        if !$running.load(core::sync::atomic::Ordering::Relaxed) {
             $tx.send($crate::Event::Abort($id)).await.unwrap();
             return;
         }

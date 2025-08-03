@@ -14,7 +14,7 @@ keywords = ["downloader", "parallel", "thread", "concurrency", "performance"]
 categories = ["network-programming", "concurrency"]
 
 [dependencies]
-tokio = { version = "1.47.0", features = [
+tokio = { version = "1.47.1", features = [
     "fs",
     "macros",
     "sync",
@@ -25,7 +25,7 @@ tokio = { version = "1.47.0", features = [
 kanal = "0.1.1"
 bytes = "1.10.1"
 futures = "0.3.31"
-fast-steal = "5.0.2"
+fast-steal = "5.1.0"
 memmap2 = { version = "0.9.7", optional = true }
 reqwest = { version = "0.12.22", features = [
     "gzip",
