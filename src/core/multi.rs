@@ -1,11 +1,12 @@
 extern crate alloc;
 use super::macros::{check_running, poll_ok};
 use crate::{DownloadResult, Event, ProgressEntry, RandReader, RandWriter, Total, WorkerId};
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
 use core::{num::NonZeroUsize, sync::atomic::AtomicBool, time::Duration};
 use fast_steal::{SplitTask, StealTask, Task, TaskList};
-use futures::{TryStreamExt, lock::Mutex};
+use futures::TryStreamExt;
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
@@ -117,11 +118,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
     use crate::{
         MergeProgress, ProgressEntry,
         core::mock::{MockRandReader, MockRandWriter, build_mock_data},
     };
+    use alloc::vec;
+    use std::dbg;
 
     #[tokio::test]
     async fn test_concurrent_download() {

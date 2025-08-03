@@ -5,9 +5,11 @@ use core::{
     fmt::Debug,
     sync::atomic::{AtomicBool, Ordering},
 };
-use futures::lock::Mutex;
 use kanal::AsyncReceiver;
-use tokio::task::{JoinError, JoinHandle};
+use tokio::{
+    sync::Mutex,
+    task::{JoinError, JoinHandle},
+};
 
 mod macros;
 #[cfg(test)]

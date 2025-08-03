@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "fast-pull"
-version = "2.0.4"
+version = "2.1.0"
 dependencies = [
  "bytes",
  "content_disposition",
@@ -272,9 +272,9 @@ dependencies = [
 
 [[package]]
 name = "fast-steal"
-version = "5.1.0"
+version = "5.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ccdc928f5229eca9d6d67e46bb5fd618ae65b3b15ac0a01f849bb4b165341c8"
+checksum = "c62861b648d4b8a45360faa8f6f0530312aa8040fc031ef2ca2856ea99782799"
 
 [[package]]
 name = "fastrand"
@@ -315,7 +315,6 @@ checksum = "65bc07b1a8bc7c85c5f2e110c476c7389b4554ba72af57d8445ea63a576b0876"
 dependencies = [
  "futures-channel",
  "futures-core",
- "futures-executor",
  "futures-io",
  "futures-sink",
  "futures-task",
@@ -337,17 +336,6 @@ name = "futures-core"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f29059c0c2090612e8d742178b0580d2dc940c837851ad723096f87af6663e"
-
-[[package]]
-name = "futures-executor"
-version = "0.3.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e28d1d997f585e54aebc3f97d39e72338912123a67330d723fdbb564d646c9f"
-dependencies = [
- "futures-core",
- "futures-task",
- "futures-util",
-]
 
 [[package]]
 name = "futures-io"
@@ -384,7 +372,6 @@ version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9fa08315bb612088cc391249efdc3bc77536f16c91f6cf495e6fbe85b20a4a81"
 dependencies = [
- "futures-channel",
  "futures-core",
  "futures-io",
  "futures-macro",

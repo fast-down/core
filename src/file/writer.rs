@@ -1,4 +1,6 @@
+extern crate alloc;
 use crate::{ProgressEntry, RandWriter, SeqWriter};
+use alloc::vec::Vec;
 use bytes::Bytes;
 use memmap2::MmapMut;
 use tokio::{

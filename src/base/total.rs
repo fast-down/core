@@ -1,4 +1,6 @@
+extern crate alloc;
 use crate::ProgressEntry;
+use alloc::vec::Vec;
 
 pub trait Total {
     fn total(&self) -> u64;
@@ -31,6 +33,7 @@ impl<T: Total> Total for &T {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn test_range_total() {

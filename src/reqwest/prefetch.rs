@@ -1,4 +1,6 @@
+extern crate alloc;
 use crate::{UrlInfo, reqwest::ReqwestReader};
+use alloc::string::{String, ToString};
 use content_disposition;
 use reqwest::{
     Client, IntoUrl, StatusCode, Url,
@@ -42,7 +44,7 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
         .and_then(|mut segments| segments.next_back())
         .and_then(|s| urlencoding::decode(s).ok())
         .filter(|s| !s.trim().is_empty())
-        .map(|s| s.to_string());
+        .map(|s| ToString::to_string(&s));
 
     let raw_name = from_disposition
         .or(from_url)
@@ -137,6 +139,8 @@ async fn prefetch_fallback(url: Url, client: &Client) -> Result<UrlInfo, reqwest
 
 #[cfg(test)]
 mod tests {
+    use alloc::{format, vec};
+
     use super::*;
 
     #[tokio::test]

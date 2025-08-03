@@ -23,3 +23,4 @@
    1000 more lines server logs? Don't worry, we **only download new lines**.
 5. **💰 Free and open-source**  
    The code stays free and open-source. Thanks to [share121](https://github.com/share121), [Cyan](https://github.com/CyanChanges) and other fast-down contributors.
+6. **No std support**

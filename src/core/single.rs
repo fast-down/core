@@ -73,11 +73,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
     use crate::{
         MergeProgress,
         core::mock::{MockSeqReader, MockSeqWriter, build_mock_data},
     };
+    use alloc::vec;
+    use std::dbg;
+    use vec::Vec;
 
     #[tokio::test]
     async fn test_sequential_download() {

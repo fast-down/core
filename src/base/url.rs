@@ -1,3 +1,5 @@
+extern crate alloc;
+use alloc::string::String;
 use url::Url;
 
 #[derive(Debug, Clone)]

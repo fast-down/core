@@ -1,3 +1,4 @@
+#![no_std]
 mod base;
 mod core;
 #[cfg(feature = "file")]

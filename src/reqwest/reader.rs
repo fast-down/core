@@ -1,4 +1,6 @@
+extern crate alloc;
 use crate::{RandReader, SeqReader};
+use alloc::{boxed::Box, format};
 use bytes::Bytes;
 use core::{
     pin::{Pin, pin},
@@ -57,9 +59,9 @@ impl Stream for ReqwestStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let chunk_global;
         match &mut self.resp {
-            ResponseState::Pending(resp) => match resp.try_poll_unpin(cx) {
+            ResponseState::Pending(resp) => return match resp.try_poll_unpin(cx) {
                 Poll::Ready(resp) => {
-                    return match resp {
+                    match resp {
                         Ok(resp) => {
                             self.resp = ResponseState::Ready(resp);
                             self.poll_next(cx)
@@ -68,9 +70,9 @@ impl Stream for ReqwestStream {
                             self.resp = ResponseState::None;
                             Poll::Ready(Some(Err(e)))
                         }
-                    };
+                    }
                 }
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => Poll::Pending,
             },
             ResponseState::None => {
                 let resp = self
@@ -125,6 +127,8 @@ impl SeqReader for ReqwestReader {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+    use super::*;
     use crate::{
         Event, MergeProgress, ProgressEntry,
         mock::{MockRandWriter, MockSeqWriter, build_mock_data},
@@ -132,8 +136,11 @@ mod tests {
         reqwest::ReqwestReader,
         single::{self, download_single},
     };
+    use alloc::vec;
     use core::{num::NonZeroUsize, time::Duration};
     use reqwest::Client;
+    use std::{dbg, println};
+    use vec::Vec;
 
     #[tokio::test]
     async fn test_concurrent_download() {

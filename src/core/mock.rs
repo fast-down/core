@@ -1,8 +1,10 @@
 extern crate alloc;
 use crate::{ProgressEntry, RandReader, RandWriter, SeqReader, SeqWriter};
-use alloc::sync::Arc;
+use alloc::vec;
+use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
-use futures::{TryStream, lock::Mutex, stream};
+use futures::{TryStream, stream};
+use tokio::sync::Mutex;
 
 pub fn build_mock_data(size: usize) -> Vec<u8> {
     (0..size).map(|i| (i % 256) as u8).collect()
