@@ -1,15 +1,15 @@
 [package]
-name = "fast-down"
+name = "fast-pull"
 version = "2.0.4"
 edition = "2024"
 license = "MIT"
 authors = ["share121 <2854631158@qq.com>"]
-repository = "https://github.com/share121/fast-down"
+repository = "https://github.com/fast-down/fast-pull"
 readme = "README.md"
 exclude = ["/.github"]
 description = "超级快的下载器核心库"
-documentation = "https://docs.rs/fast-down"
-homepage = "https://github.com/share121/fast-down"
+documentation = "https://docs.rs/fast-pull"
+homepage = "https://github.com/fast-down/fast-pull"
 keywords = ["downloader", "parallel", "thread", "concurrency", "performance"]
 categories = ["network-programming", "concurrency"]
 
