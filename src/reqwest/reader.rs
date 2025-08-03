@@ -31,62 +31,82 @@ impl RandReader for ReqwestReader {
             url: self.url.clone(),
             start: range.start,
             end: range.end,
-            resp: None,
+            resp: ResponseState::None,
             max_retries: 3,
             curr_retries: 0,
         }
     }
 }
 type ResponseFut = Pin<Box<dyn Future<Output = Result<Response, reqwest::Error>> + Send>>;
+enum ResponseState {
+    Pending(ResponseFut),
+    Ready(Response),
+    None,
+}
 struct ReqwestStream {
     client: Client,
     url: Url,
     start: u64,
     end: u64,
-    resp: Option<ResponseFut>,
+    resp: ResponseState,
     max_retries: usize,
     curr_retries: usize,
 }
 impl Stream for ReqwestStream {
     type Item = Result<Bytes, reqwest::Error>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.resp.is_none() {
-            let resp = self
-                .client
-                .get(self.url.clone())
-                .header(
-                    header::RANGE,
-                    format!("bytes={}-{}", self.start, self.end - 1),
-                )
-                .send();
-            self.resp.replace(Box::pin(resp));
-        }
-        let resp = self.resp.as_mut().unwrap();
-        match resp.try_poll_unpin(cx) {
-            Poll::Ready(Ok(mut resp)) => {
+        let chunk_global;
+        match &mut self.resp {
+            ResponseState::Pending(resp) => match resp.try_poll_unpin(cx) {
+                Poll::Ready(resp) => {
+                    match resp {
+                        Ok(resp) => {
+                            self.resp = ResponseState::Ready(resp);
+                            return self.poll_next(cx);
+                        }
+                        Err(e) => {
+                            self.resp = ResponseState::None;
+                            return Poll::Ready(Some(Err(e)));
+                        }
+                    };
+                }
+                Poll::Pending => return Poll::Pending,
+            },
+            ResponseState::None => {
+                let resp = self
+                    .client
+                    .get(self.url.clone())
+                    .header(
+                        header::RANGE,
+                        format!("bytes={}-{}", self.start, self.end - 1),
+                    )
+                    .send();
+                self.resp = ResponseState::Pending(Box::pin(resp));
+                return self.poll_next(cx);
+            }
+            ResponseState::Ready(resp) => {
                 let mut chunk = pin!(resp.chunk());
                 match chunk.try_poll_unpin(cx) {
-                    Poll::Ready(Ok(Some(chunk))) => {
-                        self.start += chunk.len() as u64;
-                        Poll::Ready(Some(Ok(chunk)))
-                    }
-                    Poll::Ready(Ok(None)) => Poll::Ready(None),
-                    Poll::Ready(Err(e)) => {
-                        self.curr_retries += 1;
-                        if self.curr_retries >= self.max_retries {
-                            self.curr_retries = 0;
-                            self.resp = None;
-                        }
-                        Poll::Ready(Some(Err(e)))
-                    }
-                    Poll::Pending => Poll::Pending,
-                }
+                    Poll::Ready(Ok(Some(chunk))) => chunk_global = Ok(chunk),
+                    Poll::Ready(Ok(None)) => return Poll::Ready(None),
+                    Poll::Ready(Err(e)) => chunk_global = Err(e),
+                    Poll::Pending => return Poll::Pending,
+                };
             }
-            Poll::Ready(Err(e)) => {
-                self.resp = None;
+        };
+        match chunk_global {
+            Ok(chunk) => {
+                self.start += chunk.len() as u64;
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Err(e) => {
+                self.curr_retries += 1;
+                if self.curr_retries >= self.max_retries {
+                    self.curr_retries = 0;
+                    self.resp = ResponseState::None;
+                }
                 Poll::Ready(Some(Err(e)))
             }
-            Poll::Pending => Poll::Pending,
         }
     }
 }
