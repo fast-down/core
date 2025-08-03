@@ -59,9 +59,9 @@ impl Stream for ReqwestStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let chunk_global;
         match &mut self.resp {
-            ResponseState::Pending(resp) => return match resp.try_poll_unpin(cx) {
-                Poll::Ready(resp) => {
-                    match resp {
+            ResponseState::Pending(resp) => {
+                return match resp.try_poll_unpin(cx) {
+                    Poll::Ready(resp) => match resp {
                         Ok(resp) => {
                             self.resp = ResponseState::Ready(resp);
                             self.poll_next(cx)
@@ -70,10 +70,10 @@ impl Stream for ReqwestStream {
                             self.resp = ResponseState::None;
                             Poll::Ready(Some(Err(e)))
                         }
-                    }
-                }
-                Poll::Pending => Poll::Pending,
-            },
+                    },
+                    Poll::Pending => Poll::Pending,
+                };
+            }
             ResponseState::None => {
                 let resp = self
                     .client
