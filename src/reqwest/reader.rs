@@ -34,8 +34,6 @@ impl RandReader for ReqwestReader {
             start: range.start,
             end: range.end,
             resp: ResponseState::None,
-            max_retries: 3,
-            curr_retries: 0,
         }
     }
 }
@@ -51,8 +49,6 @@ struct ReqwestStream {
     start: u64,
     end: u64,
     resp: ResponseState,
-    max_retries: usize,
-    curr_retries: usize,
 }
 impl Stream for ReqwestStream {
     type Item = Result<Bytes, reqwest::Error>;
@@ -102,11 +98,7 @@ impl Stream for ReqwestStream {
                 Poll::Ready(Some(Ok(chunk)))
             }
             Err(e) => {
-                self.curr_retries += 1;
-                if self.curr_retries >= self.max_retries {
-                    self.curr_retries = 0;
-                    self.resp = ResponseState::None;
-                }
+                self.resp = ResponseState::None;
                 Poll::Ready(Some(Err(e)))
             }
         }
