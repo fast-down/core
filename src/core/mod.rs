@@ -17,11 +17,21 @@ pub mod mock;
 pub mod multi;
 pub mod single;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DownloadResult<ReadError, WriteError> {
     pub event_chain: AsyncReceiver<Event<ReadError, WriteError>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     is_running: Arc<AtomicBool>,
+}
+
+impl<RE, WE> Clone for DownloadResult<RE, WE> {
+    fn clone(&self) -> Self {
+        Self {
+            event_chain: self.event_chain.clone(),
+            handle: self.handle.clone(),
+            is_running: self.is_running.clone(),
+        }
+    }
 }
 
 impl<ReadError, WriteError> DownloadResult<ReadError, WriteError> {
