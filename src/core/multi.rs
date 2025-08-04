@@ -106,7 +106,10 @@ where
                                 }
                             }
                             Ok(None) => break,
-                            Err(e) => tx.send(Event::ReadError(id, e)).await.unwrap(),
+                            Err(e) => {
+                                tx.send(Event::ReadError(id, e)).await.unwrap();
+                                tokio::time::sleep(options.retry_gap).await;
+                            }
                         }
                     }
                 }

@@ -63,7 +63,10 @@ where
                     downloaded += len;
                 }
                 Ok(None) => break,
-                Err(e) => tx.send(Event::ReadError(ID, e)).await.unwrap(),
+                Err(e) => {
+                    tx.send(Event::ReadError(ID, e)).await.unwrap();
+                    tokio::time::sleep(options.retry_gap).await;
+                }
             }
         }
         tx.send(Event::Finished(ID)).await.unwrap();
