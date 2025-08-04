@@ -14,7 +14,10 @@ keywords = ["downloader", "parallel", "thread", "concurrency", "performance"]
 categories = ["concurrency", "no-std"]
 
 [dependencies]
-tokio = { version = "1.47.1", features = ["macros"], default-features = false }
+tokio = { version = "1.47.1", features = [
+    "macros",
+    "io-util",
+], default-features = false }
 kanal = "0.1.1"
 bytes = { version = "1.10.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
