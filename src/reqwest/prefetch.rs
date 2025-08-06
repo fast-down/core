@@ -70,7 +70,10 @@ pub trait Prefetch {
 impl Prefetch for Client {
     async fn prefetch(&self, url: impl IntoUrl + Send) -> Result<UrlInfo, reqwest::Error> {
         let url = url.into_url()?;
-        let resp = self.head(url.clone()).send().await?;
+        let resp = match self.head(url.clone()).send().await {
+            Ok(resp) => resp,
+            Err(_) => return prefetch_fallback(url, self).await,
+        };
         let resp = match resp.error_for_status() {
             Ok(resp) => resp,
             Err(_) => return prefetch_fallback(url, self).await,
