@@ -44,7 +44,7 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
         .and_then(|mut segments| segments.next_back())
         .and_then(|s| urlencoding::decode(s).ok())
         .filter(|s| !s.trim().is_empty())
-        .map(|s| ToString::to_string(&s));
+        .map(|s| s.to_string());
 
     let raw_name = from_disposition
         .or(from_url)
