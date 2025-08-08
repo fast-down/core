@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "fast-pull"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "bytes",
  "content_disposition",

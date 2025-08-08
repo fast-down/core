@@ -5,7 +5,7 @@ use mmap_io::{MemoryMappedFile, MmapIoError, MmapMode};
 use std::{path::Path, vec::Vec};
 use thiserror::Error;
 use tokio::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::{self, AsyncSeekExt, AsyncWriteExt, BufWriter},
 };
 
@@ -45,20 +45,23 @@ pub struct RandFileWriterMmap {
     buffer_size: usize,
 }
 impl RandFileWriterMmap {
-    pub fn new(
+    pub async fn new(
         path: impl AsRef<Path>,
         size: u64,
         buffer_size: usize,
     ) -> Result<Self, FileWriterError> {
-        let mmap_builder = MemoryMappedFile::builder(&path)
-            .huge_pages(true)
-            .mode(MmapMode::ReadWrite)
-            .size(size);
+        let mmap_builder = MemoryMappedFile::builder(&path).mode(MmapMode::ReadWrite);
         Ok(Self {
             mmap: if path.as_ref().try_exists()? {
+                OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .await?
+                    .set_len(size)
+                    .await?;
                 mmap_builder.open()
             } else {
-                mmap_builder.create()
+                mmap_builder.size(size).create()
             }?,
             downloaded: 0,
             buffer_size,
@@ -172,7 +175,9 @@ mod tests {
         let file_path = temp_file.path();
 
         // 初始化 RandFileWriter，假设文件大小为 10 字节
-        let mut writer = RandFileWriterMmap::new(file_path, 10, 8 * 1024 * 1024).unwrap();
+        let mut writer = RandFileWriterMmap::new(file_path, 10, 8 * 1024 * 1024)
+            .await
+            .unwrap();
 
         // 写入数据
         let data = Bytes::from("234");
