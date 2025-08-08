@@ -50,13 +50,16 @@ impl RandFileWriterMmap {
         size: u64,
         buffer_size: usize,
     ) -> Result<Self, FileWriterError> {
-        let mmap = MemoryMappedFile::builder(path)
+        let mmap_builder = MemoryMappedFile::builder(&path)
             .huge_pages(true)
             .mode(MmapMode::ReadWrite)
-            .size(size)
-            .create()?;
+            .size(size);
         Ok(Self {
-            mmap,
+            mmap: if path.as_ref().try_exists()? {
+                mmap_builder.open()
+            } else {
+                mmap_builder.create()
+            }?,
             downloaded: 0,
             buffer_size,
         })
