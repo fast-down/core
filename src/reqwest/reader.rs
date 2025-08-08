@@ -83,6 +83,10 @@ impl Stream for ReqwestStream {
                 return self.poll_next(cx);
             }
             ResponseState::Ready(resp) => {
+                if let Err(e) = resp.error_for_status_ref() {
+                    self.resp = ResponseState::None;
+                    return Poll::Ready(Some(Err(e)));
+                }
                 let mut chunk = pin!(resp.chunk());
                 match chunk.try_poll_unpin(cx) {
                     Poll::Ready(Ok(Some(chunk))) => chunk_global = Ok(chunk),

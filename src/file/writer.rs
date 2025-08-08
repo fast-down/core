@@ -93,7 +93,7 @@ pub struct RandFileWriterStd {
     buffer_size: usize,
 }
 impl RandFileWriterStd {
-    pub async fn new(file: File, size: u64, buffer_size: usize) -> Result<Self, io::Error> {
+    pub async fn new(file: File, size: u64, buffer_size: usize) -> Result<Self, FileWriterError> {
         file.set_len(size).await?;
         Ok(Self {
             buffer: BufWriter::with_capacity(buffer_size, file),
@@ -105,7 +105,7 @@ impl RandFileWriterStd {
     }
 }
 impl RandWriter for RandFileWriterStd {
-    type Error = io::Error;
+    type Error = FileWriterError;
     async fn write(&mut self, range: ProgressEntry, bytes: Bytes) -> Result<(), Self::Error> {
         let pos = self.cache.partition_point(|(i, _)| i < &range.start);
         self.cache_size += bytes.len();
