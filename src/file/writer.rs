@@ -1,12 +1,21 @@
-extern crate alloc;
+extern crate std;
 use crate::{ProgressEntry, RandWriter, SeqWriter};
-use alloc::vec::Vec;
 use bytes::Bytes;
-use memmap2::MmapMut;
+use mmap_io::{MemoryMappedFile, MmapIoError, MmapMode};
+use std::{path::Path, vec::Vec};
+use thiserror::Error;
 use tokio::{
     fs::File,
     io::{self, AsyncSeekExt, AsyncWriteExt, BufWriter},
 };
+
+#[derive(Error, Debug)]
+pub enum FileWriterError {
+    #[error(transparent)]
+    MmapIo(#[from] MmapIoError),
+    #[error(transparent)]
+    TokioIo(#[from] io::Error),
+}
 
 #[derive(Debug)]
 pub struct SeqFileWriter {
@@ -20,44 +29,54 @@ impl SeqFileWriter {
     }
 }
 impl SeqWriter for SeqFileWriter {
-    type Error = io::Error;
+    type Error = FileWriterError;
     async fn write(&mut self, content: Bytes) -> Result<(), Self::Error> {
-        self.buffer.write_all(&content).await
+        Ok(self.buffer.write_all(&content).await?)
     }
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        self.buffer.flush().await
+        Ok(self.buffer.flush().await?)
     }
 }
 
 #[derive(Debug)]
 pub struct RandFileWriterMmap {
-    mmap: MmapMut,
+    mmap: MemoryMappedFile,
     downloaded: usize,
     buffer_size: usize,
 }
 impl RandFileWriterMmap {
-    pub async fn new(file: File, size: u64, buffer_size: usize) -> Result<Self, io::Error> {
-        file.set_len(size).await?;
+    pub fn new(
+        path: impl AsRef<Path>,
+        size: u64,
+        buffer_size: usize,
+    ) -> Result<Self, FileWriterError> {
+        let mmap = MemoryMappedFile::builder(path)
+            .huge_pages(true)
+            .mode(MmapMode::ReadWrite)
+            .size(size)
+            .create()?;
         Ok(Self {
-            mmap: unsafe { MmapMut::map_mut(&file) }?,
+            mmap,
             downloaded: 0,
             buffer_size,
         })
     }
 }
 impl RandWriter for RandFileWriterMmap {
-    type Error = io::Error;
+    type Error = FileWriterError;
     async fn write(&mut self, range: ProgressEntry, bytes: Bytes) -> Result<(), Self::Error> {
-        self.mmap[range.start as usize..range.end as usize].copy_from_slice(&bytes);
+        self.mmap
+            .as_slice_mut(range.start, bytes.len() as u64)?
+            .as_mut()
+            .copy_from_slice(&bytes);
         self.downloaded += bytes.len();
         if self.downloaded >= self.buffer_size {
-            self.mmap.flush()?;
-            self.downloaded = 0;
+            self.mmap.flush_async().await?;
         }
         Ok(())
     }
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        self.mmap.flush_async()?;
+        self.mmap.flush_async().await?;
         Ok(())
     }
 }
@@ -117,56 +136,55 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     #[tokio::test]
-    async fn test_seq_file_writer() -> Result<(), io::Error> {
+    async fn test_seq_file_writer() {
         // 创建一个临时文件用于测试
-        let temp_file = NamedTempFile::new()?;
+        let temp_file = NamedTempFile::new().unwrap();
         let file_path = temp_file.path().to_path_buf();
 
         // 初始化 SeqFileWriter
-        let mut writer = SeqFileWriter::new(temp_file.reopen()?.into(), 1024);
+        let mut writer = SeqFileWriter::new(temp_file.reopen().unwrap().into(), 1024);
 
         // 写入数据
         let data1 = Bytes::from("Hello, ");
         let data2 = Bytes::from("world!");
-        writer.write(data1).await?;
-        writer.write(data2).await?;
-        writer.flush().await?;
+        writer.write(data1).await.unwrap();
+        writer.write(data2).await.unwrap();
+        writer.flush().await.unwrap();
 
         // 验证文件内容
         let mut file_content = Vec::new();
         File::open(&file_path)
-            .await?
+            .await
+            .unwrap()
             .read_to_end(&mut file_content)
-            .await?;
+            .await
+            .unwrap();
         assert_eq!(file_content, b"Hello, world!");
-
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_rand_file_writer() -> Result<(), io::Error> {
+    async fn test_rand_file_writer() {
         // 创建一个临时文件用于测试
-        let temp_file = NamedTempFile::new()?;
-        let file_path = temp_file.path().to_path_buf();
+        let temp_file = NamedTempFile::new().unwrap();
+        let file_path = temp_file.path();
 
         // 初始化 RandFileWriter，假设文件大小为 10 字节
-        let mut writer =
-            RandFileWriterMmap::new(temp_file.reopen()?.into(), 10, 8 * 1024 * 1024).await?;
+        let mut writer = RandFileWriterMmap::new(file_path, 10, 8 * 1024 * 1024).unwrap();
 
         // 写入数据
         let data = Bytes::from("234");
         let range = 2..5;
-        writer.write(range, data).await?;
-        writer.flush().await?;
+        writer.write(range, data).await.unwrap();
+        writer.flush().await.unwrap();
 
         // 验证文件内容
         let mut file_content = Vec::new();
         File::open(&file_path)
-            .await?
+            .await
+            .unwrap()
             .read_to_end(&mut file_content)
-            .await?;
+            .await
+            .unwrap();
         assert_eq!(file_content, b"\0\x00234\0\0\0\0\0");
-
-        Ok(())
     }
 }
