@@ -9,19 +9,19 @@ use tokio::{
 };
 
 mod macros;
-#[cfg(test)]
-pub mod mock;
 pub mod multi;
 pub mod single;
+#[cfg(test)]
+pub mod utils;
 
 #[derive(Debug)]
-pub struct DownloadResult<ReadError, WriteError> {
-    pub event_chain: AsyncReceiver<Event<ReadError, WriteError>>,
+pub struct PullResult<PullError, PushError> {
+    pub event_chain: AsyncReceiver<Event<PullError, PushError>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     abort_handles: Arc<[AbortHandle]>,
 }
 
-impl<RE, WE> Clone for DownloadResult<RE, WE> {
+impl<RE, WE> Clone for PullResult<RE, WE> {
     fn clone(&self) -> Self {
         Self {
             event_chain: self.event_chain.clone(),
@@ -31,9 +31,9 @@ impl<RE, WE> Clone for DownloadResult<RE, WE> {
     }
 }
 
-impl<ReadError, WriteError> DownloadResult<ReadError, WriteError> {
+impl<PullError, PushError> PullResult<PullError, PushError> {
     pub fn new(
-        event_chain: AsyncReceiver<Event<ReadError, WriteError>>,
+        event_chain: AsyncReceiver<Event<PullError, PushError>>,
         handle: JoinHandle<()>,
         abort_handles: &[AbortHandle],
     ) -> Self {

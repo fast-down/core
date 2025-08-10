@@ -1,7 +1,8 @@
 extern crate std;
-use crate::{ProgressEntry, RandWriter, SeqWriter};
+use crate::{ProgressEntry, Pusher, RandPusher};
 use bytes::Bytes;
-use mmap_io::{MemoryMappedFile, MmapIoError, MmapMode};
+use mmap_io::flush::FlushPolicy;
+use mmap_io::{MemoryMappedFile, MmapAdvice, MmapIoError, MmapMode};
 use std::{path::Path, vec::Vec};
 use thiserror::Error;
 use tokio::{
@@ -10,7 +11,7 @@ use tokio::{
 };
 
 #[derive(Error, Debug)]
-pub enum FileWriterError {
+pub enum WriterError {
     #[error(transparent)]
     MmapIo(#[from] MmapIoError),
     #[error(transparent)]
@@ -28,12 +29,12 @@ impl SeqFileWriter {
         }
     }
 }
-impl SeqWriter for SeqFileWriter {
-    type Error = FileWriterError;
-    async fn write(&mut self, content: Bytes) -> Result<(), Self::Error> {
+impl Pusher for SeqFileWriter {
+    type Error = WriterError;
+    async fn push(&mut self, content: Bytes) -> Result<(), Self::Error> {
         Ok(self.buffer.write_all(&content).await?)
     }
-    async fn flush(&mut self) -> Result<(), Self::Error> {
+    async fn end(&mut self) -> Result<(), Self::Error> {
         Ok(self.buffer.flush().await?)
     }
 }
@@ -49,8 +50,11 @@ impl RandFileWriterMmap {
         path: impl AsRef<Path>,
         size: u64,
         buffer_size: usize,
-    ) -> Result<Self, FileWriterError> {
-        let mmap_builder = MemoryMappedFile::builder(&path).mode(MmapMode::ReadWrite);
+    ) -> Result<Self, WriterError> {
+        let mmap_builder = MemoryMappedFile::builder(&path)
+            .mode(MmapMode::ReadWrite)
+            .huge_pages(true)
+            .flush_policy(FlushPolicy::Manual);
         Ok(Self {
             mmap: if path.as_ref().try_exists()? {
                 OpenOptions::new()
@@ -68,9 +72,12 @@ impl RandFileWriterMmap {
         })
     }
 }
-impl RandWriter for RandFileWriterMmap {
-    type Error = FileWriterError;
-    async fn write(&mut self, range: ProgressEntry, bytes: Bytes) -> Result<(), Self::Error> {
+impl RandPusher for RandFileWriterMmap {
+    type Error = WriterError;
+    async fn push(&mut self, range: ProgressEntry, bytes: Bytes) -> Result<(), Self::Error> {
+        let _ = self
+            .mmap
+            .advise(range.start, bytes.len() as u64, MmapAdvice::Sequential);
         self.mmap
             .as_slice_mut(range.start, bytes.len() as u64)?
             .as_mut()
@@ -81,22 +88,22 @@ impl RandWriter for RandFileWriterMmap {
         }
         Ok(())
     }
-    async fn flush(&mut self) -> Result<(), Self::Error> {
+    async fn end(&mut self) -> Result<(), Self::Error> {
         self.mmap.flush_async().await?;
         Ok(())
     }
 }
 
 #[derive(Debug)]
-pub struct RandFileWriterStd {
+pub struct RandFileWriter {
     buffer: BufWriter<File>,
     cache: Vec<(u64, Bytes)>,
     p: u64,
     cache_size: usize,
     buffer_size: usize,
 }
-impl RandFileWriterStd {
-    pub async fn new(file: File, size: u64, buffer_size: usize) -> Result<Self, FileWriterError> {
+impl RandFileWriter {
+    pub async fn new(file: File, size: u64, buffer_size: usize) -> Result<Self, WriterError> {
         file.set_len(size).await?;
         Ok(Self {
             buffer: BufWriter::with_capacity(buffer_size, file),
@@ -107,18 +114,18 @@ impl RandFileWriterStd {
         })
     }
 }
-impl RandWriter for RandFileWriterStd {
-    type Error = FileWriterError;
-    async fn write(&mut self, range: ProgressEntry, bytes: Bytes) -> Result<(), Self::Error> {
+impl RandPusher for RandFileWriter {
+    type Error = WriterError;
+    async fn push(&mut self, range: ProgressEntry, bytes: Bytes) -> Result<(), Self::Error> {
         let pos = self.cache.partition_point(|(i, _)| i < &range.start);
         self.cache_size += bytes.len();
         self.cache.insert(pos, (range.start, bytes));
         if self.cache_size >= self.buffer_size {
-            self.flush().await?;
+            self.end().await?;
         }
         Ok(())
     }
-    async fn flush(&mut self) -> Result<(), Self::Error> {
+    async fn end(&mut self) -> Result<(), Self::Error> {
         for (start, bytes) in self.cache.drain(..) {
             let len = bytes.len();
             self.cache_size -= len;
@@ -153,9 +160,9 @@ mod tests {
         // 写入数据
         let data1 = Bytes::from("Hello, ");
         let data2 = Bytes::from("world!");
-        writer.write(data1).await.unwrap();
-        writer.write(data2).await.unwrap();
-        writer.flush().await.unwrap();
+        writer.push(data1).await.unwrap();
+        writer.push(data2).await.unwrap();
+        writer.end().await.unwrap();
 
         // 验证文件内容
         let mut file_content = Vec::new();
@@ -182,8 +189,8 @@ mod tests {
         // 写入数据
         let data = Bytes::from("234");
         let range = 2..5;
-        writer.write(range, data).await.unwrap();
-        writer.flush().await.unwrap();
+        writer.push(range, data).await.unwrap();
+        writer.end().await.unwrap();
 
         // 验证文件内容
         let mut file_content = Vec::new();

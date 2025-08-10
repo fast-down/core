@@ -1,5 +1,5 @@
 extern crate alloc;
-use crate::{RandReader, SeqReader};
+use fast_pull::{RandPulelr, Puller};
 use alloc::{boxed::Box, format};
 use bytes::Bytes;
 use core::{
@@ -11,22 +11,22 @@ use reqwest::{Client, Response, header};
 use url::Url;
 
 #[derive(Clone)]
-pub struct ReqwestReader {
+pub struct ReqwestPuller {
     pub(crate) client: Client,
     url: Url,
 }
 
-impl ReqwestReader {
+impl ReqwestPuller {
     pub fn new(url: Url, client: Client) -> Self {
         Self { client, url }
     }
 }
 
-impl RandReader for ReqwestReader {
+impl RandPuller for ReqwestPuller {
     type Error = reqwest::Error;
     fn read(
         &mut self,
-        range: &crate::ProgressEntry,
+        range: &fast_pull::ProgressEntry,
     ) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
         ReqwestStream {
             client: self.client.clone(),
@@ -109,9 +109,9 @@ impl Stream for ReqwestStream {
     }
 }
 
-impl SeqReader for ReqwestReader {
+impl Puller for ReqwestPuller {
     type Error = reqwest::Error;
-    fn read(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
+    fn pull(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
         let req = self.client.get(self.url.clone());
         Box::pin(async move {
             let resp = req.send().await?;
@@ -129,7 +129,7 @@ mod tests {
         Event, MergeProgress, ProgressEntry,
         mock::{MockRandWriter, MockSeqWriter, build_mock_data},
         multi::{self, download_multi},
-        reqwest::ReqwestReader,
+        reqwest::ReqwestPuller,
         single::{self, download_single},
     };
     use alloc::vec;
@@ -170,7 +170,7 @@ mod tests {
             })
             .create_async()
             .await;
-        let reader = ReqwestReader::new(
+        let reader = ReqwestPuller::new(
             format!("{}/concurrent", server.url()).parse().unwrap(),
             Client::new(),
         );
@@ -221,7 +221,7 @@ mod tests {
             .with_body(mock_data.clone())
             .create_async()
             .await;
-        let reader = ReqwestReader::new(
+        let reader = ReqwestPuller::new(
             format!("{}/sequential", server.url()).parse().unwrap(),
             Client::new(),
         );

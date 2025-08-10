@@ -1,5 +1,6 @@
 extern crate alloc;
-use crate::{UrlInfo, reqwest::ReqwestReader};
+use super::ReqwestPuller;
+use crate::UrlInfo;
 use alloc::string::{String, ToString};
 use content_disposition;
 use reqwest::{
@@ -107,7 +108,7 @@ impl Prefetch for Client {
     }
 }
 
-impl Prefetch for ReqwestReader {
+impl Prefetch for ReqwestPuller {
     fn prefetch(
         &self,
         url: impl IntoUrl + Send,

@@ -1,35 +1,34 @@
 extern crate alloc;
 use super::macros::poll_ok;
-use crate::{DownloadResult, Event, ProgressEntry, SeqReader, SeqWriter};
+use crate::{Event, ProgressEntry, PullResult, Puller, Pusher};
 use bytes::Bytes;
 use core::time::Duration;
 use futures::TryStreamExt;
 
 #[derive(Debug, Clone)]
-pub struct DownloadOptions {
+pub struct PullOptions {
     pub retry_gap: Duration,
-    pub write_queue_cap: usize,
+    pub data_queue_cap: usize,
 }
 
-pub async fn download_single<R, W>(
-    mut reader: R,
-    mut writer: W,
-    options: DownloadOptions,
-) -> DownloadResult<R::Error, W::Error>
+pub async fn pull<R, W>(
+    mut puller: R,
+    mut pusher: W,
+    options: PullOptions,
+) -> PullResult<R::Error, W::Error>
 where
-    R: SeqReader + 'static,
-    W: SeqWriter + 'static,
+    R: Puller + 'static,
+    W: Pusher + 'static,
 {
-    let (tx, event_chain) = kanal::unbounded_async();
-    let (tx_write, rx_write) =
-        kanal::bounded_async::<(ProgressEntry, Bytes)>(options.write_queue_cap);
-    let tx_clone = tx.clone();
+    let (tx_event, event_chain) = kanal::unbounded_async();
+    let (tx_data, rx_data) = kanal::bounded_async::<(ProgressEntry, Bytes)>(options.data_queue_cap);
+    let tx_clone = tx_event.clone();
     const ID: usize = 0;
     let write_handle = tokio::spawn(async move {
-        while let Ok((spin, data)) = rx_write.recv().await {
+        while let Ok((spin, data)) = rx_data.recv().await {
             poll_ok!(
                 {},
-                writer.write(data.clone()).await,
+                pusher.push(data.clone()).await,
                 ID @ tx_clone => WriteError,
                 options.retry_gap
             );
@@ -37,37 +36,38 @@ where
         }
         poll_ok!(
             {},
-            writer.flush().await,
-            tx_clone => FlushError,
+            pusher.end().await,
+            tx_clone => SealError,
             options.retry_gap
         );
     });
     let handle = tokio::spawn(async move {
-        tx.send(Event::Reading(ID)).await.unwrap();
-        let mut downloaded: u64 = 0;
-        let mut stream = reader.read();
+        tx_event.send(Event::Reading(ID)).await.unwrap();
+        let mut pos: u64 = 0;
+        let mut stream = puller.pull();
         loop {
             match stream.try_next().await {
                 Ok(Some(chunk)) => {
                     let len = chunk.len() as u64;
-                    let span = downloaded..(downloaded + len);
-                    tx.send(Event::ReadProgress(ID, span.clone()))
+                    let span = pos..(pos + len);
+                    tx_event
+                        .send(Event::ReadProgress(ID, span.clone()))
                         .await
                         .unwrap();
-                    tx_write.send((span, chunk)).await.unwrap();
-                    downloaded += len;
+                    tx_data.send((span, chunk)).await.unwrap();
+                    pos += len;
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    tx.send(Event::ReadError(ID, e)).await.unwrap();
+                    tx_event.send(Event::ReadError(ID, e)).await.unwrap();
                     tokio::time::sleep(options.retry_gap).await;
                 }
             }
         }
-        tx.send(Event::Finished(ID)).await.unwrap();
+        tx_event.send(Event::Finished(ID)).await.unwrap();
     });
     let write_abort_handle = write_handle.abort_handle();
-    DownloadResult::new(
+    PullResult::new(
         event_chain,
         write_handle,
         &[handle.abort_handle(), write_abort_handle],
@@ -79,8 +79,8 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::{
-        MergeProgress,
-        core::mock::{MockSeqReader, MockSeqWriter, build_mock_data},
+        ProgressExt,
+        core::utils::{FixedSeqPusher, StaticPuller, build_mock_data},
     };
     use alloc::vec;
     use std::dbg;
@@ -89,16 +89,16 @@ mod tests {
     #[tokio::test]
     async fn test_sequential_download() {
         let mock_data = build_mock_data(3 * 1024);
-        let reader = MockSeqReader::new(mock_data.clone());
-        let writer = MockSeqWriter::new(&mock_data);
+        let reader = StaticPuller::new(&mock_data);
+        let writer = FixedSeqPusher::new();
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
-        let result = download_single(
+        let result = pull(
             reader,
             writer.clone(),
-            DownloadOptions {
+            PullOptions {
                 retry_gap: Duration::from_secs(1),
-                write_queue_cap: 1024,
+                data_queue_cap: 1024,
             },
         )
         .await;
@@ -122,6 +122,6 @@ mod tests {
         assert_eq!(write_progress, download_chunks);
 
         result.join().await.unwrap();
-        writer.assert().await;
+        writer.assert_eq(&mock_data).await;
     }
 }

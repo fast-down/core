@@ -72,7 +72,7 @@
 //!                 // 检查是否还有任务
 //!                 // ⚠️注意：这里需要加锁，防止多个线程同时检查任务列表
 //!                 let _guard = mutex.lock().unwrap();
-//!                 if !task.steal(&tasks, 2) {
+//!                 if !task.steal_from(&tasks, 2) {
 //!                     return;
 //!                 }
 //!                 // 这里需要释放锁

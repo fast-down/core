@@ -3,8 +3,8 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
       <sourceFolder url="file://$MODULE_DIR$/crates/fast-down/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/crates/fast-io/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/fast-pull/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/fast-steal/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/crates/fast-down/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
