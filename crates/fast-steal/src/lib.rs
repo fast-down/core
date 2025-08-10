@@ -1,11 +1,11 @@
 #![no_std]
 //! # fast-steal 神偷
 //!
-//! ![GitHub last commit (branch)](https://img.shields.io/github/last-commit/fast-down/fast-steal/master)
-//! [![Rust](https://github.com/fast-down/fast-steal/workflows/Test/badge.svg)](https://github.com/fast-down/fast-steal/actions)
+//! [![GitHub last commit](https://img.shields.io/github/last-commit/fast-down/core/main)](https://github.com/fast-down/core/commits/main)
+//! [![Test](https://github.com/fast-down/core/workflows/Test/badge.svg)](https://github.com/fast-down/core/actions)
 //! [![Latest version](https://img.shields.io/crates/v/fast-steal.svg)](https://crates.io/crates/fast-steal)
 //! [![Documentation](https://docs.rs/fast-steal/badge.svg)](https://docs.rs/fast-steal)
-//! ![License](https://img.shields.io/crates/l/fast-steal.svg)
+//! [![License](https://img.shields.io/crates/l/fast-steal.svg)](https://github.com/fast-down/core/blob/main/crates/fast-steal/LICENSE)
 //!
 //! `fast-steal` 是一个特别快的多线程库，支持超细颗粒度的任务窃取。
 //!
@@ -72,7 +72,7 @@
 //!                 // 检查是否还有任务
 //!                 // ⚠️注意：这里需要加锁，防止多个线程同时检查任务列表
 //!                 let _guard = mutex.lock().unwrap();
-//!                 if !task.steal_from(&tasks, 2) {
+//!                 if !task.steal(&tasks, 2) {
 //!                     return;
 //!                 }
 //!                 // 这里需要释放锁

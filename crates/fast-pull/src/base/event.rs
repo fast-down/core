@@ -3,12 +3,12 @@ use crate::ProgressEntry;
 pub type WorkerId = usize;
 
 #[derive(Debug)]
-pub enum Event<PullError, PushError> {
+pub enum Event<ReadError, WriteError> {
     Reading(WorkerId),
-    ReadError(WorkerId, PullError),
+    ReadError(WorkerId, ReadError),
     ReadProgress(WorkerId, ProgressEntry),
-    WriteError(WorkerId, PushError),
+    WriteError(WorkerId, WriteError),
     WriteProgress(WorkerId, ProgressEntry),
-    SealError(PushError),
+    FlushError(WriteError),
     Finished(WorkerId),
 }

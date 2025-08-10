@@ -9,19 +9,19 @@ use tokio::{
 };
 
 mod macros;
+#[cfg(test)]
+pub mod mock;
 pub mod multi;
 pub mod single;
-#[cfg(test)]
-pub mod utils;
 
 #[derive(Debug)]
-pub struct PullResult<PullError, PushError> {
-    pub event_chain: AsyncReceiver<Event<PullError, PushError>>,
+pub struct DownloadResult<ReadError, WriteError> {
+    pub event_chain: AsyncReceiver<Event<ReadError, WriteError>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     abort_handles: Arc<[AbortHandle]>,
 }
 
-impl<RE, WE> Clone for PullResult<RE, WE> {
+impl<RE, WE> Clone for DownloadResult<RE, WE> {
     fn clone(&self) -> Self {
         Self {
             event_chain: self.event_chain.clone(),
@@ -31,9 +31,9 @@ impl<RE, WE> Clone for PullResult<RE, WE> {
     }
 }
 
-impl<PullError, PushError> PullResult<PullError, PushError> {
+impl<ReadError, WriteError> DownloadResult<ReadError, WriteError> {
     pub fn new(
-        event_chain: AsyncReceiver<Event<PullError, PushError>>,
+        event_chain: AsyncReceiver<Event<ReadError, WriteError>>,
         handle: JoinHandle<()>,
         abort_handles: &[AbortHandle],
     ) -> Self {
@@ -44,6 +44,7 @@ impl<PullError, PushError> PullResult<PullError, PushError> {
         }
     }
 
+    /// 只有第一次调用有效
     pub async fn join(&self) -> Result<(), JoinError> {
         if let Some(handle) = self.handle.lock().await.take() {
             handle.await?

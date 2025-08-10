@@ -2,15 +2,15 @@ use crate::ProgressEntry;
 use bytes::Bytes;
 use futures::TryStream;
 
-pub trait RandPuller: Send + Clone {
+pub trait RandReader: Send + Clone {
     type Error: Send;
-    fn pull(
+    fn read(
         &mut self,
         range: &ProgressEntry,
     ) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin;
 }
 
-pub trait Puller: Send {
+pub trait SeqReader: Send {
     type Error: Send;
-    fn pull(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin;
+    fn read(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin;
 }

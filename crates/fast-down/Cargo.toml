@@ -1,15 +1,16 @@
 [package]
 name = "fast-down"
+description = "Fast Down Multiplex and Demultiplexes library"
 version = "3.0.0"
-edition.workspace = true
-license.workspace = true
-homepage.workspace = true
-authors.workspace = true
 readme = "README.md"
-description = "Fast IO Multiplex and Demultiplex library"
 documentation = "https://docs.rs/fast-down"
 keywords = ["download", "fast", "parallel", "concurrency"]
 categories = ["concurrency", "asynchronous", "network-programming", "no-std"]
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 fast-pull.workspace = true
@@ -22,6 +23,9 @@ bytes.workspace = true
 reqwest = "0.12.22"
 
 [dev-dependencies]
-tokio = { version = "1.47.1", features = ["rt", "io-util", "test-util"], default-features = false }
+tokio = { version = "1.47.1", features = [
+  "rt",
+  "io-util",
+  "test-util",
+], default-features = false }
 mockito = "1.7.0"
-

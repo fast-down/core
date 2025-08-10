@@ -1,7 +1,7 @@
 extern crate alloc;
 extern crate spin;
 use super::macros::poll_ok;
-use crate::{Event, ProgressEntry, PullResult, RandPuller, RandPusher, Total, WorkerId};
+use crate::{DownloadResult, Event, ProgressEntry, RandReader, RandWriter, Total, WorkerId};
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
 use core::{num::NonZeroUsize, time::Duration};
@@ -9,31 +9,31 @@ use fast_steal::{SplitTask, StealTask, Task, TaskList};
 use futures::TryStreamExt;
 
 #[derive(Debug, Clone)]
-pub struct PullOptions {
+pub struct DownloadOptions {
     pub download_chunks: Vec<ProgressEntry>,
     pub concurrent: NonZeroUsize,
     pub retry_gap: Duration,
-    pub data_queue_cap: usize,
+    pub write_queue_cap: usize,
 }
 
-pub async fn pull<R, W>(
-    puller: R,
+pub async fn download_multi<R, W>(
+    reader: R,
     mut writer: W,
-    options: PullOptions,
-) -> PullResult<R::Error, W::Error>
+    options: DownloadOptions,
+) -> DownloadResult<R::Error, W::Error>
 where
-    R: RandPuller + 'static,
-    W: RandPusher + 'static,
+    R: RandReader + 'static,
+    W: RandWriter + 'static,
 {
-    let (tx_event, event_chain) = kanal::unbounded_async();
-    let (tx_data, rx_data) =
-        kanal::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.data_queue_cap);
-    let tx_clone = tx_event.clone();
+    let (tx, event_chain) = kanal::unbounded_async();
+    let (tx_write, rx_write) =
+        kanal::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.write_queue_cap);
+    let tx_clone = tx.clone();
     let write_handle = tokio::spawn(async move {
-        while let Ok((id, spin, data)) = rx_data.recv().await {
+        while let Ok((id, spin, data)) = rx_write.recv().await {
             poll_ok!(
                 {},
-                writer.push(spin.clone(), data.clone()).await,
+                writer.write(spin.clone(), data.clone()).await,
                 id @ tx_clone => WriteError,
                 options.retry_gap
             );
@@ -41,8 +41,8 @@ where
         }
         poll_ok!(
             {},
-            writer.end().await,
-            tx_clone => SealError,
+            writer.flush().await,
+            tx_clone => FlushError,
             options.retry_gap
         );
     });
@@ -53,59 +53,57 @@ where
             .split_task(options.concurrent.get() as u64)
             .map(Arc::new),
     );
-    let mut abort_handles = Vec::with_capacity(tasks.len() + 1);
+    let mut abort_handles = Vec::with_capacity(tasks.len());
     for (id, task) in tasks.iter().enumerate() {
-        let current_task = task.clone();
+        let task = task.clone();
         let tasks = tasks.clone();
-        let task_data = task_list.clone();
+        let task_list = task_list.clone();
         let mutex = mutex.clone();
-        let tx_event = tx_event.clone();
-        let tx_data = tx_data.clone();
-        let mut puller = puller.clone();
+        let tx = tx.clone();
+        let mut reader = reader.clone();
+        let tx_write = tx_write.clone();
         let handle = tokio::spawn(async move {
             'steal_task: loop {
-                let mut start = current_task.start();
-                if start >= current_task.end() {
+                let mut start = task.start();
+                if start >= task.end() {
                     let guard = mutex.lock();
-                    if current_task.steal_from(&tasks, 16 * 1024) {
+                    if task.steal(&tasks, 16 * 1024) {
                         continue;
                     }
                     drop(guard);
-                    tx_event.send(Event::Finished(id)).await.unwrap();
+                    tx.send(Event::Finished(id)).await.unwrap();
                     return;
                 }
-                let pull_ranges = task_data.get_range(start..current_task.end());
-                for range in &pull_ranges {
-                    tx_event.send(Event::Reading(id)).await.unwrap();
-                    let mut stream = puller.pull(range);
-                    let mut counter = 0;
+                let download_range = &task_list.get_range(start..task.end());
+                for range in download_range {
+                    tx.send(Event::Reading(id)).await.unwrap();
+                    let mut stream = reader.read(range);
+                    let mut downloaded = 0;
                     loop {
                         match stream.try_next().await {
                             Ok(Some(mut chunk)) => {
                                 let len = chunk.len() as u64;
-                                current_task.fetch_add_start(len);
+                                task.fetch_add_start(len);
                                 start += len;
-                                counter += len;
-                                let range_start = range.start + counter;
-                                let range_end = range.start + counter;
-                                let span =
-                                    range_start..range_end.min(task_data.get(current_task.end()));
-                                let len = span.total();
-                                tx_event
-                                    .send(Event::ReadProgress(id, span.clone()))
+                                let range_start = range.start + downloaded;
+                                downloaded += len;
+                                let range_end = range.start + downloaded;
+                                let span = range_start..range_end.min(task_list.get(task.end()));
+                                let len = span.total() as usize;
+                                tx.send(Event::ReadProgress(id, span.clone()))
                                     .await
                                     .unwrap();
-                                tx_data
-                                    .send((id, span, chunk.split_to(len as usize)))
+                                tx_write
+                                    .send((id, span, chunk.split_to(len)))
                                     .await
                                     .unwrap();
-                                if start >= current_task.end() {
+                                if start >= task.end() {
                                     continue 'steal_task;
                                 }
                             }
                             Ok(None) => break,
                             Err(e) => {
-                                tx_event.send(Event::ReadError(id, e)).await.unwrap();
+                                tx.send(Event::ReadError(id, e)).await.unwrap();
                                 tokio::time::sleep(options.retry_gap).await;
                             }
                         }
@@ -115,8 +113,7 @@ where
         });
         abort_handles.push(handle.abort_handle());
     }
-    abort_handles.push(write_handle.abort_handle());
-    PullResult::new(event_chain, write_handle, &abort_handles)
+    DownloadResult::new(event_chain, write_handle, &abort_handles)
 }
 
 #[cfg(test)]
@@ -124,8 +121,8 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::{
-        ProgressEntry, ProgressExt,
-        core::utils::{FixedPusher, StaticPuller, build_mock_data},
+        MergeProgress, ProgressEntry,
+        core::mock::{MockRandReader, MockRandWriter, build_mock_data},
     };
     use alloc::vec;
     use std::dbg;
@@ -133,17 +130,17 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_download() {
         let mock_data = build_mock_data(3 * 1024);
-        let reader = StaticPuller::new(&mock_data);
-        let writer = FixedPusher::new(mock_data.len());
+        let reader = MockRandReader::new(&mock_data);
+        let writer = MockRandWriter::new(&mock_data);
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
-        let result = pull(
+        let result = download_multi(
             reader,
             writer.clone(),
-            PullOptions {
+            DownloadOptions {
                 concurrent: NonZeroUsize::new(32).unwrap(),
                 retry_gap: Duration::from_secs(1),
-                data_queue_cap: 1024,
+                write_queue_cap: 1024,
                 download_chunks: download_chunks.clone(),
             },
         )
@@ -168,6 +165,6 @@ mod tests {
         assert_eq!(write_progress, download_chunks);
 
         result.join().await.unwrap();
-        writer.assert_eq(&mock_data).await;
+        writer.assert().await;
     }
 }

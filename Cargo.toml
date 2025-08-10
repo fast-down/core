@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/fast-pull", "./crates/fast-down", "./crates/fast-steal"]
+members = ["crates/fast-steal", "crates/fast-pull"]
+# members = ["crates/fast-steal", "crates/fast-pull", "crates/fast-down"]
 
 [workspace.package]
 edition = "2024"
@@ -10,11 +11,9 @@ license = "MIT"
 authors = ["share121 <2854631158@qq.com>", "Cyan Changes <contact@cyans.me>"]
 
 [workspace.dependencies]
+fast-steal = { path = "crates/fast-steal" }
 fast-pull = { path = "crates/fast-pull" }
-fast-steal = { path = "./crates/fast-steal" }
-fast-down = { path = "./crates/fast-down" }
 bytes = { version = "1.10.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
-url = "2.5.4"
 thiserror = "2.0.12"
-
+url = "2.5.4"

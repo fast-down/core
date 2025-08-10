@@ -3,11 +3,11 @@ use crate::split_task::SplitTask;
 use core::borrow::Borrow;
 
 pub trait StealTask {
-    fn steal_from<T: Borrow<Self>>(&self, tasks: &[T], min_chunk_size: u64) -> bool;
+    fn steal<T: Borrow<Self>>(&self, tasks: &[T], min_chunk_size: u64) -> bool;
 }
 
 impl StealTask for Task {
-    fn steal_from<T: Borrow<Self>>(&self, tasks: &[T], min_chunk_size: u64) -> bool {
+    fn steal<T: Borrow<Self>>(&self, tasks: &[T], min_chunk_size: u64) -> bool {
         debug_assert!(min_chunk_size > 1, "min_chunk_size must be greater than 1");
         let (max_pos, max_remain) = tasks
             .iter()
@@ -36,7 +36,7 @@ mod tests {
     fn test_steal_no_tasks() {
         let thief = Task::new(0, 0);
         let tasks: Vec<Task> = vec![];
-        assert!(!thief.steal_from(&tasks, 10));
+        assert!(!thief.steal(&tasks, 10));
     }
 
     #[test]
@@ -46,7 +46,7 @@ mod tests {
             Task::new(0, 5),  // remain = 5
             Task::new(8, 10), // remain = 2
         ];
-        assert!(!thief.steal_from(&tasks, 10));
+        assert!(!thief.steal(&tasks, 10));
     }
 
     #[test]
@@ -58,7 +58,7 @@ mod tests {
             Task::new(30, 40), // remain = 10
         ];
 
-        assert!(thief.steal_from(&tasks, 10));
+        assert!(thief.steal(&tasks, 10));
 
         assert_eq!(thief.start(), 17);
         assert_eq!(thief.end(), 25);
@@ -74,7 +74,7 @@ mod tests {
             Task::new(0, 10), // remain = 10
         ];
 
-        assert!(thief.steal_from(&tasks, 10));
+        assert!(thief.steal(&tasks, 10));
 
         assert_eq!(thief.start(), 5);
         assert_eq!(thief.end(), 10);

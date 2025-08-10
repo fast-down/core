@@ -1,5 +1,5 @@
-use std::time::Duration;
 use futures::future::LocalBoxFuture;
+use std::time::Duration;
 
 enum DurationTransform {
     Boxed(Box<dyn FnMut(Duration) -> Duration>),
@@ -9,7 +9,7 @@ enum DurationTransform {
 enum RetryStrategy {
     Fixed(Duration),
     Transform(Duration, DurationTransform),
-    Fn(Box<dyn FnMut() -> LocalBoxFuture<'static, ()>>)
+    Fn(Box<dyn FnMut() -> LocalBoxFuture<'static, ()>>),
 }
 
 pub struct PullOptions {

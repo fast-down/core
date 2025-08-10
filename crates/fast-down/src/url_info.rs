@@ -1,1 +1,1 @@
-struct UrlInfo
+struct UrlInfo {}

@@ -2,11 +2,11 @@ extern crate alloc;
 use crate::{Mergeable, ProgressEntry};
 use alloc::vec::Vec;
 
-pub trait ProgressExt {
+pub trait MergeProgress {
     fn merge_progress(&mut self, new: ProgressEntry);
 }
 
-impl ProgressExt for Vec<ProgressEntry> {
+impl MergeProgress for Vec<ProgressEntry> {
     fn merge_progress(&mut self, new: ProgressEntry) {
         let i = self.partition_point(|old| old.start < new.start);
         if i == self.len() {
