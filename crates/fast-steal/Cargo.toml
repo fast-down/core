@@ -1,0 +1,14 @@
+[package]
+name = "fast-steal"
+description = "特别快的多线程库，支持超细颗粒度的任务窃取"
+version = "5.1.1"
+edition = "2024"
+authors = ["share121 <2854631158@qq.com>"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/fast-down/fast-steal"
+homepage = "https://github.com/fast-down/fast-steal"
+documentation = "https://docs.rs/fast-steal"
+exclude = ["/.github"]
+keywords = ["parallel", "thread", "concurrency", "performance", "no-std"]
+categories = ["concurrency", "no-std"]

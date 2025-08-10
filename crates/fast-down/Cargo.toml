@@ -1,0 +1,15 @@
+[package]
+name = "fast-down"
+version = "3.0.0"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+authors = ["share121 <2854631158@qq.com>", "Cyan Changes <contact@cyans.me>"]
+readme = "README.md"
+description = "Fast IO Multiplex and Demultiplex library"
+documentation = "https://docs.rs/fast-down"
+keywords = ["download", "fast", "parallel", "concurrency"]
+categories = ["concurrency", "asynchronous", "network-programming", "no-std"]
+
+[dependencies]
+fast-io.workspace = true

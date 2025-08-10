@@ -1,0 +1,81 @@
+name: Test
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        channel:
+          - stable
+          - beta
+          - nightly
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.channel }}
+          components: clippy
+
+      - name: Configure sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Set Rust Caching Env
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+      - name: Test
+        run: cargo test --release --all --verbose
+
+      - name: Build
+        run: cargo build --all --verbose
+
+      - name: Clippy
+        run: cargo clippy --all --verbose -- -Dwarnings
+
+  check-minimal:
+    name: Check minimal versions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+
+      - name: Configure sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Set Rust Caching Env
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+      - name: Check minimal versions
+        run: cargo check --all --all-targets -Z minimal-versions
+
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install latest stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Run rustfmt
+        run: cargo fmt --all -- --check
