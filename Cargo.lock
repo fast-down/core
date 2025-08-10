@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "fast-pull"
-version = "0.0.1"
+version = "2.2.4"
 dependencies = [
  "bytes",
  "content_disposition",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "fast-steal"
-version = "5.1.1"
+version = "5.1.2"
 
 [[package]]
 name = "fastrand"
