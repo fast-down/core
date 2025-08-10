@@ -1,12 +1,12 @@
 extern crate alloc;
-use super::macros::{check_running, poll_ok};
+extern crate spin;
+use super::macros::poll_ok;
 use crate::{DownloadResult, Event, ProgressEntry, RandReader, RandWriter, Total, WorkerId};
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
-use core::{num::NonZeroUsize, sync::atomic::AtomicBool, time::Duration};
+use core::{num::NonZeroUsize, time::Duration};
 use fast_steal::{SplitTask, StealTask, Task, TaskList};
 use futures::TryStreamExt;
-use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
@@ -29,7 +29,7 @@ where
     let (tx_write, rx_write) =
         kanal::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.write_queue_cap);
     let tx_clone = tx.clone();
-    let handle = tokio::spawn(async move {
+    let write_handle = tokio::spawn(async move {
         while let Ok((id, spin, data)) = rx_write.recv().await {
             poll_ok!(
                 {},
@@ -46,29 +46,27 @@ where
             options.retry_gap
         );
     });
-    let mutex = Arc::new(Mutex::new(()));
+    let mutex = Arc::new(spin::mutex::SpinMutex::<_>::new(()));
     let task_list = Arc::new(TaskList::from(&options.download_chunks[..]));
     let tasks = Arc::from_iter(
         Task::from(&*task_list)
             .split_task(options.concurrent.get() as u64)
             .map(Arc::new),
     );
-    let running = Arc::new(AtomicBool::new(true));
+    let mut abort_handles = Vec::with_capacity(tasks.len() + 1);
     for (id, task) in tasks.iter().enumerate() {
         let task = task.clone();
         let tasks = tasks.clone();
         let task_list = task_list.clone();
         let mutex = mutex.clone();
         let tx = tx.clone();
-        let running = running.clone();
         let mut reader = reader.clone();
         let tx_write = tx_write.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             'steal_task: loop {
-                check_running!(id, running, tx);
                 let mut start = task.start();
                 if start >= task.end() {
-                    let guard = mutex.lock().await;
+                    let guard = mutex.lock();
                     if task.steal(&tasks, 16 * 1024) {
                         continue;
                     }
@@ -78,12 +76,10 @@ where
                 }
                 let download_range = &task_list.get_range(start..task.end());
                 for range in download_range {
-                    check_running!(id, running, tx);
                     tx.send(Event::Reading(id)).await.unwrap();
                     let mut stream = reader.read(range);
                     let mut downloaded = 0;
                     loop {
-                        check_running!(id, running, tx);
                         match stream.try_next().await {
                             Ok(Some(mut chunk)) => {
                                 let len = chunk.len() as u64;
@@ -115,8 +111,10 @@ where
                 }
             }
         });
+        abort_handles.push(handle.abort_handle());
     }
-    DownloadResult::new(event_chain, handle, running)
+    abort_handles.push(write_handle.abort_handle());
+    DownloadResult::new(event_chain, write_handle, &abort_handles)
 }
 
 #[cfg(test)]

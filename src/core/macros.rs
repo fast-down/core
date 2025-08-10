@@ -1,12 +1,3 @@
-macro_rules! check_running {
-    ($id:expr, $running:expr, $tx:expr) => {
-        if !$running.load(core::sync::atomic::Ordering::Relaxed) {
-            $tx.send($crate::Event::Abort($id)).await.unwrap();
-            return;
-        }
-    };
-}
-
 macro_rules! poll_ok {
     (
         $prelude:block,
@@ -44,5 +35,4 @@ macro_rules! poll_ok {
     };
 }
 
-pub(crate) use check_running;
 pub(crate) use poll_ok;

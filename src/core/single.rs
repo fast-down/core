@@ -1,9 +1,8 @@
 extern crate alloc;
-use super::macros::{check_running, poll_ok};
+use super::macros::poll_ok;
 use crate::{DownloadResult, Event, ProgressEntry, SeqReader, SeqWriter};
-use alloc::sync::Arc;
 use bytes::Bytes;
-use core::{sync::atomic::AtomicBool, time::Duration};
+use core::time::Duration;
 use futures::TryStreamExt;
 
 #[derive(Debug, Clone)]
@@ -26,7 +25,7 @@ where
         kanal::bounded_async::<(ProgressEntry, Bytes)>(options.write_queue_cap);
     let tx_clone = tx.clone();
     const ID: usize = 0;
-    let handle = tokio::spawn(async move {
+    let write_handle = tokio::spawn(async move {
         while let Ok((spin, data)) = rx_write.recv().await {
             poll_ok!(
                 {},
@@ -43,15 +42,11 @@ where
             options.retry_gap
         );
     });
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
-    tokio::spawn(async move {
-        check_running!(ID, running, tx);
+    let handle = tokio::spawn(async move {
         tx.send(Event::Reading(ID)).await.unwrap();
         let mut downloaded: u64 = 0;
         let mut stream = reader.read();
         loop {
-            check_running!(ID, running, tx);
             match stream.try_next().await {
                 Ok(Some(chunk)) => {
                     let len = chunk.len() as u64;
@@ -71,7 +66,12 @@ where
         }
         tx.send(Event::Finished(ID)).await.unwrap();
     });
-    DownloadResult::new(event_chain, handle, running_clone)
+    let write_abort_handle = write_handle.abort_handle();
+    DownloadResult::new(
+        event_chain,
+        write_handle,
+        &[handle.abort_handle(), write_abort_handle],
+    )
 }
 
 #[cfg(test)]

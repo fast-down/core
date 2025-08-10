@@ -11,5 +11,4 @@ pub enum Event<ReadError, WriteError> {
     WriteProgress(WorkerId, ProgressEntry),
     FlushError(WriteError),
     Finished(WorkerId),
-    Abort(WorkerId),
 }

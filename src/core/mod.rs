@@ -1,14 +1,11 @@
 extern crate alloc;
 use crate::Event;
 use alloc::sync::Arc;
-use core::{
-    fmt::Debug,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use core::fmt::Debug;
 use kanal::AsyncReceiver;
 use tokio::{
     sync::Mutex,
-    task::{JoinError, JoinHandle},
+    task::{AbortHandle, JoinError, JoinHandle},
 };
 
 mod macros;
@@ -21,7 +18,7 @@ pub mod single;
 pub struct DownloadResult<ReadError, WriteError> {
     pub event_chain: AsyncReceiver<Event<ReadError, WriteError>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
-    is_running: Arc<AtomicBool>,
+    abort_handles: Arc<[AbortHandle]>,
 }
 
 impl<RE, WE> Clone for DownloadResult<RE, WE> {
@@ -29,7 +26,7 @@ impl<RE, WE> Clone for DownloadResult<RE, WE> {
         Self {
             event_chain: self.event_chain.clone(),
             handle: self.handle.clone(),
-            is_running: self.is_running.clone(),
+            abort_handles: self.abort_handles.clone(),
         }
     }
 }
@@ -38,12 +35,12 @@ impl<ReadError, WriteError> DownloadResult<ReadError, WriteError> {
     pub fn new(
         event_chain: AsyncReceiver<Event<ReadError, WriteError>>,
         handle: JoinHandle<()>,
-        is_running: Arc<AtomicBool>,
+        abort_handles: &[AbortHandle],
     ) -> Self {
         Self {
             event_chain,
+            abort_handles: Arc::from(abort_handles),
             handle: Arc::new(Mutex::new(Some(handle))),
-            is_running,
         }
     }
 
@@ -54,8 +51,9 @@ impl<ReadError, WriteError> DownloadResult<ReadError, WriteError> {
         Ok(())
     }
 
-    /// 取消后记得调用 `self.join().await` 等待真正的退出
-    pub fn cancel(&self) {
-        self.is_running.store(false, Ordering::Relaxed);
+    pub fn abort(&self) {
+        for abort_handle in self.abort_handles.iter() {
+            abort_handle.abort();
+        }
     }
 }

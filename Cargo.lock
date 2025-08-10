@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "fast-pull"
-version = "2.2.3"
+version = "2.2.4"
 dependencies = [
  "bytes",
  "content_disposition",
@@ -176,6 +176,7 @@ dependencies = [
  "mockito",
  "reqwest",
  "sanitize-filename",
+ "spin",
  "tempfile",
  "thiserror 2.0.12",
  "tokio",
@@ -1016,6 +1017,12 @@ dependencies = [
  "libc",
  "windows-sys",
 ]
+
+[[package]]
+name = "spin"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
 
 [[package]]
 name = "stable_deref_trait"
