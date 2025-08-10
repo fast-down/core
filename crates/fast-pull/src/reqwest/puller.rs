@@ -1,5 +1,5 @@
 extern crate alloc;
-use crate::{RandReader, SeqReader};
+use crate::{RandPuller, SeqPuller};
 use alloc::{boxed::Box, format};
 use bytes::Bytes;
 use core::{
@@ -11,20 +11,20 @@ use reqwest::{Client, Response, header};
 use url::Url;
 
 #[derive(Clone)]
-pub struct ReqwestReader {
+pub struct ReqwestPuller {
     pub(crate) client: Client,
     url: Url,
 }
 
-impl ReqwestReader {
+impl ReqwestPuller {
     pub fn new(url: Url, client: Client) -> Self {
         Self { client, url }
     }
 }
 
-impl RandReader for ReqwestReader {
+impl RandPuller for ReqwestPuller {
     type Error = reqwest::Error;
-    fn read(
+    fn pull(
         &mut self,
         range: &crate::ProgressEntry,
     ) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
@@ -109,9 +109,9 @@ impl Stream for ReqwestStream {
     }
 }
 
-impl SeqReader for ReqwestReader {
+impl SeqPuller for ReqwestPuller {
     type Error = reqwest::Error;
-    fn read(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
+    fn pull(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
         let req = self.client.get(self.url.clone());
         Box::pin(async move {
             let resp = req.send().await?;
@@ -127,9 +127,9 @@ mod tests {
     use super::*;
     use crate::{
         Event, MergeProgress, ProgressEntry,
-        mock::{MockRandWriter, MockSeqWriter, build_mock_data},
+        mock::{MockRandPusher, MockSeqPusher, build_mock_data},
         multi::{self, download_multi},
-        reqwest::ReqwestReader,
+        reqwest::ReqwestPuller,
         single::{self, download_single},
     };
     use alloc::vec;
@@ -170,45 +170,45 @@ mod tests {
             })
             .create_async()
             .await;
-        let reader = ReqwestReader::new(
+        let puller = ReqwestPuller::new(
             format!("{}/concurrent", server.url()).parse().unwrap(),
             Client::new(),
         );
-        let writer = MockRandWriter::new(&mock_data);
+        let pusher = MockRandPusher::new(&mock_data);
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_multi(
-            reader,
-            writer.clone(),
+            puller,
+            pusher.clone(),
             multi::DownloadOptions {
                 concurrent: NonZeroUsize::new(32).unwrap(),
                 retry_gap: Duration::from_secs(1),
-                write_queue_cap: 1024,
+                push_queue_cap: 1024,
                 download_chunks: download_chunks.clone(),
             },
         )
         .await;
 
-        let mut download_progress: Vec<ProgressEntry> = Vec::new();
-        let mut write_progress: Vec<ProgressEntry> = Vec::new();
+        let mut pull_progress: Vec<ProgressEntry> = Vec::new();
+        let mut push_progress: Vec<ProgressEntry> = Vec::new();
         while let Ok(e) = result.event_chain.recv().await {
             match e {
-                Event::ReadProgress(_, p) => {
-                    download_progress.merge_progress(p);
+                Event::PullProgress(_, p) => {
+                    pull_progress.merge_progress(p);
                 }
-                Event::WriteProgress(_, p) => {
-                    write_progress.merge_progress(p);
+                Event::PushProgress(_, p) => {
+                    push_progress.merge_progress(p);
                 }
                 _ => {}
             }
         }
-        dbg!(&download_progress);
-        dbg!(&write_progress);
-        assert_eq!(download_progress, download_chunks);
-        assert_eq!(write_progress, download_chunks);
+        dbg!(&pull_progress);
+        dbg!(&push_progress);
+        assert_eq!(pull_progress, download_chunks);
+        assert_eq!(push_progress, download_chunks);
 
         result.join().await.unwrap();
-        writer.assert().await;
+        pusher.assert().await;
     }
 
     #[tokio::test]
@@ -221,42 +221,42 @@ mod tests {
             .with_body(mock_data.clone())
             .create_async()
             .await;
-        let reader = ReqwestReader::new(
+        let puller = ReqwestPuller::new(
             format!("{}/sequential", server.url()).parse().unwrap(),
             Client::new(),
         );
-        let writer = MockSeqWriter::new(&mock_data);
+        let pusher = MockSeqPusher::new(&mock_data);
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_single(
-            reader,
-            writer.clone(),
+            puller,
+            pusher.clone(),
             single::DownloadOptions {
                 retry_gap: Duration::from_secs(1),
-                write_queue_cap: 1024,
+                push_queue_cap: 1024,
             },
         )
         .await;
 
-        let mut download_progress: Vec<ProgressEntry> = Vec::new();
-        let mut write_progress: Vec<ProgressEntry> = Vec::new();
+        let mut pull_progress: Vec<ProgressEntry> = Vec::new();
+        let mut push_progress: Vec<ProgressEntry> = Vec::new();
         while let Ok(e) = result.event_chain.recv().await {
             match e {
-                Event::ReadProgress(_, p) => {
-                    download_progress.merge_progress(p);
+                Event::PullProgress(_, p) => {
+                    pull_progress.merge_progress(p);
                 }
-                Event::WriteProgress(_, p) => {
-                    write_progress.merge_progress(p);
+                Event::PushProgress(_, p) => {
+                    push_progress.merge_progress(p);
                 }
                 _ => {}
             }
         }
-        dbg!(&download_progress);
-        dbg!(&write_progress);
-        assert_eq!(download_progress, download_chunks);
-        assert_eq!(write_progress, download_chunks);
+        dbg!(&pull_progress);
+        dbg!(&push_progress);
+        assert_eq!(pull_progress, download_chunks);
+        assert_eq!(push_progress, download_chunks);
 
         result.join().await.unwrap();
-        writer.assert().await;
+        pusher.assert().await;
     }
 }

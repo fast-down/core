@@ -1,5 +1,5 @@
 mod prefetch;
-mod reader;
+mod puller;
 
 pub use prefetch::*;
-pub use reader::*;
+pub use puller::*;

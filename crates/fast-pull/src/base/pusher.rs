@@ -2,9 +2,9 @@ use crate::ProgressEntry;
 use bytes::Bytes;
 use core::future;
 
-pub trait RandWriter: Send {
+pub trait RandPusher: Send {
     type Error: Send;
-    fn write(
+    fn push(
         &mut self,
         range: ProgressEntry,
         content: Bytes,
@@ -14,9 +14,9 @@ pub trait RandWriter: Send {
     }
 }
 
-pub trait SeqWriter: Send {
+pub trait SeqPusher: Send {
     type Error: Send;
-    fn write(&mut self, content: Bytes) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn push(&mut self, content: Bytes) -> impl Future<Output = Result<(), Self::Error>> + Send;
     fn flush(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
         future::ready(Ok(()))
     }

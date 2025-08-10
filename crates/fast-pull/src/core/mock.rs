@@ -1,5 +1,5 @@
 extern crate alloc;
-use crate::{ProgressEntry, RandReader, RandWriter, SeqReader, SeqWriter};
+use crate::{ProgressEntry, RandPuller, RandPusher, SeqPuller, SeqPusher};
 use alloc::vec;
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
@@ -11,15 +11,15 @@ pub fn build_mock_data(size: usize) -> Vec<u8> {
 }
 
 #[derive(Clone)]
-pub struct MockRandReader(pub Arc<[u8]>);
-impl MockRandReader {
+pub struct MockRandPuller(pub Arc<[u8]>);
+impl MockRandPuller {
     pub fn new(data: &[u8]) -> Self {
         Self(Arc::from(data))
     }
 }
-impl RandReader for MockRandReader {
+impl RandPuller for MockRandPuller {
     type Error = ();
-    fn read(
+    fn pull(
         &mut self,
         range: &ProgressEntry,
     ) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
@@ -28,25 +28,25 @@ impl RandReader for MockRandReader {
     }
 }
 
-pub struct MockSeqReader(pub Vec<u8>);
-impl MockSeqReader {
+pub struct MockSeqPuller(pub Vec<u8>);
+impl MockSeqPuller {
     pub fn new(data: Vec<u8>) -> Self {
         Self(data)
     }
 }
-impl SeqReader for MockSeqReader {
+impl SeqPuller for MockSeqPuller {
     type Error = ();
-    fn read(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
+    fn pull(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
         stream::iter(self.0.iter().map(|e| Ok(Bytes::from_iter([*e]))))
     }
 }
 
 #[derive(Clone)]
-pub struct MockRandWriter {
+pub struct MockRandPusher {
     pub receive: Arc<Mutex<Vec<u8>>>,
     pub result: Arc<[u8]>,
 }
-impl MockRandWriter {
+impl MockRandPusher {
     pub fn new(result: &[u8]) -> Self {
         Self {
             receive: Arc::new(Mutex::new(vec![0; result.len()])),
@@ -58,9 +58,9 @@ impl MockRandWriter {
         assert_eq!(&receive[..], &self.result[..]);
     }
 }
-impl RandWriter for MockRandWriter {
+impl RandPusher for MockRandPusher {
     type Error = ();
-    async fn write(&mut self, range: ProgressEntry, content: Bytes) -> Result<(), Self::Error> {
+    async fn push(&mut self, range: ProgressEntry, content: Bytes) -> Result<(), Self::Error> {
         self.receive.lock().await[range.start as usize..range.end as usize]
             .copy_from_slice(&content);
         Ok(())
@@ -68,11 +68,11 @@ impl RandWriter for MockRandWriter {
 }
 
 #[derive(Clone)]
-pub struct MockSeqWriter {
+pub struct MockSeqPusher {
     pub receive: Arc<Mutex<Vec<u8>>>,
     pub result: Arc<[u8]>,
 }
-impl MockSeqWriter {
+impl MockSeqPusher {
     pub fn new(result: &[u8]) -> Self {
         Self {
             result: Arc::from(result),
@@ -84,9 +84,9 @@ impl MockSeqWriter {
         assert_eq!(&receive[..], &self.result[..]);
     }
 }
-impl SeqWriter for MockSeqWriter {
+impl SeqPusher for MockSeqPusher {
     type Error = ();
-    async fn write(&mut self, content: Bytes) -> Result<(), Self::Error> {
+    async fn push(&mut self, content: Bytes) -> Result<(), Self::Error> {
         self.receive.lock().await.extend_from_slice(&content);
         Ok(())
     }

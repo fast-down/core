@@ -31,9 +31,9 @@
 use core::{num::NonZeroUsize, time::Duration};
 use fast_pull::{
     Event, MergeProgress, ProgressEntry,
-    file::RandFileWriterMmap,
+    file::RandFilePusherMmap,
     multi::{self, download_multi},
-    reqwest::{Prefetch, ReqwestReader},
+    reqwest::{Prefetch, ReqwestPuller},
 };
 use reqwest::Client;
 use tokio::fs::OpenOptions;
@@ -51,31 +51,31 @@ async fn main() {
         .open(info.name)
         .await
         .unwrap();
-    let reader = ReqwestReader::new(url.parse().unwrap(), client);
-    let writer = RandFileWriterMmap::new(file, info.size, 8 * 1024)
+    let puller = ReqwestPuller::new(url.parse().unwrap(), client);
+    let pusher = RandFilePusherMmap::new(file, info.size, 8 * 1024)
         .await
         .unwrap();
     let download_chunks = vec![0..info.size as u64];
     let result = download_multi(
-        reader,
-        writer,
+        puller,
+        pusher,
         multi::DownloadOptions {
             concurrent: NonZeroUsize::new(32).unwrap(),
             retry_gap: Duration::from_secs(1),
-            write_queue_cap: 1024,
+            push_queue_cap: 1024,
             download_chunks: download_chunks.clone(),
         },
     )
     .await;
-    let mut download_progress: Vec<ProgressEntry> = Vec::new();
-    let mut write_progress: Vec<ProgressEntry> = Vec::new();
+    let mut pull_progress: Vec<ProgressEntry> = Vec::new();
+    let mut push_progress: Vec<ProgressEntry> = Vec::new();
     while let Ok(e) = result.event_chain.recv().await {
         match e {
-            Event::ReadProgress(_, p) => {
-                download_progress.merge_progress(p);
+            Event::PullProgress(_, p) => {
+                pull_progress.merge_progress(p);
             }
-            Event::WriteProgress(_, p) => {
-                write_progress.merge_progress(p);
+            Event::PushProgress(_, p) => {
+                push_progress.merge_progress(p);
             }
             _ => {}
         }
