@@ -1,13 +1,15 @@
+extern crate alloc;
 use crate::task_list::TaskList;
+use alloc::sync::Arc;
 use core::{
     ops::Range,
     sync::atomic::{AtomicU64, Ordering},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Task {
-    start: AtomicU64,
-    end: AtomicU64,
+    start: Arc<AtomicU64>,
+    end: Arc<AtomicU64>,
 }
 
 impl Task {
@@ -44,8 +46,8 @@ impl Task {
 
     pub fn new(start: u64, end: u64) -> Self {
         Self {
-            start: AtomicU64::new(start),
-            end: AtomicU64::new(end),
+            start: Arc::new(AtomicU64::new(start)),
+            end: Arc::new(AtomicU64::new(end)),
         }
     }
 }
@@ -70,7 +72,7 @@ impl From<&Range<u64>> for Task {
 
 impl From<&TaskList> for Task {
     fn from(value: &TaskList) -> Self {
-        Self::new(0, value.len)
+        Self::new(0, value.len())
     }
 }
 

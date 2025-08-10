@@ -48,11 +48,7 @@ where
     });
     let mutex = Arc::new(spin::mutex::SpinMutex::<_>::new(()));
     let task_list = Arc::new(TaskList::from(&options.download_chunks[..]));
-    let tasks = Arc::from_iter(
-        Task::from(&*task_list)
-            .split_task(options.concurrent.get() as u64)
-            .map(Arc::new),
-    );
+    let tasks = Arc::from_iter(Task::from(&*task_list).split_task(options.concurrent.get() as u64));
     let mut abort_handles = Vec::with_capacity(tasks.len());
     for (id, task) in tasks.iter().enumerate() {
         let task = task.clone();

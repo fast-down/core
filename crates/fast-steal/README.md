@@ -46,11 +46,7 @@ fn main() {
     // 任务数据列表
     let task_list = Arc::new(TaskList::from(&[1..20, 41..48][..]));
     // 分配 8 个任务
-    let tasks = Arc::from_iter(
-        Task::from(&*task_list)
-            .split_task(8)
-            .map(Arc::new)
-    );
+    let tasks = Arc::from_iter(Task::from(&*task_list).split_task(8));
     let mut handles = Vec::with_capacity(tasks.len());
     for task in tasks.iter() {
         let task = task.clone();

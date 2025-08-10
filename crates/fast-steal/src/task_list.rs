@@ -2,11 +2,11 @@ extern crate alloc;
 use alloc::{sync::Arc, vec::Vec};
 use core::ops::Range;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TaskList {
     tasks: Arc<[Range<u64>]>,
     start_point: Arc<[u64]>,
-    pub len: u64,
+    len: u64,
 }
 
 impl From<&[Range<u64>]> for TaskList {
@@ -69,6 +69,16 @@ impl TaskList {
         }
 
         result
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 }
 
