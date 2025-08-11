@@ -209,6 +209,7 @@ name = "fast-steal"
 version = "6.0.0"
 dependencies = [
  "dashmap",
+ "kanal",
  "tokio",
 ]
 

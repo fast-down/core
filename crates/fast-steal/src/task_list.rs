@@ -29,11 +29,13 @@ impl<E: Executor> TaskList<E> {
     }
 
     pub fn steal(&self, task: &Task, min_chunk_size: u64) -> bool {
-        debug_assert!(min_chunk_size > 0, "min_chunk_size must be greater than 0");
+        debug_assert!(min_chunk_size > 1, "min_chunk_size must be greater than 1");
         if let Some(new_task) = self.waiting.iter().next() {
-            self.waiting.remove(new_task.key());
-            task.set_end(new_task.end());
-            task.set_start(new_task.start());
+            let new_task_arc = new_task.key().clone();
+            drop(new_task);
+            self.waiting.remove(&new_task_arc);
+            task.set_end(new_task_arc.end());
+            task.set_start(new_task_arc.start());
             return true;
         }
         if let Some(w) = self.running.iter().max_by_key(|w| w.key().remain())
@@ -49,7 +51,6 @@ impl<E: Executor> TaskList<E> {
     }
 
     pub fn set_threads(self: Arc<Self>, threads: usize, min_chunk_size: u64) {
-        extern crate std;
         debug_assert!(threads > 0, "threads must be greater than 0");
         debug_assert!(min_chunk_size > 0, "min_chunk_size must be greater than 0");
         let len = self.running.len();
@@ -60,8 +61,10 @@ impl<E: Executor> TaskList<E> {
                     let handle = self.executor.clone().execute(task.clone(), self.clone());
                     self.running.insert(task.clone(), handle);
                     need -= 1;
+                    false
+                } else {
+                    true
                 }
-                need == 0
             });
             while threads > self.running.len()
                 && let Some(w) = self.running.iter().max_by_key(|w| w.key().remain())
@@ -73,14 +76,16 @@ impl<E: Executor> TaskList<E> {
                 self.running.insert(task, handle);
             }
         } else if len > threads {
-            let mut need = len - threads;
+            let mut need_remove = len - threads;
             self.running.retain(|task, handle| {
-                if need > 0 {
+                if need_remove > 0 {
                     handle.abort();
                     self.waiting.insert(task.clone());
-                    need -= 1;
+                    need_remove -= 1;
+                    false
+                } else {
+                    true
                 }
-                need == 0
             });
         }
     }
