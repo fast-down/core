@@ -1,46 +1,47 @@
-use std::{collections::HashMap, sync::Arc};
-
+use dashmap::DashMap;
 use fast_steal::{Executor, Handle, Task, TaskList};
+use std::sync::Arc;
 use tokio::{
-    sync::{Mutex, mpsc},
-    task::JoinHandle,
+    sync::Mutex,
+    task::{AbortHandle, JoinHandle},
 };
 
 pub struct TokioExecutor {
-    pub tx: mpsc::UnboundedSender<(u64, u64)>,
-    pub mutex: Arc<Mutex<()>>,
+    pub mutex: Mutex<()>,
+    pub data: Arc<DashMap<u64, u64>>,
 }
-pub struct TokioHandle(JoinHandle<()>);
+#[derive(Clone)]
+pub struct TokioHandle(Arc<Mutex<Option<JoinHandle<()>>>>, AbortHandle);
 
 impl Handle for TokioHandle {
     type Output = ();
     fn abort(&mut self) -> Self::Output {
-        self.0.abort();
+        self.1.abort();
     }
 }
 
 impl Executor for TokioExecutor {
     type Handle = TokioHandle;
     fn execute(self: Arc<Self>, task: Arc<Task>, task_list: Arc<TaskList<Self>>) -> Self::Handle {
-        println!("start");
-        TokioHandle(tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 while task.start() < task.end() {
                     let i = task.start();
-                    // 提前更新进度，防止其他线程重复计算
                     task.fetch_add_start(1);
-                    // 计算
-                    self.tx.send((i, fib(i))).unwrap();
+                    let res = fib(i);
+                    println!("{i} = {res}");
+                    if self.data.insert(i, res).is_some() {
+                        panic!("数字 {i}，值为 {res} 重复计算");
+                    }
                 }
-                // 检查是否还有任务
-                // ⚠️注意：这里需要加锁，防止多个线程同时检查任务列表
                 let _guard = self.mutex.lock().await;
                 if !task_list.steal(&task, 2) {
-                    return;
+                    break;
                 }
-                // 这里需要释放锁
             }
-        }))
+        });
+        let abort_handle = handle.abort_handle();
+        TokioHandle(Arc::new(Mutex::new(Some(handle))), abort_handle)
     }
 }
 
@@ -62,22 +63,22 @@ fn fib_fast(n: u64) -> u64 {
 
 #[tokio::main]
 async fn main() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let mutex = Arc::new(Mutex::new(()));
-    let executor = TokioExecutor { tx, mutex };
+    let mutex = Mutex::new(());
+    let data = Arc::new(DashMap::new());
+    let executor = TokioExecutor {
+        mutex,
+        data: data.clone(),
+    };
     let pre_data = [1..20, 41..48];
-    TaskList::run(8, 1, &pre_data[..], executor);
-    let mut data = HashMap::new();
-    while let Some((i, res)) = rx.recv().await {
-        println!("{i} = {res}");
-        if data.insert(i, res).is_some() {
-            panic!("数字 {i}，值为 {res} 重复计算");
-        }
+    let task_list = TaskList::run(8, 1, &pre_data[..], executor);
+    let handles = task_list.handles();
+    for handle in handles.iter() {
+        handle.0.lock().await.take().unwrap().await.unwrap();
     }
     dbg!(&data);
     for range in pre_data {
         for i in range {
-            assert_eq!((i, data.get(&i)), (i, Some(&fib_fast(i))));
+            assert_eq!((i, data.get(&i).as_deref()), (i, Some(&fib_fast(i))));
         }
     }
 }

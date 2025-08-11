@@ -67,16 +67,10 @@ impl<E: Executor> TaskList<E> {
                 && let Some(w) = self.running.iter().max_by_key(|w| w.key().remain())
                 && w.key().remain() >= min_chunk_size
             {
-                todo!("这里有死锁问题，需要解决");
-                std::println!("{}", self.running.len());
                 let (start, end) = w.key().split_two();
-                std::println!("{}", self.running.len());
                 let task = Arc::new(Task::new(start, end));
-                std::println!("{}", self.running.len());
                 let handle = self.executor.clone().execute(task.clone(), self.clone());
-                std::println!("{}", self.running.len());
                 self.running.insert(task, handle);
-                std::println!("{}", self.running.len());
             }
         } else if len > threads {
             let mut need = len - threads;
@@ -89,5 +83,9 @@ impl<E: Executor> TaskList<E> {
                 need == 0
             });
         }
+    }
+
+    pub fn handles(&self) -> Arc<[E::Handle]> {
+        self.running.iter().map(|w| w.value().clone()).collect()
     }
 }

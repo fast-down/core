@@ -14,4 +14,8 @@ homepage.workspace = true
 
 [dependencies]
 dashmap = "6.1.0"
-tokio = { version = "1.47.1", features = ["full"] }
+tokio = { version = "1.47.1", features = [
+  "macros",
+  "rt-multi-thread",
+  "sync",
+], default-features = false }
