@@ -12,7 +12,6 @@ authors = ["share121 <2854631158@qq.com>", "Cyan Changes <contact@cyans.me>"]
 
 [workspace.dependencies]
 fast-steal = { version = "6.0.0", path = "crates/fast-steal" }
-fast-pull = { version = "2.2.4", path = "crates/fast-pull" }
 bytes = { version = "1.10.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 thiserror = "2.0.12"

@@ -1,15 +1,13 @@
-extern crate alloc;
-use crate::task_list::TaskList;
-use alloc::sync::Arc;
 use core::{
+    hash::Hash,
     ops::Range,
     sync::atomic::{AtomicU64, Ordering},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Task {
-    start: Arc<AtomicU64>,
-    end: Arc<AtomicU64>,
+    start: AtomicU64,
+    end: AtomicU64,
 }
 
 impl Task {
@@ -46,8 +44,8 @@ impl Task {
 
     pub fn new(start: u64, end: u64) -> Self {
         Self {
-            start: Arc::new(AtomicU64::new(start)),
-            end: Arc::new(AtomicU64::new(end)),
+            start: AtomicU64::new(start),
+            end: AtomicU64::new(end),
         }
     }
 }
@@ -55,6 +53,23 @@ impl Task {
 impl PartialEq for Task {
     fn eq(&self, other: &Self) -> bool {
         self.start() == other.start() && self.end() == other.end()
+    }
+}
+impl Eq for Task {}
+impl PartialOrd for Task {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.remain().cmp(&other.remain()))
+    }
+}
+impl Ord for Task {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.remain().cmp(&other.remain())
+    }
+}
+impl Hash for Task {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.start().hash(state);
+        self.end().hash(state);
     }
 }
 
@@ -67,12 +82,6 @@ impl From<&(u64, u64)> for Task {
 impl From<&Range<u64>> for Task {
     fn from(value: &Range<u64>) -> Self {
         Self::new(value.start, value.end)
-    }
-}
-
-impl From<&TaskList> for Task {
-    fn from(value: &TaskList) -> Self {
-        Self::new(0, value.len())
     }
 }
 
@@ -131,13 +140,5 @@ mod tests {
         assert_eq!(task1, task2);
         assert_ne!(task1, task3);
         assert_ne!(task1, task4);
-    }
-
-    #[test]
-    fn test_from_task_list() {
-        let task_list = TaskList::from(&[10..42, 80..84][..]);
-        let task: Task = (&task_list).into();
-        assert_eq!(task.start(), 0);
-        assert_eq!(task.end(), 36);
     }
 }

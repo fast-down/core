@@ -99,14 +99,12 @@
 //! }
 //! ```
 
+mod executor;
 mod split_task;
-mod steal_task;
 mod task;
 mod task_list;
-#[cfg(feature = "tokio")]
-pub mod tokio;
 
+pub use executor::{Executor, Handle};
 pub use split_task::SplitTask;
-pub use steal_task::StealTask;
 pub use task::Task;
 pub use task_list::TaskList;

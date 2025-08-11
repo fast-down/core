@@ -13,11 +13,5 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-spin = { version = "0.10.0", features = [
-  "spin_mutex",
-], default-features = false, optional = true }
-tokio = { version = "1.47.1", default-features = false, optional = true }
-
-[features]
-default = ["tokio"]
-tokio = ["dep:tokio", "dep:spin"]
+dashmap = "6.1.0"
+tokio = { version = "1.47.1", features = ["full"] }
