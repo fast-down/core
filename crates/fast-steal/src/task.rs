@@ -48,6 +48,14 @@ impl Task {
             end: AtomicU64::new(end),
         }
     }
+
+    pub fn split_two(&self) -> (u64, u64) {
+        let start = self.start();
+        let end = self.end();
+        let mid = (start + end) / 2;
+        self.set_end(mid);
+        (mid, end)
+    }
 }
 
 impl PartialEq for Task {
@@ -140,5 +148,15 @@ mod tests {
         assert_eq!(task1, task2);
         assert_ne!(task1, task3);
         assert_ne!(task1, task4);
+    }
+
+    #[test]
+    fn test_split_two() {
+        let task = Task::new(1, 6); // 1, 2, 3, 4, 5
+        let (mid, end) = task.split_two();
+        assert_eq!(task.start(), 1);
+        assert_eq!(task.end(), 3);
+        assert_eq!(mid, 3);
+        assert_eq!(end, 6);
     }
 }

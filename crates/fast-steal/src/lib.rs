@@ -18,7 +18,7 @@
 //!
 //! ```rust
 //! use fast_steal::{Executor, Handle, Task, TaskList};
-//! use std::{collections::HashMap, sync::Arc};
+//! use std::{collections::HashMap, sync::Arc, num::NonZero};
 //! use tokio::{
 //!     sync::{Mutex, mpsc},
 //!     task::{AbortHandle, JoinHandle},
@@ -50,7 +50,7 @@
 //!                     println!("task: {i} = {res}");
 //!                     self.tx.send((i, res)).unwrap();
 //!                 }
-//!                 if !task_list.steal(&task, 2) {
+//!                 if !task_list.steal(&task, NonZero::new(2).unwrap()) {
 //!                     break;
 //!                 }
 //!             }
@@ -82,7 +82,7 @@
 //!     let (tx, mut rx) = mpsc::unbounded_channel();
 //!     let executor = TokioExecutor { tx };
 //!     let pre_data = [1..20, 41..48];
-//!     let task_list = TaskList::run(8, 2, &pre_data[..], executor);
+//!     let task_list = TaskList::run(NonZero::new(8).unwrap(), NonZero::new(2).unwrap(), &pre_data[..], executor);
 //!     let handles = task_list.handles();
 //!     drop(task_list);
 //!     for handle in handles.iter() {
@@ -107,11 +107,9 @@
 //! ```
 
 mod executor;
-mod split_task;
 mod task;
 mod task_list;
 
 pub use executor::{Executor, Handle};
-pub use split_task::SplitTask;
 pub use task::Task;
 pub use task_list::TaskList;

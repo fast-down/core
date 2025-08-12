@@ -4,7 +4,7 @@ use crate::{DownloadResult, Event, ProgressEntry, RandPuller, RandPusher, Total,
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
 use core::{
-    num::NonZeroUsize,
+    num::{NonZero, NonZeroU64, NonZeroUsize},
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
@@ -18,7 +18,7 @@ pub struct DownloadOptions {
     pub concurrent: NonZeroUsize,
     pub retry_gap: Duration,
     pub push_queue_cap: usize,
-    pub min_chunk_size: u64,
+    pub min_chunk_size: NonZeroU64,
 }
 
 pub async fn download_multi<R, W>(
@@ -60,7 +60,7 @@ where
         min_chunk_size: options.min_chunk_size,
     };
     let task_list = TaskList::run(
-        options.concurrent.get(),
+        options.concurrent,
         options.min_chunk_size,
         &options.download_chunks[..],
         executor,
@@ -94,7 +94,7 @@ where
     puller: R,
     retry_gap: Duration,
     id: Arc<AtomicUsize>,
-    min_chunk_size: u64,
+    min_chunk_size: NonZeroU64,
 }
 impl<R, W> Executor for TokioExecutor<R, W>
 where
@@ -108,7 +108,8 @@ where
             'steal_task: loop {
                 let mut start = task.start();
                 if start >= task.end() {
-                    if task_list.steal(&task, 2 * self.min_chunk_size) {
+                    if task_list.steal(&task, NonZero::new(2 * self.min_chunk_size.get()).unwrap())
+                    {
                         continue;
                     }
                     break;
@@ -176,11 +177,11 @@ mod tests {
             puller,
             pusher.clone(),
             DownloadOptions {
-                concurrent: NonZeroUsize::new(32).unwrap(),
+                concurrent: NonZero::new(32).unwrap(),
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.clone(),
-                min_chunk_size: 1,
+                min_chunk_size: NonZero::new(1).unwrap(),
             },
         )
         .await;

@@ -1,7 +1,7 @@
 [package]
 name = "fast-steal"
 description = "特别快的多线程库，支持超细颗粒度的任务窃取"
-version = "6.0.1"
+version = "6.0.2"
 readme = "README.md"
 documentation = "https://docs.rs/fast-steal"
 keywords = ["parallel", "thread", "concurrency", "performance", "no-std"]

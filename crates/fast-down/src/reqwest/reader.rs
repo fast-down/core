@@ -5,7 +5,7 @@ use core::{
     pin::{Pin, pin},
     task::{Context, Poll},
 };
-use fast_pull::{Puller, RandPulelr};
+use fast_pull::{Puller, RandPuller};
 use futures::{Stream, TryFutureExt, TryStream};
 use reqwest::{Client, Response, header};
 use url::Url;
@@ -181,7 +181,7 @@ mod tests {
             reader,
             writer.clone(),
             multi::DownloadOptions {
-                concurrent: NonZeroUsize::new(32).unwrap(),
+                concurrent: NonZero::new(32).unwrap(),
                 retry_gap: Duration::from_secs(1),
                 write_queue_cap: 1024,
                 download_chunks: download_chunks.clone(),

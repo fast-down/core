@@ -1,8 +1,11 @@
 extern crate alloc;
 extern crate spin;
-use crate::{Executor, SplitTask, Task, executor::Handle};
+use crate::{Executor, Task, executor::Handle};
 use alloc::{sync::Arc, vec::Vec};
-use core::ops::Range;
+use core::{
+    num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
+};
 use spin::mutex::SpinMutex;
 
 #[derive(Debug)]
@@ -14,14 +17,13 @@ pub struct TaskList<E: Executor> {
 
 impl<E: Executor> TaskList<E> {
     pub fn run(
-        threads: usize,
-        min_chunk_size: u64,
+        threads: NonZeroUsize,
+        min_chunk_size: NonZeroU64,
         tasks: &[Range<u64>],
         executor: E,
     ) -> Arc<Self> {
-        debug_assert!(min_chunk_size > 0, "min_chunk_size must be greater than 0");
         let t = Arc::new(Self {
-            running: SpinMutex::new(Vec::with_capacity(threads)),
+            running: SpinMutex::new(Vec::with_capacity(threads.get())),
             waiting: SpinMutex::new(tasks.iter().map(Task::from).map(Arc::new).collect()),
             executor: Arc::new(executor),
         });
@@ -36,8 +38,8 @@ impl<E: Executor> TaskList<E> {
         len - running_guard.len()
     }
 
-    pub fn steal(&self, task: &Task, min_chunk_size: u64) -> bool {
-        debug_assert!(min_chunk_size > 0, "min_chunk_size must be greater than 0");
+    pub fn steal(&self, task: &Task, min_chunk_size: NonZeroU64) -> bool {
+        let min_chunk_size = min_chunk_size.get();
         let running_guard = self.running.lock();
         let mut waiting_guard = self.waiting.lock();
         if let Some(new_task) = waiting_guard.pop() {
@@ -57,9 +59,9 @@ impl<E: Executor> TaskList<E> {
         }
     }
 
-    pub fn set_threads(self: Arc<Self>, threads: usize, min_chunk_size: u64) {
-        debug_assert!(threads > 0, "threads must be greater than 0");
-        debug_assert!(min_chunk_size > 0, "min_chunk_size must be greater than 0");
+    pub fn set_threads(self: Arc<Self>, threads: NonZeroUsize, min_chunk_size: NonZeroU64) {
+        let threads = threads.get();
+        let min_chunk_size = min_chunk_size.get();
         let mut running_guard = self.running.lock();
         let mut waiting_guard = self.waiting.lock();
         let len = running_guard.len();
@@ -98,6 +100,7 @@ impl<E: Executor> TaskList<E> {
 mod tests {
     extern crate std;
     use crate::{Executor, Handle, Task, TaskList};
+    use core::num::NonZero;
     use std::{collections::HashMap, dbg, println, sync::Arc};
     use tokio::{
         sync::{Mutex, mpsc},
@@ -134,7 +137,7 @@ mod tests {
                         println!("task: {i} = {res}");
                         self.tx.send((i, res)).unwrap();
                     }
-                    if !task_list.steal(&task, 2) {
+                    if !task_list.steal(&task, NonZero::new(2).unwrap()) {
                         break;
                     }
                 }
@@ -166,7 +169,12 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let executor = TokioExecutor { tx };
         let pre_data = [1..20, 41..48];
-        let task_list = TaskList::run(8, 2, &pre_data[..], executor);
+        let task_list = TaskList::run(
+            NonZero::new(8).unwrap(),
+            NonZero::new(2).unwrap(),
+            &pre_data[..],
+            executor,
+        );
         let handles = task_list.handles();
         drop(task_list);
         for handle in handles.iter() {
