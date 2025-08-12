@@ -6,9 +6,9 @@
 
 `fast-down` **Fastest** concurrent downloader!
 
-- fast-steal: [![Latest version](https://img.shields.io/crates/v/fast-steal.svg)](https://crates.io/crates/fast-steal)
-- fast-pull: [![Latest version](https://img.shields.io/crates/v/fast-pull.svg)](https://crates.io/crates/fast-pull)
-- fast-down: [![Latest version](https://img.shields.io/crates/v/fast-down.svg)](https://crates.io/crates/fast-down)
+- fast-steal: [![Latest version](https://img.shields.io/crates/v/fast-steal.svg)](https://crates.io/crates/fast-steal) [![Documentation](https://docs.rs/fast-steal/badge.svg)](https://docs.rs/fast-steal)
+- fast-pull: [![Latest version](https://img.shields.io/crates/v/fast-pull.svg)](https://crates.io/crates/fast-pull) [![Documentation](https://docs.rs/fast-pull/badge.svg)](https://docs.rs/fast-pull)
+- fast-down: [![Latest version](https://img.shields.io/crates/v/fast-down.svg)](https://crates.io/crates/fast-down) [![Documentation](https://docs.rs/fast-down/badge.svg)](https://docs.rs/fast-down)
 
 **[Official Website (Simplified Chinese)](https://fast.s121.top/)**
 
