@@ -58,7 +58,7 @@ impl PartialEq for Task {
 impl Eq for Task {}
 impl PartialOrd for Task {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.remain().cmp(&other.remain()))
+        Some(self.cmp(other))
     }
 }
 impl Ord for Task {
