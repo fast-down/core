@@ -38,9 +38,15 @@ impl<E: Executor> TaskList<E> {
 
     pub fn remove(&self, task: &Task) -> usize {
         let mut guard = self.queue.lock();
-        let len = guard.running.len();
+        let len = guard.running.len() + guard.waiting.len();
         guard.running.retain(|(t, _)| &**t != task);
-        len - guard.running.len()
+        guard.waiting.retain(|t| &**t != task);
+        len - guard.running.len() - guard.waiting.len()
+    }
+
+    pub fn add(self: Arc<Self>, task: Arc<Task>) {
+        let mut guard = self.queue.lock();
+        guard.waiting.push_back(task);
     }
 
     pub fn steal(&self, task: &Task, min_chunk_size: NonZeroU64) -> bool {
