@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "fast-pull"
-version = "3.0.4"
+version = "3.0.5"
 dependencies = [
  "bytes",
  "content_disposition",
@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "fast-steal"
-version = "6.0.4"
+version = "6.0.5"
 dependencies = [
  "spin",
  "tokio",

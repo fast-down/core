@@ -9,11 +9,11 @@ use core::{
 use spin::mutex::SpinMutex;
 
 pub struct TaskList<E: Executor> {
-    inner: SpinMutex<TaskListInner<E>>,
+    queue: SpinMutex<TaskQueue<E>>,
     executor: Arc<E>,
 }
 
-struct TaskListInner<E: Executor> {
+struct TaskQueue<E: Executor> {
     running: VecDeque<(Arc<Task>, E::Handle)>,
     waiting: VecDeque<Arc<Task>>,
 }
@@ -26,7 +26,7 @@ impl<E: Executor> TaskList<E> {
         executor: E,
     ) -> Arc<Self> {
         let t = Arc::new(Self {
-            inner: SpinMutex::new(TaskListInner {
+            queue: SpinMutex::new(TaskQueue {
                 running: VecDeque::with_capacity(threads.get()),
                 waiting: tasks.iter().map(Task::from).map(Arc::new).collect(),
             }),
@@ -37,7 +37,7 @@ impl<E: Executor> TaskList<E> {
     }
 
     pub fn remove(&self, task: &Task) -> usize {
-        let mut guard = self.inner.lock();
+        let mut guard = self.queue.lock();
         let len = guard.running.len();
         guard.running.retain(|(t, _)| &**t != task);
         len - guard.running.len()
@@ -45,7 +45,7 @@ impl<E: Executor> TaskList<E> {
 
     pub fn steal(&self, task: &Task, min_chunk_size: NonZeroU64) -> bool {
         let min_chunk_size = min_chunk_size.get();
-        let mut guard = self.inner.lock();
+        let mut guard = self.queue.lock();
         if let Some(new_task) = guard.waiting.pop_front() {
             task.set_end(new_task.end());
             task.set_start(new_task.start());
@@ -66,7 +66,7 @@ impl<E: Executor> TaskList<E> {
     pub fn set_threads(self: Arc<Self>, threads: NonZeroUsize, min_chunk_size: NonZeroU64) {
         let threads = threads.get();
         let min_chunk_size = min_chunk_size.get();
-        let mut guard = self.inner.lock();
+        let mut guard = self.queue.lock();
         let len = guard.running.len();
         if len < threads {
             let need = (threads - len).min(guard.waiting.len());
@@ -102,7 +102,7 @@ impl<E: Executor> TaskList<E> {
     where
         F: FnOnce(&mut dyn Iterator<Item = E::Handle>) -> R,
     {
-        let guard = self.inner.lock();
+        let guard = self.queue.lock();
         let mut iter = guard.running.iter().map(|w| w.1.clone());
         f(&mut iter)
     }
