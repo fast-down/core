@@ -1,7 +1,7 @@
 extern crate alloc;
 extern crate spin;
 use crate::{Executor, Task, executor::Handle};
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -14,8 +14,8 @@ pub struct TaskList<E: Executor> {
 }
 
 struct TaskListInner<E: Executor> {
-    running: Vec<(Arc<Task>, E::Handle)>,
-    waiting: Vec<Arc<Task>>,
+    running: VecDeque<(Arc<Task>, E::Handle)>,
+    waiting: VecDeque<Arc<Task>>,
 }
 
 impl<E: Executor> TaskList<E> {
@@ -27,7 +27,7 @@ impl<E: Executor> TaskList<E> {
     ) -> Arc<Self> {
         let t = Arc::new(Self {
             inner: SpinMutex::new(TaskListInner {
-                running: Vec::with_capacity(threads.get()),
+                running: VecDeque::with_capacity(threads.get()),
                 waiting: tasks.iter().map(Task::from).map(Arc::new).collect(),
             }),
             executor: Arc::new(executor),
@@ -46,7 +46,7 @@ impl<E: Executor> TaskList<E> {
     pub fn steal(&self, task: &Task, min_chunk_size: NonZeroU64) -> bool {
         let min_chunk_size = min_chunk_size.get();
         let mut guard = self.inner.lock();
-        if let Some(new_task) = guard.waiting.pop() {
+        if let Some(new_task) = guard.waiting.pop_front() {
             task.set_end(new_task.end());
             task.set_start(new_task.start());
             return true;
@@ -84,7 +84,7 @@ impl<E: Executor> TaskList<E> {
                 let (start, end) = w.0.split_two();
                 let task = Arc::new(Task::new(start, end));
                 let handle = self.executor.clone().execute(task.clone(), self.clone());
-                guard.running.push((task, handle));
+                guard.running.push_back((task, handle));
             }
         } else if len > threads {
             let need_remove = len - threads;
