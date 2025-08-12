@@ -83,7 +83,7 @@
 //!     let executor = TokioExecutor { tx };
 //!     let pre_data = [1..20, 41..48];
 //!     let task_list = TaskList::run(NonZero::new(8).unwrap(), NonZero::new(2).unwrap(), &pre_data[..], executor);
-//!     let handles = task_list.handles();
+//!     let handles: Arc<[_]> = task_list.handles(|it| it.collect());
 //!     drop(task_list);
 //!     for handle in handles.iter() {
 //!         handle.0.lock().await.take().unwrap().await.unwrap();

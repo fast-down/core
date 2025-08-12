@@ -68,11 +68,7 @@ where
     DownloadResult::new(
         event_chain,
         push_handle,
-        &task_list
-            .handles()
-            .iter()
-            .map(|h| h.0.clone())
-            .collect::<Arc<[_]>>(),
+        &task_list.handles(|iter| iter.map(|h| h.0.clone()).collect::<Arc<[_]>>()),
     )
 }
 

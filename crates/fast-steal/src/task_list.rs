@@ -98,13 +98,13 @@ impl<E: Executor> TaskList<E> {
         }
     }
 
-    pub fn handles(&self) -> Arc<[E::Handle]> {
-        self.inner
-            .lock()
-            .running
-            .iter()
-            .map(|w| w.1.clone())
-            .collect()
+    pub fn handles<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut dyn Iterator<Item = E::Handle>) -> R,
+    {
+        let guard = self.inner.lock();
+        let mut iter = guard.running.iter().map(|w| w.1.clone());
+        f(&mut iter)
     }
 }
 
@@ -187,7 +187,7 @@ mod tests {
             &pre_data[..],
             executor,
         );
-        let handles = task_list.handles();
+        let handles: Arc<[_]> = task_list.handles(|it| it.collect());
         drop(task_list);
         for handle in handles.iter() {
             handle.0.lock().await.take().unwrap().await.unwrap();
