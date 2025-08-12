@@ -4,7 +4,7 @@ mod progress;
 mod puller;
 mod pusher;
 mod total;
-#[cfg(feature = "url")]
+#[cfg(feature = "reqwest")]
 mod url;
 
 pub use event::*;
@@ -13,5 +13,5 @@ pub use progress::*;
 pub use puller::*;
 pub use pusher::*;
 pub use total::*;
-#[cfg(feature = "url")]
+#[cfg(feature = "reqwest")]
 pub use url::*;

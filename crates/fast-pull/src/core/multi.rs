@@ -1,12 +1,12 @@
 extern crate alloc;
-extern crate spin;
 use super::macros::poll_ok;
 use crate::{DownloadResult, Event, ProgressEntry, RandPuller, RandPusher, Total, WorkerId};
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
 use core::{num::NonZeroUsize, time::Duration};
-use fast_steal::{SplitTask, StealTask, Task, TaskList};
+use fast_steal::{Executor, Handle, Task, TaskList};
 use futures::TryStreamExt;
+use tokio::task::AbortHandle;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
@@ -22,7 +22,7 @@ pub async fn download_multi<R, W>(
     options: DownloadOptions,
 ) -> DownloadResult<R::Error, W::Error>
 where
-    R: RandPuller + 'static,
+    R: RandPuller + 'static + Sync,
     W: RandPusher + 'static,
 {
     let (tx, event_chain) = kanal::unbounded_async();
@@ -46,67 +46,103 @@ where
             options.retry_gap
         );
     });
-    let mutex = Arc::new(spin::mutex::SpinMutex::<_>::new(()));
-    let task_list = Arc::new(TaskList::from(&options.download_chunks[..]));
-    let tasks = Arc::from_iter(Task::from(&*task_list).split_task(options.concurrent.get() as u64));
-    let mut abort_handles = Vec::with_capacity(tasks.len());
-    for (id, task) in tasks.iter().enumerate() {
-        let task = task.clone();
-        let tasks = tasks.clone();
-        let task_list = task_list.clone();
-        let mutex = mutex.clone();
-        let tx = tx.clone();
-        let mut puller = puller.clone();
-        let tx_push = tx_push.clone();
+    let executor: TokioExecutor<R, W> = TokioExecutor {
+        tx,
+        tx_push,
+        puller,
+        retry_gap: options.retry_gap,
+    };
+    let task_list = TaskList::run(
+        options.concurrent.get(),
+        8 * 1024,
+        &options.download_chunks[..],
+        executor,
+    );
+    DownloadResult::new(
+        event_chain,
+        push_handle,
+        &task_list
+            .handles()
+            .iter()
+            .map(|h| h.0.clone())
+            .collect::<Arc<[_]>>(),
+    )
+}
+
+#[derive(Clone)]
+pub struct TokioHandle(AbortHandle);
+impl Handle for TokioHandle {
+    type Output = ();
+    fn abort(&mut self) -> Self::Output {
+        self.0.abort();
+    }
+}
+pub struct TokioExecutor<R, W>
+where
+    R: RandPuller + 'static,
+    W: RandPusher + 'static,
+{
+    tx: kanal::AsyncSender<Event<R::Error, W::Error>>,
+    tx_push: kanal::AsyncSender<(WorkerId, ProgressEntry, Bytes)>,
+    puller: R,
+    retry_gap: Duration,
+}
+impl<R, W> Executor for TokioExecutor<R, W>
+where
+    R: RandPuller + 'static + Sync,
+    W: RandPusher + 'static,
+{
+    type Handle = TokioHandle;
+    fn execute(self: Arc<Self>, task: Arc<Task>, task_list: Arc<TaskList<Self>>) -> Self::Handle {
+        let id = 1; // TODO: worker id
         let handle = tokio::spawn(async move {
             'steal_task: loop {
                 let mut start = task.start();
                 if start >= task.end() {
-                    let guard = mutex.lock();
-                    if task.steal(&tasks, 16 * 1024) {
+                    if task_list.steal(&task, 16 * 1024) {
                         continue;
                     }
-                    drop(guard);
-                    tx.send(Event::Finished(id)).await.unwrap();
-                    return;
+                    break;
                 }
-                let download_range = &task_list.get_range(start..task.end());
-                for range in download_range {
-                    tx.send(Event::Pulling(id)).await.unwrap();
-                    let mut stream = puller.pull(range);
-                    let mut downloaded = 0;
-                    loop {
-                        match stream.try_next().await {
-                            Ok(Some(mut chunk)) => {
-                                let len = chunk.len() as u64;
-                                task.fetch_add_start(len);
-                                start += len;
-                                let range_start = range.start + downloaded;
-                                downloaded += len;
-                                let range_end = range.start + downloaded;
-                                let span = range_start..range_end.min(task_list.get(task.end()));
-                                let len = span.total() as usize;
-                                tx.send(Event::PullProgress(id, span.clone()))
-                                    .await
-                                    .unwrap();
-                                tx_push.send((id, span, chunk.split_to(len))).await.unwrap();
-                                if start >= task.end() {
-                                    continue 'steal_task;
-                                }
+                self.tx.send(Event::Pulling(id)).await.unwrap();
+                let download_range = start..task.end();
+                let mut puller = self.puller.clone();
+                let mut stream = puller.pull(&download_range);
+                loop {
+                    match stream.try_next().await {
+                        Ok(Some(mut chunk)) => {
+                            let len = chunk.len() as u64;
+                            task.fetch_add_start(len);
+                            let range_start = start;
+                            start += len;
+                            let range_end = start.min(task.end());
+                            if range_start >= range_end {
+                                continue 'steal_task;
                             }
-                            Ok(None) => break,
-                            Err(e) => {
-                                tx.send(Event::PullError(id, e)).await.unwrap();
-                                tokio::time::sleep(options.retry_gap).await;
-                            }
+                            let span = range_start..range_end;
+                            let len = span.total() as usize;
+                            self.tx
+                                .send(Event::PullProgress(id, span.clone()))
+                                .await
+                                .unwrap();
+                            self.tx_push
+                                .send((id, span, chunk.split_to(len)))
+                                .await
+                                .unwrap();
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            self.tx.send(Event::PullError(id, e)).await.unwrap();
+                            tokio::time::sleep(self.retry_gap).await;
                         }
                     }
                 }
             }
+            self.tx.send(Event::Finished(id)).await.unwrap();
+            task_list.remove(&task);
         });
-        abort_handles.push(handle.abort_handle());
+        TokioHandle(handle.abort_handle())
     }
-    DownloadResult::new(event_chain, push_handle, &abort_handles)
 }
 
 #[cfg(test)]
