@@ -8,11 +8,14 @@ use core::{
 };
 use spin::mutex::SpinMutex;
 
-#[derive(Debug)]
 pub struct TaskList<E: Executor> {
-    running: SpinMutex<Vec<(Arc<Task>, E::Handle)>>,
-    waiting: SpinMutex<Vec<Arc<Task>>>,
+    inner: SpinMutex<TaskListInner<E>>,
     executor: Arc<E>,
+}
+
+struct TaskListInner<E: Executor> {
+    running: Vec<(Arc<Task>, E::Handle)>,
+    waiting: Vec<Arc<Task>>,
 }
 
 impl<E: Executor> TaskList<E> {
@@ -23,8 +26,10 @@ impl<E: Executor> TaskList<E> {
         executor: E,
     ) -> Arc<Self> {
         let t = Arc::new(Self {
-            running: SpinMutex::new(Vec::with_capacity(threads.get())),
-            waiting: SpinMutex::new(tasks.iter().map(Task::from).map(Arc::new).collect()),
+            inner: SpinMutex::new(TaskListInner {
+                running: Vec::with_capacity(threads.get()),
+                waiting: tasks.iter().map(Task::from).map(Arc::new).collect(),
+            }),
             executor: Arc::new(executor),
         });
         t.clone().set_threads(threads, min_chunk_size);
@@ -32,22 +37,21 @@ impl<E: Executor> TaskList<E> {
     }
 
     pub fn remove(&self, task: &Task) -> usize {
-        let mut running_guard = self.running.lock();
-        let len = running_guard.len();
-        running_guard.retain(|(t, _)| &**t != task);
-        len - running_guard.len()
+        let mut guard = self.inner.lock();
+        let len = guard.running.len();
+        guard.running.retain(|(t, _)| &**t != task);
+        len - guard.running.len()
     }
 
     pub fn steal(&self, task: &Task, min_chunk_size: NonZeroU64) -> bool {
         let min_chunk_size = min_chunk_size.get();
-        let running_guard = self.running.lock();
-        let mut waiting_guard = self.waiting.lock();
-        if let Some(new_task) = waiting_guard.pop() {
+        let mut guard = self.inner.lock();
+        if let Some(new_task) = guard.waiting.pop() {
             task.set_end(new_task.end());
             task.set_start(new_task.start());
             return true;
         }
-        if let Some(w) = running_guard.iter().max_by_key(|w| w.0.remain())
+        if let Some(w) = guard.running.iter().max_by_key(|w| w.0.remain())
             && w.0.remain() >= min_chunk_size
         {
             let (start, end) = w.0.split_two();
@@ -62,37 +66,45 @@ impl<E: Executor> TaskList<E> {
     pub fn set_threads(self: Arc<Self>, threads: NonZeroUsize, min_chunk_size: NonZeroU64) {
         let threads = threads.get();
         let min_chunk_size = min_chunk_size.get();
-        let mut running_guard = self.running.lock();
-        let mut waiting_guard = self.waiting.lock();
-        let len = running_guard.len();
+        let mut guard = self.inner.lock();
+        let len = guard.running.len();
         if len < threads {
-            let need = (threads - len).min(waiting_guard.len());
-            let iter = waiting_guard.drain(..need);
+            let need = (threads - len).min(guard.waiting.len());
+            let mut temp = Vec::with_capacity(need);
+            let iter = guard.waiting.drain(..need);
             for task in iter {
                 let handle = self.executor.clone().execute(task.clone(), self.clone());
-                running_guard.push((task.clone(), handle));
+                temp.push((task.clone(), handle));
             }
-            while threads > running_guard.len()
-                && let Some(w) = running_guard.iter().max_by_key(|w| w.0.remain())
+            guard.running.extend(temp);
+            while threads > guard.running.len()
+                && let Some(w) = guard.running.iter().max_by_key(|w| w.0.remain())
                 && w.0.remain() >= min_chunk_size
             {
                 let (start, end) = w.0.split_two();
                 let task = Arc::new(Task::new(start, end));
                 let handle = self.executor.clone().execute(task.clone(), self.clone());
-                running_guard.push((task, handle));
+                guard.running.push((task, handle));
             }
         } else if len > threads {
             let need_remove = len - threads;
-            let iter = running_guard.drain(..need_remove);
+            let mut temp = Vec::with_capacity(need_remove);
+            let iter = guard.running.drain(..need_remove);
             for (task, mut handle) in iter {
                 handle.abort();
-                waiting_guard.push(task.clone());
+                temp.push(task.clone());
             }
+            guard.waiting.extend(temp);
         }
     }
 
     pub fn handles(&self) -> Arc<[E::Handle]> {
-        self.running.lock().iter().map(|w| w.1.clone()).collect()
+        self.inner
+            .lock()
+            .running
+            .iter()
+            .map(|w| w.1.clone())
+            .collect()
     }
 }
 
