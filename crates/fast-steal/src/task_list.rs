@@ -19,7 +19,7 @@ impl<E: Executor> TaskList<E> {
         tasks: &[Range<u64>],
         executor: E,
     ) -> Arc<Self> {
-        debug_assert!(min_chunk_size > 1, "min_chunk_size must be greater than 1");
+        debug_assert!(min_chunk_size > 0, "min_chunk_size must be greater than 0");
         let t = Arc::new(Self {
             running: SpinMutex::new(Vec::with_capacity(threads)),
             waiting: SpinMutex::new(tasks.iter().map(Task::from).map(Arc::new).collect()),
@@ -37,7 +37,7 @@ impl<E: Executor> TaskList<E> {
     }
 
     pub fn steal(&self, task: &Task, min_chunk_size: u64) -> bool {
-        debug_assert!(min_chunk_size > 1, "min_chunk_size must be greater than 1");
+        debug_assert!(min_chunk_size > 0, "min_chunk_size must be greater than 0");
         let running_guard = self.running.lock();
         let mut waiting_guard = self.waiting.lock();
         if let Some(new_task) = waiting_guard.pop() {
@@ -59,7 +59,7 @@ impl<E: Executor> TaskList<E> {
 
     pub fn set_threads(self: Arc<Self>, threads: usize, min_chunk_size: u64) {
         debug_assert!(threads > 0, "threads must be greater than 0");
-        debug_assert!(min_chunk_size > 1, "min_chunk_size must be greater than 1");
+        debug_assert!(min_chunk_size > 0, "min_chunk_size must be greater than 0");
         let mut running_guard = self.running.lock();
         let mut waiting_guard = self.waiting.lock();
         let len = running_guard.len();

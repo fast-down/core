@@ -185,6 +185,7 @@ mod tests {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.clone(),
+                min_chunk_size: 1,
             },
         )
         .await;

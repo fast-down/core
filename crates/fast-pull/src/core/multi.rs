@@ -3,7 +3,11 @@ use super::macros::poll_ok;
 use crate::{DownloadResult, Event, ProgressEntry, RandPuller, RandPusher, Total, WorkerId};
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
-use core::{num::NonZeroUsize, time::Duration};
+use core::{
+    num::NonZeroUsize,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 use fast_steal::{Executor, Handle, Task, TaskList};
 use futures::TryStreamExt;
 use tokio::task::AbortHandle;
@@ -14,6 +18,7 @@ pub struct DownloadOptions {
     pub concurrent: NonZeroUsize,
     pub retry_gap: Duration,
     pub push_queue_cap: usize,
+    pub min_chunk_size: u64,
 }
 
 pub async fn download_multi<R, W>(
@@ -51,10 +56,12 @@ where
         tx_push,
         puller,
         retry_gap: options.retry_gap,
+        id: Arc::new(AtomicUsize::new(0)),
+        min_chunk_size: options.min_chunk_size,
     };
     let task_list = TaskList::run(
         options.concurrent.get(),
-        8 * 1024,
+        options.min_chunk_size,
         &options.download_chunks[..],
         executor,
     );
@@ -86,6 +93,8 @@ where
     tx_push: kanal::AsyncSender<(WorkerId, ProgressEntry, Bytes)>,
     puller: R,
     retry_gap: Duration,
+    id: Arc<AtomicUsize>,
+    min_chunk_size: u64,
 }
 impl<R, W> Executor for TokioExecutor<R, W>
 where
@@ -94,12 +103,12 @@ where
 {
     type Handle = TokioHandle;
     fn execute(self: Arc<Self>, task: Arc<Task>, task_list: Arc<TaskList<Self>>) -> Self::Handle {
-        let id = 1; // TODO: worker id
+        let id = self.id.fetch_add(1, Ordering::SeqCst);
         let handle = tokio::spawn(async move {
             'steal_task: loop {
                 let mut start = task.start();
                 if start >= task.end() {
-                    if task_list.steal(&task, 16 * 1024) {
+                    if task_list.steal(&task, 2 * self.min_chunk_size) {
                         continue;
                     }
                     break;
@@ -171,18 +180,23 @@ mod tests {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.clone(),
+                min_chunk_size: 1,
             },
         )
         .await;
 
         let mut pull_progress: Vec<ProgressEntry> = Vec::new();
         let mut push_progress: Vec<ProgressEntry> = Vec::new();
+        let mut pull_ids = [false; 32];
+        let mut push_ids = [false; 32];
         while let Ok(e) = result.event_chain.recv().await {
             match e {
-                Event::PullProgress(_, p) => {
+                Event::PullProgress(id, p) => {
+                    pull_ids[id] = true;
                     pull_progress.merge_progress(p);
                 }
-                Event::PushProgress(_, p) => {
+                Event::PushProgress(id, p) => {
+                    push_ids[id] = true;
                     push_progress.merge_progress(p);
                 }
                 _ => {}
@@ -192,6 +206,8 @@ mod tests {
         dbg!(&push_progress);
         assert_eq!(pull_progress, download_chunks);
         assert_eq!(push_progress, download_chunks);
+        assert_eq!(pull_ids, [true; 32]);
+        assert_eq!(push_ids, [true; 32]);
 
         result.join().await.unwrap();
         pusher.assert().await;
