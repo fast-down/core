@@ -14,21 +14,18 @@
 //! 1. no_std 支持，不依赖于标准库
 //! 2. 超细颗粒度任务窃取，速度非常快
 //! 3. 安全的 Rust，库中没有使用任何 unsafe 的代码
-//! 4. 无锁，库中没有使用任何锁（但是在任务重新分配时 `task.steal()`，记得手动加锁）
-//! 5. 测试完全覆盖，保证库的稳定性和可靠性
+//! 4. 测试完全覆盖，保证库的稳定性和可靠性
 //!
 //! ```rust
-//! use dashmap::DashMap;
 //! use fast_steal::{Executor, Handle, Task, TaskList};
-//! use std::sync::Arc;
+//! use std::{collections::HashMap, sync::Arc};
 //! use tokio::{
-//!     sync::Mutex,
+//!     sync::{Mutex, mpsc},
 //!     task::{AbortHandle, JoinHandle},
 //! };
 //!
 //! pub struct TokioExecutor {
-//!     pub mutex: Mutex<()>,
-//!     pub data: Arc<DashMap<u64, u64>>,
+//!     tx: mpsc::UnboundedSender<(u64, u64)>,
 //! }
 //! #[derive(Clone)]
 //! pub struct TokioHandle(Arc<Mutex<Option<JoinHandle<()>>>>, AbortHandle);
@@ -50,16 +47,14 @@
 //!                     let i = task.start();
 //!                     task.fetch_add_start(1);
 //!                     let res = fib(i);
-//!                     println!("{i} = {res}");
-//!                     if self.data.insert(i, res).is_some() {
-//!                         panic!("数字 {i}，值为 {res} 重复计算");
-//!                     }
+//!                     println!("task: {i} = {res}");
+//!                     self.tx.send((i, res)).unwrap();
 //!                 }
-//!                 let _guard = self.mutex.lock().await;
 //!                 if !task_list.steal(&task, 2) {
 //!                     break;
 //!                 }
 //!             }
+//!             assert_eq!(task_list.remove(&task), 1);
 //!         });
 //!         let abort_handle = handle.abort_handle();
 //!         TokioHandle(Arc::new(Mutex::new(Some(handle))), abort_handle)
@@ -84,22 +79,26 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let mutex = Mutex::new(());
-//!     let data = Arc::new(DashMap::new());
-//!     let executor = TokioExecutor {
-//!         mutex,
-//!         data: data.clone(),
-//!     };
+//!     let (tx, mut rx) = mpsc::unbounded_channel();
+//!     let executor = TokioExecutor { tx };
 //!     let pre_data = [1..20, 41..48];
-//!     let task_list = TaskList::run(8, 1, &pre_data[..], executor);
+//!     let task_list = TaskList::run(8, 2, &pre_data[..], executor);
 //!     let handles = task_list.handles();
+//!     drop(task_list);
 //!     for handle in handles.iter() {
 //!         handle.0.lock().await.take().unwrap().await.unwrap();
+//!     }
+//!     let mut data = HashMap::new();
+//!     while let Some((i, res)) = rx.recv().await {
+//!         println!("main: {i} = {res}");
+//!         if data.insert(i, res).is_some() {
+//!             panic!("数字 {i}，值为 {res} 重复计算");
+//!         }
 //!     }
 //!     dbg!(&data);
 //!     for range in pre_data {
 //!         for i in range {
-//!             assert_eq!((i, data.get(&i).as_deref()), (i, Some(&fib_fast(i))));
+//!             assert_eq!((i, data.get(&i)), (i, Some(&fib_fast(i))));
 //!             data.remove(&i);
 //!         }
 //!     }

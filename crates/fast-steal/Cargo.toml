@@ -13,12 +13,13 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-dashmap = "6.1.0"
+spin = { version = "0.10.0", features = [
+  "spin_mutex",
+], default-features = false }
+
+[dev-dependencies]
 tokio = { version = "1.47.1", features = [
   "macros",
   "rt-multi-thread",
   "sync",
 ], default-features = false }
-kanal = "0.1.1"
-
-[dev-dependencies]
