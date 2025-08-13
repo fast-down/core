@@ -17,11 +17,7 @@ impl MergeProgress for Vec<ProgressEntry> {
                 _ => self.push(new),
             }
         } else {
-            let u1 = if i == 0 {
-                false
-            } else {
-                self[i - 1].can_merge(&new)
-            };
+            let u1 = i > 0 && self[i - 1].can_merge(&new);
             let u2 = self[i].can_merge(&new);
             if u1 && u2 {
                 self[i - 1].end = self[i].end;
