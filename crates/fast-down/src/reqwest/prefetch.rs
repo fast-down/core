@@ -1,8 +1,6 @@
-extern crate alloc;
-use super::ReqwestPuller;
-use crate::UrlInfo;
-use alloc::string::{String, ToString};
+use super::puller::ReqwestPuller;
 use content_disposition;
+use fast_pull::UrlInfo;
 use reqwest::{
     Client, IntoUrl, StatusCode, Url,
     header::{self, HeaderMap},
@@ -61,60 +59,42 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
     )
 }
 
-pub trait Prefetch {
-    fn prefetch(
-        &self,
-        url: impl IntoUrl + Send,
-    ) -> impl Future<Output = Result<UrlInfo, reqwest::Error>> + Send;
-}
+async fn prefetch(client: &Client, url: impl IntoUrl + Send) -> Result<UrlInfo, reqwest::Error> {
+    let url = url.into_url()?;
+    let resp = match client.head(url.clone()).send().await {
+        Ok(resp) => resp,
+        Err(_) => return prefetch_fallback(url, client).await,
+    };
+    let resp = match resp.error_for_status() {
+        Ok(resp) => resp,
+        Err(_) => return prefetch_fallback(url, client).await,
+    };
 
-impl Prefetch for Client {
-    async fn prefetch(&self, url: impl IntoUrl + Send) -> Result<UrlInfo, reqwest::Error> {
-        let url = url.into_url()?;
-        let resp = match self.head(url.clone()).send().await {
-            Ok(resp) => resp,
-            Err(_) => return prefetch_fallback(url, self).await,
-        };
-        let resp = match resp.error_for_status() {
-            Ok(resp) => resp,
-            Err(_) => return prefetch_fallback(url, self).await,
-        };
+    let status = resp.status();
+    let final_url = resp.url();
 
-        let status = resp.status();
-        let final_url = resp.url();
+    let resp_headers = resp.headers();
+    let size = get_file_size(resp_headers, &status);
 
-        let resp_headers = resp.headers();
-        let size = get_file_size(resp_headers, &status);
+    let supports_range = match resp.headers().get(header::ACCEPT_RANGES) {
+        Some(accept_ranges) => accept_ranges
+            .to_str()
+            .ok()
+            .map(|v| v.split(' '))
+            .and_then(|supports| supports.into_iter().find(|&ty| ty == "bytes"))
+            .is_some(),
+        None => return prefetch_fallback(url, self).await,
+    };
 
-        let supports_range = match resp.headers().get(header::ACCEPT_RANGES) {
-            Some(accept_ranges) => accept_ranges
-                .to_str()
-                .ok()
-                .map(|v| v.split(' '))
-                .and_then(|supports| supports.into_iter().find(|&ty| ty == "bytes"))
-                .is_some(),
-            None => return prefetch_fallback(url, self).await,
-        };
-
-        Ok(UrlInfo {
-            final_url: final_url.clone(),
-            name: get_filename(resp_headers, final_url),
-            size,
-            supports_range,
-            fast_download: size > 0 && supports_range,
-            etag: get_header_str(resp_headers, &header::ETAG),
-            last_modified: get_header_str(resp_headers, &header::LAST_MODIFIED),
-        })
-    }
-}
-
-impl Prefetch for ReqwestPuller {
-    fn prefetch(
-        &self,
-        url: impl IntoUrl + Send,
-    ) -> impl Future<Output = Result<UrlInfo, reqwest::Error>> + Send {
-        self.client.prefetch(url)
-    }
+    Ok(UrlInfo {
+        final_url: final_url.clone(),
+        name: get_filename(resp_headers, final_url),
+        size,
+        supports_range,
+        fast_download: size > 0 && supports_range,
+        etag: get_header_str(resp_headers, &header::ETAG),
+        last_modified: get_header_str(resp_headers, &header::LAST_MODIFIED),
+    })
 }
 
 async fn prefetch_fallback(url: Url, client: &Client) -> Result<UrlInfo, reqwest::Error> {

@@ -14,5 +14,5 @@ enum RetryStrategy {
 
 pub struct PullOptions {
     write_cap: usize,
-    retry_strategy: RetryStrategy,
+    // retry_strategy: RetryStrategy,
 }

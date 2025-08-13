@@ -1,5 +1,8 @@
+#![allow(deprecated)]
+
 extern crate alloc;
-use crate::{UrlInfo, reqwest::ReqwestPuller};
+use super::ReqwestPuller;
+use crate::base::url::UrlInfo;
 use alloc::string::{String, ToString};
 use content_disposition;
 use reqwest::{
@@ -60,6 +63,10 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
     )
 }
 
+#[deprecated(
+    since = "3.1.0",
+    note = "`Prefetch` is deprecated, and will be removed in 3.4.0, please use alternative from `fast-down` crate instead"
+)]
 pub trait Prefetch {
     fn prefetch(
         &self,

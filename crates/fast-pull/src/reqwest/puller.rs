@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 extern crate alloc;
 use crate::{RandPuller, SeqPuller};
 use alloc::{boxed::Box, format};
@@ -10,6 +12,10 @@ use futures::{Stream, TryFutureExt, TryStream};
 use reqwest::{Client, Response, header};
 use url::Url;
 
+#[deprecated(
+    since = "3.1.0",
+    note = "`ReqwestPuller` is deprecated, and will be removed in 3.4.0, please use `ReqwestPuller` from `fast-down` crate instead"
+)]
 #[derive(Clone)]
 pub struct ReqwestPuller {
     pub(crate) client: Client,

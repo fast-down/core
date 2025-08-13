@@ -1,32 +1,50 @@
-extern crate alloc;
-use alloc::{boxed::Box, format};
 use bytes::Bytes;
 use core::{
     pin::{Pin, pin},
     task::{Context, Poll},
 };
-use fast_pull::{Puller, RandPuller};
+use fast_pull::{RandPuller, SeqPuller};
 use futures::{Stream, TryFutureExt, TryStream};
 use reqwest::{Client, Response, header};
+use std::sync::Arc;
 use url::Url;
 
 #[derive(Clone)]
 pub struct ReqwestPuller {
     pub(crate) client: Client,
-    url: Url,
+    url: Arc<Url>,
+}
+
+impl Deref for ReqwestPuller {
+    type Target = Client;
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
+impl DerefMut for ReqwestPuller {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.client
+    }
 }
 
 impl ReqwestPuller {
     pub fn new(url: Url, client: Client) -> Self {
-        Self { client, url }
+        Self {
+            client,
+            url: Arc::from(url),
+        }
+    }
+    pub fn into_inner(self) -> (Client, Arc<Url>) {
+        (self.client, self.url)
     }
 }
 
 impl RandPuller for ReqwestPuller {
     type Error = reqwest::Error;
-    fn read(
+    fn pull(
         &mut self,
-        range: &fast_pull::ProgressEntry,
+        range: &crate::ProgressEntry,
     ) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
         ReqwestStream {
             client: self.client.clone(),
@@ -37,12 +55,14 @@ impl RandPuller for ReqwestPuller {
         }
     }
 }
+
 type ResponseFut = Pin<Box<dyn Future<Output = Result<Response, reqwest::Error>> + Send>>;
 enum ResponseState {
     Pending(ResponseFut),
     Ready(Response),
     None,
 }
+
 struct ReqwestStream {
     client: Client,
     url: Url,
@@ -109,7 +129,7 @@ impl Stream for ReqwestStream {
     }
 }
 
-impl Puller for ReqwestPuller {
+impl SeqPuller for ReqwestPuller {
     type Error = reqwest::Error;
     fn pull(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
         let req = self.client.get(self.url.clone());
@@ -127,13 +147,13 @@ mod tests {
     use super::*;
     use crate::{
         Event, MergeProgress, ProgressEntry,
-        mock::{MockRandWriter, MockSeqWriter, build_mock_data},
+        mock::{MockRandPusher, MockSeqPusher, build_mock_data},
         multi::{self, download_multi},
         reqwest::ReqwestPuller,
         single::{self, download_single},
     };
     use alloc::vec;
-    use core::{num::NonZeroUsize, time::Duration};
+    use core::{num::NonZero, time::Duration};
     use reqwest::Client;
     use std::{dbg, println};
     use vec::Vec;
@@ -170,45 +190,46 @@ mod tests {
             })
             .create_async()
             .await;
-        let reader = ReqwestPuller::new(
+        let puller = ReqwestPuller::new(
             format!("{}/concurrent", server.url()).parse().unwrap(),
             Client::new(),
         );
-        let writer = MockRandWriter::new(&mock_data);
+        let pusher = MockRandPusher::new(&mock_data);
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_multi(
-            reader,
-            writer.clone(),
+            puller,
+            pusher.clone(),
             multi::DownloadOptions {
                 concurrent: NonZero::new(32).unwrap(),
                 retry_gap: Duration::from_secs(1),
-                write_queue_cap: 1024,
+                push_queue_cap: 1024,
                 download_chunks: download_chunks.clone(),
+                min_chunk_size: NonZero::new(1).unwrap(),
             },
         )
         .await;
 
-        let mut download_progress: Vec<ProgressEntry> = Vec::new();
-        let mut write_progress: Vec<ProgressEntry> = Vec::new();
+        let mut pull_progress: Vec<ProgressEntry> = Vec::new();
+        let mut push_progress: Vec<ProgressEntry> = Vec::new();
         while let Ok(e) = result.event_chain.recv().await {
             match e {
-                Event::ReadProgress(_, p) => {
-                    download_progress.merge_progress(p);
+                Event::PullProgress(_, p) => {
+                    pull_progress.merge_progress(p);
                 }
-                Event::WriteProgress(_, p) => {
-                    write_progress.merge_progress(p);
+                Event::PushProgress(_, p) => {
+                    push_progress.merge_progress(p);
                 }
                 _ => {}
             }
         }
-        dbg!(&download_progress);
-        dbg!(&write_progress);
-        assert_eq!(download_progress, download_chunks);
-        assert_eq!(write_progress, download_chunks);
+        dbg!(&pull_progress);
+        dbg!(&push_progress);
+        assert_eq!(pull_progress, download_chunks);
+        assert_eq!(push_progress, download_chunks);
 
         result.join().await.unwrap();
-        writer.assert().await;
+        pusher.assert().await;
     }
 
     #[tokio::test]
@@ -221,42 +242,42 @@ mod tests {
             .with_body(mock_data.clone())
             .create_async()
             .await;
-        let reader = ReqwestPuller::new(
+        let puller = ReqwestPuller::new(
             format!("{}/sequential", server.url()).parse().unwrap(),
             Client::new(),
         );
-        let writer = MockSeqWriter::new(&mock_data);
+        let pusher = MockSeqPusher::new(&mock_data);
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_single(
-            reader,
-            writer.clone(),
+            puller,
+            pusher.clone(),
             single::DownloadOptions {
                 retry_gap: Duration::from_secs(1),
-                write_queue_cap: 1024,
+                push_queue_cap: 1024,
             },
         )
         .await;
 
-        let mut download_progress: Vec<ProgressEntry> = Vec::new();
-        let mut write_progress: Vec<ProgressEntry> = Vec::new();
+        let mut pull_progress: Vec<ProgressEntry> = Vec::new();
+        let mut push_progress: Vec<ProgressEntry> = Vec::new();
         while let Ok(e) = result.event_chain.recv().await {
             match e {
-                Event::ReadProgress(_, p) => {
-                    download_progress.merge_progress(p);
+                Event::PullProgress(_, p) => {
+                    pull_progress.merge_progress(p);
                 }
-                Event::WriteProgress(_, p) => {
-                    write_progress.merge_progress(p);
+                Event::PushProgress(_, p) => {
+                    push_progress.merge_progress(p);
                 }
                 _ => {}
             }
         }
-        dbg!(&download_progress);
-        dbg!(&write_progress);
-        assert_eq!(download_progress, download_chunks);
-        assert_eq!(write_progress, download_chunks);
+        dbg!(&pull_progress);
+        dbg!(&push_progress);
+        assert_eq!(pull_progress, download_chunks);
+        assert_eq!(push_progress, download_chunks);
 
         result.join().await.unwrap();
-        writer.assert().await;
+        pusher.assert().await;
     }
 }
