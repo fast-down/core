@@ -1,5 +1,5 @@
 extern crate std;
-use crate::{ProgressEntry, RandPusher, SeqPusher};
+use crate::{ProgressEntry, RandPusher, SeqPusher, Total};
 use bytes::Bytes;
 use mmap_io::{MemoryMappedFile, MmapIoError, MmapMode, flush::FlushPolicy};
 use std::{path::Path, vec::Vec};
@@ -74,9 +74,9 @@ impl RandPusher for RandFilePusherMmap {
     type Error = FilePusherError;
     async fn push(&mut self, range: ProgressEntry, bytes: Bytes) -> Result<(), Self::Error> {
         self.mmap
-            .as_slice_mut(range.start, bytes.len() as u64)?
+            .as_slice_mut(range.start, range.total())?
             .as_mut()
-            .copy_from_slice(&bytes);
+            .copy_from_slice(&bytes[0..(range.total() as usize)]);
         self.downloaded += bytes.len();
         if self.downloaded >= self.buffer_size {
             self.mmap.flush_async().await?;
@@ -112,9 +112,10 @@ impl RandFilePusherStd {
 }
 impl RandPusher for RandFilePusherStd {
     type Error = FilePusherError;
-    async fn push(&mut self, range: ProgressEntry, bytes: Bytes) -> Result<(), Self::Error> {
+    async fn push(&mut self, range: ProgressEntry, mut bytes: Bytes) -> Result<(), Self::Error> {
         let pos = self.cache.partition_point(|(i, _)| i < &range.start);
         self.cache_size += bytes.len();
+        drop(bytes.split_off(range.total() as usize));
         self.cache.insert(pos, (range.start, bytes));
         if self.cache_size >= self.buffer_size {
             self.flush().await?;

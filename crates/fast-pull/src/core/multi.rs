@@ -1,6 +1,6 @@
 extern crate alloc;
 use super::macros::poll_ok;
-use crate::{DownloadResult, Event, ProgressEntry, RandPuller, RandPusher, Total, WorkerId};
+use crate::{DownloadResult, Event, ProgressEntry, RandPuller, RandPusher, WorkerId};
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
 use core::{
@@ -107,8 +107,9 @@ where
                     if task_list.steal(&task, NonZero::new(2 * self.min_chunk_size.get()).unwrap())
                     {
                         continue;
+                    } else {
+                        break;
                     }
-                    break;
                 }
                 self.tx.send(Event::Pulling(id)).await.unwrap();
                 let download_range = start..task.end();
@@ -116,7 +117,7 @@ where
                 let mut stream = puller.pull(&download_range);
                 loop {
                     match stream.try_next().await {
-                        Ok(Some(mut chunk)) => {
+                        Ok(Some(chunk)) => {
                             let len = chunk.len() as u64;
                             task.fetch_add_start(len);
                             let range_start = start;
@@ -126,13 +127,12 @@ where
                                 continue 'steal_task;
                             }
                             let span = range_start..range_end;
-                            let len = span.total() as usize;
                             self.tx
                                 .send(Event::PullProgress(id, span.clone()))
                                 .await
                                 .unwrap();
                             self.tx_push
-                                .send((id, span, chunk.split_to(len)))
+                                .send((id, span, chunk))
                                 .await
                                 .unwrap();
                         }
