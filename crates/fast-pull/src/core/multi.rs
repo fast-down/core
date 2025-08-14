@@ -1,6 +1,6 @@
 extern crate alloc;
 use super::macros::poll_ok;
-use crate::{DownloadResult, Event, ProgressEntry, RandPuller, RandPusher, WorkerId};
+use crate::{DownloadResult, Event, ProgressEntry, RandPuller, RandPusher, Total, WorkerId};
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
 use core::{
@@ -51,20 +51,18 @@ where
             options.retry_gap
         );
     });
-    let executor: TokioExecutor<R, W> = TokioExecutor {
+    let executor: Arc<TokioExecutor<R, W>> = Arc::new(TokioExecutor {
         tx,
         tx_push,
         puller,
         retry_gap: options.retry_gap,
         id: Arc::new(AtomicUsize::new(0)),
         min_chunk_size: options.min_chunk_size,
-    };
-    let task_list = TaskList::run(
-        options.concurrent,
-        options.min_chunk_size,
-        &options.download_chunks[..],
-        executor,
-    );
+    });
+    let task_list = Arc::new(TaskList::run(&options.download_chunks[..], executor));
+    task_list
+        .clone()
+        .set_threads(options.concurrent, options.min_chunk_size);
     DownloadResult::new(
         event_chain,
         push_handle,
@@ -117,7 +115,7 @@ where
                 let mut stream = puller.pull(&download_range);
                 loop {
                     match stream.try_next().await {
-                        Ok(Some(chunk)) => {
+                        Ok(Some(mut chunk)) => {
                             let len = chunk.len() as u64;
                             task.fetch_add_start(len);
                             let range_start = start;
@@ -127,14 +125,12 @@ where
                                 continue 'steal_task;
                             }
                             let span = range_start..range_end;
+                            chunk.truncate(span.total() as usize);
                             self.tx
                                 .send(Event::PullProgress(id, span.clone()))
                                 .await
                                 .unwrap();
-                            self.tx_push
-                                .send((id, span, chunk))
-                                .await
-                                .unwrap();
+                            self.tx_push.send((id, span, chunk)).await.unwrap();
                         }
                         Ok(None) => break,
                         Err(e) => {
@@ -144,8 +140,8 @@ where
                     }
                 }
             }
-            self.tx.send(Event::Finished(id)).await.unwrap();
             task_list.remove(&task);
+            self.tx.send(Event::Finished(id)).await.unwrap();
         });
         TokioHandle(handle.abort_handle())
     }

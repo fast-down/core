@@ -2,14 +2,13 @@ extern crate std;
 use crate::{ProgressEntry, RandPusher, SeqPusher, Total};
 use bytes::Bytes;
 use mmap_io::{MemoryMappedFile, MmapIoError, MmapMode, flush::FlushPolicy};
-use std::{path::Path, vec::Vec};
-use thiserror::Error;
+use std::{collections::VecDeque, path::Path};
 use tokio::{
     fs::{File, OpenOptions},
     io::{self, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom},
 };
 
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum FilePusherError {
     #[error(transparent)]
     MmapIo(#[from] MmapIoError),
@@ -76,7 +75,7 @@ impl RandPusher for RandFilePusherMmap {
         self.mmap
             .as_slice_mut(range.start, range.total())?
             .as_mut()
-            .copy_from_slice(&bytes[0..(range.total() as usize)]);
+            .copy_from_slice(&bytes);
         self.downloaded += bytes.len();
         if self.downloaded >= self.buffer_size {
             self.mmap.flush_async().await?;
@@ -93,7 +92,7 @@ impl RandPusher for RandFilePusherMmap {
 #[derive(Debug)]
 pub struct RandFilePusherStd {
     buffer: BufWriter<File>,
-    cache: Vec<(u64, Bytes)>,
+    cache: VecDeque<(u64, Bytes)>,
     p: u64,
     cache_size: usize,
     buffer_size: usize,
@@ -103,7 +102,7 @@ impl RandFilePusherStd {
         file.set_len(size).await?;
         Ok(Self {
             buffer: BufWriter::with_capacity(buffer_size, file),
-            cache: Vec::new(),
+            cache: VecDeque::new(),
             p: 0,
             cache_size: 0,
             buffer_size,
@@ -112,10 +111,9 @@ impl RandFilePusherStd {
 }
 impl RandPusher for RandFilePusherStd {
     type Error = FilePusherError;
-    async fn push(&mut self, range: ProgressEntry, mut bytes: Bytes) -> Result<(), Self::Error> {
+    async fn push(&mut self, range: ProgressEntry, bytes: Bytes) -> Result<(), Self::Error> {
         let pos = self.cache.partition_point(|(i, _)| i < &range.start);
         self.cache_size += bytes.len();
-        drop(bytes.split_off(range.total() as usize));
         self.cache.insert(pos, (range.start, bytes));
         if self.cache_size >= self.buffer_size {
             self.flush().await?;
@@ -123,15 +121,16 @@ impl RandPusher for RandFilePusherStd {
         Ok(())
     }
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        for (start, bytes) in self.cache.drain(..) {
+        while let Some((start, bytes)) = self.cache.front() {
             let len = bytes.len();
             self.cache_size -= len;
-            if start != self.p {
-                self.buffer.seek(SeekFrom::Start(start)).await?;
-                self.p = start;
+            if *start != self.p {
+                self.buffer.seek(SeekFrom::Start(*start)).await?;
+                self.p = *start;
             }
-            self.buffer.write_all(&bytes).await?;
+            self.buffer.write_all(bytes).await?;
             self.p += len as u64;
+            self.cache.pop_front();
         }
         self.buffer.flush().await?;
         Ok(())
@@ -142,6 +141,7 @@ impl RandPusher for RandFilePusherStd {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use std::vec::Vec;
     use tempfile::NamedTempFile;
     use tokio::io::AsyncReadExt;
 

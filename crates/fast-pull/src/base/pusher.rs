@@ -2,9 +2,6 @@ use crate::ProgressEntry;
 use bytes::Bytes;
 use core::future;
 
-/// Random Pusher
-///
-/// Implementation should only overwrite content in `range`, even if `content.len()` is larger than `range.total()`
 pub trait RandPusher: Send {
     type Error: Send;
     fn push(

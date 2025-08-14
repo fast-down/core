@@ -19,21 +19,14 @@ struct TaskQueue<E: Executor> {
 }
 
 impl<E: Executor> TaskList<E> {
-    pub fn run(
-        threads: NonZeroUsize,
-        min_chunk_size: NonZeroU64,
-        tasks: &[Range<u64>],
-        executor: E,
-    ) -> Arc<Self> {
-        let t = Arc::new(Self {
+    pub fn run(tasks: &[Range<u64>], executor: Arc<E>) -> Self {
+        Self {
             queue: SpinMutex::new(TaskQueue {
-                running: VecDeque::with_capacity(threads.get()),
+                running: VecDeque::with_capacity(tasks.len()),
                 waiting: tasks.iter().map(Task::from).map(Arc::new).collect(),
             }),
-            executor: Arc::new(executor),
-        });
-        t.clone().set_threads(threads, min_chunk_size);
-        t
+            executor,
+        }
     }
 
     pub fn remove(&self, task: &Task) -> usize {
@@ -83,7 +76,7 @@ impl<E: Executor> TaskList<E> {
                 temp.push((task.clone(), handle));
             }
             guard.running.extend(temp);
-            while threads > guard.running.len()
+            while guard.running.len() < threads
                 && let Some(w) = guard.running.iter().max_by_key(|w| w.0.remain())
                 && w.0.remain() >= min_chunk_size
             {
@@ -185,14 +178,12 @@ mod tests {
     #[tokio::test]
     async fn test_task_list() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let executor = TokioExecutor { tx };
+        let executor = Arc::new(TokioExecutor { tx });
         let pre_data = [1..20, 41..48];
-        let task_list = TaskList::run(
-            NonZero::new(8).unwrap(),
-            NonZero::new(2).unwrap(),
-            &pre_data[..],
-            executor,
-        );
+        let task_list = Arc::new(TaskList::run(&pre_data[..], executor));
+        task_list
+            .clone()
+            .set_threads(NonZero::new(8).unwrap(), NonZero::new(2).unwrap());
         let handles: Arc<[_]> = task_list.handles(|it| it.collect());
         drop(task_list);
         for handle in handles.iter() {
