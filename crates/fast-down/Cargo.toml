@@ -26,6 +26,7 @@ kanal.workspace = true
 slab = "0.4.11"
 oneshot = "0.1.11"
 anyhow = "1.0.99"
+atomic-wait = { version = "1.1.0", optional = true }
 
 [[bin]]
 name = "libcurl-main"
@@ -34,7 +35,7 @@ path = "curl.rs"
 
 [features]
 reqwest = ["dep:reqwest"]
-curl = ["dep:curl"]
+curl = ["dep:curl", "dep:atomic-wait"]
 
 [dev-dependencies]
 tokio = { version = "1.47.1", features = [
