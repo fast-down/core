@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "fast-pull"
-version = "3.1.0"
+version = "3.1.1"
 dependencies = [
  "bytes",
  "fast-steal",
@@ -265,9 +265,9 @@ dependencies = [
 
 [[package]]
 name = "mmap-io"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffc29ad1905e42e7df92d9ce49d1f06a4fbbdc3a0f144f1be14b168c8db3fe4e"
+checksum = "5d7e72ed6c14aab4674d2f64ae86818951d50c7a79b707490b26d016646b42ef"
 dependencies = [
  "anyhow",
  "cfg-if",

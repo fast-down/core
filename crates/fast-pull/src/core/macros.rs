@@ -1,12 +1,10 @@
 macro_rules! poll_ok {
     (
-        $prelude:block,
         $expr:expr,
         $tx:expr => $err:ident,
         $retry_gap:expr
     ) => {
         loop {
-            $prelude;
             match $expr {
                 Ok(value) => break value,
                 Err(err) => {
@@ -17,13 +15,11 @@ macro_rules! poll_ok {
         }
     };
     (
-        $prelude:block,
         $expr:expr,
         $id:ident @ $tx:expr => $err:ident,
         $retry_gap:expr
     ) => {
         loop {
-            $prelude;
             match $expr {
                 Ok(value) => break value,
                 Err(err) => {

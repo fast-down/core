@@ -37,7 +37,6 @@ where
     let push_handle = tokio::spawn(async move {
         while let Ok((id, spin, data)) = rx_push.recv().await {
             poll_ok!(
-                {},
                 pusher.push(spin.clone(), data.clone()).await,
                 id @ tx_clone => PushError,
                 options.retry_gap
@@ -45,7 +44,6 @@ where
             tx_clone.send(Event::PushProgress(id, spin)).await.unwrap();
         }
         poll_ok!(
-            {},
             pusher.flush().await,
             tx_clone => FlushError,
             options.retry_gap
@@ -98,6 +96,7 @@ where
     type Handle = TokioHandle;
     fn execute(self: Arc<Self>, task: Arc<Task>, task_list: Arc<TaskList<Self>>) -> Self::Handle {
         let id = self.id.fetch_add(1, Ordering::SeqCst);
+        let mut puller = self.puller.clone();
         let handle = tokio::spawn(async move {
             'steal_task: loop {
                 let mut start = task.start();
@@ -111,7 +110,6 @@ where
                 }
                 self.tx.send(Event::Pulling(id)).await.unwrap();
                 let download_range = start..task.end();
-                let mut puller = self.puller.clone();
                 let mut stream = puller.pull(&download_range);
                 loop {
                     match stream.try_next().await {
