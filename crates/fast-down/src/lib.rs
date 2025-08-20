@@ -1,10 +1,9 @@
-mod down;
+mod url_info;
 
-pub use fast_pull::single;
-pub use fast_pull::multi;
+pub use fast_pull::*;
+pub use url_info::UrlInfo;
 
-#[cfg(feature = "reqwest")]
-pub mod reqwest;
 #[cfg(feature = "curl")]
 pub mod curl;
-mod url_info;
+#[cfg(feature = "reqwest")]
+pub mod reqwest;

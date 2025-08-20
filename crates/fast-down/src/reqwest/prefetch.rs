@@ -1,11 +1,25 @@
-use super::puller::ReqwestPuller;
+use std::future::Future;
+
+use crate::UrlInfo;
 use content_disposition;
-use fast_pull::UrlInfo;
 use reqwest::{
     Client, IntoUrl, StatusCode, Url,
     header::{self, HeaderMap},
 };
 use sanitize_filename;
+
+pub trait Prefetch {
+    fn prefetch(
+        &self,
+        url: impl IntoUrl + Send,
+    ) -> impl Future<Output = Result<UrlInfo, reqwest::Error>> + Send;
+}
+
+impl Prefetch for Client {
+    async fn prefetch(&self, url: impl IntoUrl + Send) -> Result<UrlInfo, reqwest::Error> {
+        prefetch(self, url).await
+    }
+}
 
 fn get_file_size(headers: &HeaderMap, status: &StatusCode) -> u64 {
     if *status == StatusCode::PARTIAL_CONTENT {
@@ -36,12 +50,13 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
         .get(header::CONTENT_DISPOSITION)
         .and_then(|hv| hv.to_str().ok())
         .and_then(|s| content_disposition::parse_content_disposition(s).filename_full())
+        .map(|s| urlencoding::decode(&s).map(String::from).unwrap_or(s))
         .filter(|s| !s.trim().is_empty());
 
     let from_url = final_url
         .path_segments()
         .and_then(|mut segments| segments.next_back())
-        .and_then(|s| urlencoding::decode(s).ok())
+        .map(|s| urlencoding::decode(s).unwrap_or(s.into()))
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string());
 
@@ -52,14 +67,14 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
     sanitize_filename::sanitize_with_options(
         &raw_name,
         sanitize_filename::Options {
-            windows: true,
-            truncate: true,
+            windows: false,
+            truncate: false,
             replacement: "_",
         },
     )
 }
 
-async fn prefetch(client: &Client, url: impl IntoUrl + Send) -> Result<UrlInfo, reqwest::Error> {
+async fn prefetch(client: &Client, url: impl IntoUrl) -> Result<UrlInfo, reqwest::Error> {
     let url = url.into_url()?;
     let resp = match client.head(url.clone()).send().await {
         Ok(resp) => resp,
@@ -69,13 +84,6 @@ async fn prefetch(client: &Client, url: impl IntoUrl + Send) -> Result<UrlInfo, 
         Ok(resp) => resp,
         Err(_) => return prefetch_fallback(url, client).await,
     };
-
-    let status = resp.status();
-    let final_url = resp.url();
-
-    let resp_headers = resp.headers();
-    let size = get_file_size(resp_headers, &status);
-
     let supports_range = match resp.headers().get(header::ACCEPT_RANGES) {
         Some(accept_ranges) => accept_ranges
             .to_str()
@@ -83,9 +91,12 @@ async fn prefetch(client: &Client, url: impl IntoUrl + Send) -> Result<UrlInfo, 
             .map(|v| v.split(' '))
             .and_then(|supports| supports.into_iter().find(|&ty| ty == "bytes"))
             .is_some(),
-        None => return prefetch_fallback(url, self).await,
+        None => return prefetch_fallback(url, client).await,
     };
-
+    let status = resp.status();
+    let resp_headers = resp.headers();
+    let size = get_file_size(resp_headers, &status);
+    let final_url = resp.url();
     Ok(UrlInfo {
         final_url: final_url.clone(),
         name: get_filename(resp_headers, final_url),
@@ -105,11 +116,10 @@ async fn prefetch_fallback(url: Url, client: &Client) -> Result<UrlInfo, reqwest
         .await?
         .error_for_status()?;
     let status = resp.status();
-    let final_url = resp.url();
-
     let resp_headers = resp.headers();
     let size = get_file_size(resp_headers, &status);
     let supports_range = status == StatusCode::PARTIAL_CONTENT;
+    let final_url = resp.url();
     Ok(UrlInfo {
         final_url: final_url.clone(),
         name: get_filename(resp_headers, final_url),
@@ -123,8 +133,6 @@ async fn prefetch_fallback(url: Url, client: &Client) -> Result<UrlInfo, reqwest
 
 #[cfg(test)]
 mod tests {
-    use alloc::{format, vec};
-
     use super::*;
 
     #[tokio::test]

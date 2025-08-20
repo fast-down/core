@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/fast-steal", "crates/fast-pull"]
-# members = ["crates/fast-steal", "crates/fast-pull", "crates/fast-down"]
+members = ["crates/fast-steal", "crates/fast-pull", "crates/fast-down"]
 
 [workspace.package]
 edition = "2024"

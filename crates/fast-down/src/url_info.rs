@@ -1,5 +1,6 @@
 use url::Url;
 
+#[derive(Debug)]
 pub struct UrlInfo {
     pub size: u64,
     pub name: String,
