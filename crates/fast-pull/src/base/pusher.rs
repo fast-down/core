@@ -1,5 +1,4 @@
 use crate::ProgressEntry;
-use bytes::Bytes;
 use core::future;
 
 pub trait RandPusher: Send {
@@ -7,7 +6,7 @@ pub trait RandPusher: Send {
     fn push(
         &mut self,
         range: ProgressEntry,
-        content: Bytes,
+        content: &[u8],
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
     fn flush(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
         future::ready(Ok(()))
@@ -16,7 +15,7 @@ pub trait RandPusher: Send {
 
 pub trait SeqPusher: Send {
     type Error: Send;
-    fn push(&mut self, content: Bytes) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn push(&mut self, content: &[u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
     fn flush(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
         future::ready(Ok(()))
     }

@@ -37,7 +37,7 @@ where
     let push_handle = tokio::spawn(async move {
         while let Ok((id, spin, data)) = rx_push.recv().await {
             poll_ok!(
-                pusher.push(spin.clone(), data.clone()).await,
+                pusher.push(spin.clone(), &data).await,
                 id @ tx_clone => PushError,
                 options.retry_gap
             );

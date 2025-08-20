@@ -60,9 +60,9 @@ impl MockRandPusher {
 }
 impl RandPusher for MockRandPusher {
     type Error = ();
-    async fn push(&mut self, range: ProgressEntry, content: Bytes) -> Result<(), Self::Error> {
+    async fn push(&mut self, range: ProgressEntry, content: &[u8]) -> Result<(), Self::Error> {
         self.receive.lock().await[range.start as usize..range.end as usize]
-            .copy_from_slice(&content);
+            .copy_from_slice(content);
         Ok(())
     }
 }
@@ -86,8 +86,8 @@ impl MockSeqPusher {
 }
 impl SeqPusher for MockSeqPusher {
     type Error = ();
-    async fn push(&mut self, content: Bytes) -> Result<(), Self::Error> {
-        self.receive.lock().await.extend_from_slice(&content);
+    async fn push(&mut self, content: &[u8]) -> Result<(), Self::Error> {
+        self.receive.lock().await.extend_from_slice(content);
         Ok(())
     }
 }

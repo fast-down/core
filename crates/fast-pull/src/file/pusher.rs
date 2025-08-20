@@ -1,8 +1,7 @@
 extern crate std;
 use crate::{ProgressEntry, RandPusher, SeqPusher, Total};
-use bytes::Bytes;
 use mmap_io::{MemoryMappedFile, MmapIoError, MmapMode, flush::FlushPolicy};
-use std::{collections::VecDeque, path::Path};
+use std::{boxed::Box, collections::VecDeque, path::Path};
 use tokio::{
     fs::{File, OpenOptions},
     io::{self, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom},
@@ -29,8 +28,8 @@ impl SeqFilePusher {
 }
 impl SeqPusher for SeqFilePusher {
     type Error = FilePusherError;
-    async fn push(&mut self, content: Bytes) -> Result<(), Self::Error> {
-        Ok(self.buffer.write_all(&content).await?)
+    async fn push(&mut self, content: &[u8]) -> Result<(), Self::Error> {
+        Ok(self.buffer.write_all(content).await?)
     }
     async fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(self.buffer.flush().await?)
@@ -71,11 +70,11 @@ impl RandFilePusherMmap {
 }
 impl RandPusher for RandFilePusherMmap {
     type Error = FilePusherError;
-    async fn push(&mut self, range: ProgressEntry, bytes: Bytes) -> Result<(), Self::Error> {
+    async fn push(&mut self, range: ProgressEntry, bytes: &[u8]) -> Result<(), Self::Error> {
         self.mmap
             .as_slice_mut(range.start, range.total())?
             .as_mut()
-            .copy_from_slice(&bytes);
+            .copy_from_slice(bytes);
         self.downloaded += bytes.len();
         if self.downloaded >= self.buffer_size {
             self.mmap.flush_async().await?;
@@ -92,7 +91,7 @@ impl RandPusher for RandFilePusherMmap {
 #[derive(Debug)]
 pub struct RandFilePusherStd {
     buffer: BufWriter<File>,
-    cache: VecDeque<(u64, Bytes)>,
+    cache: VecDeque<(u64, Box<[u8]>)>,
     p: u64,
     cache_size: usize,
     buffer_size: usize,
@@ -111,10 +110,10 @@ impl RandFilePusherStd {
 }
 impl RandPusher for RandFilePusherStd {
     type Error = FilePusherError;
-    async fn push(&mut self, range: ProgressEntry, bytes: Bytes) -> Result<(), Self::Error> {
+    async fn push(&mut self, range: ProgressEntry, bytes: &[u8]) -> Result<(), Self::Error> {
         let pos = self.cache.partition_point(|(i, _)| i < &range.start);
         self.cache_size += bytes.len();
-        self.cache.insert(pos, (range.start, bytes));
+        self.cache.insert(pos, (range.start, bytes.into()));
         if self.cache_size >= self.buffer_size {
             self.flush().await?;
         }
@@ -157,8 +156,8 @@ mod tests {
         // 写入数据
         let data1 = Bytes::from("Hello, ");
         let data2 = Bytes::from("world!");
-        pusher.push(data1).await.unwrap();
-        pusher.push(data2).await.unwrap();
+        pusher.push(&data1).await.unwrap();
+        pusher.push(&data2).await.unwrap();
         pusher.flush().await.unwrap();
 
         // 验证文件内容
@@ -186,7 +185,7 @@ mod tests {
         // 写入数据
         let data = Bytes::from("234");
         let range = 2..5;
-        pusher.push(range, data).await.unwrap();
+        pusher.push(range, &data).await.unwrap();
         pusher.flush().await.unwrap();
 
         // 验证文件内容
