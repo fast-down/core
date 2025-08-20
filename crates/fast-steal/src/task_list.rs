@@ -50,10 +50,10 @@ impl<E: Executor> TaskList<E> {
             task.set_start(new_task.start());
             return true;
         }
-        if let Some(w) = guard.running.iter().max_by_key(|w| w.0.remain())
-            && w.0.remain() >= min_chunk_size
+        if let Some(steal_task) = guard.running.iter().map(|w| w.0.clone()).max()
+            && steal_task.remain() >= min_chunk_size
         {
-            let (start, end) = w.0.split_two();
+            let (start, end) = steal_task.split_two();
             task.set_end(end);
             task.set_start(start);
             true
@@ -77,10 +77,10 @@ impl<E: Executor> TaskList<E> {
             }
             guard.running.extend(temp);
             while guard.running.len() < threads
-                && let Some(w) = guard.running.iter().max_by_key(|w| w.0.remain())
-                && w.0.remain() >= min_chunk_size
+                && let Some(steal_task) = guard.running.iter().map(|w| w.0.clone()).max()
+                && steal_task.remain() >= min_chunk_size
             {
-                let (start, end) = w.0.split_two();
+                let (start, end) = steal_task.split_two();
                 let task = Arc::new(Task::new(start, end));
                 let handle = self.executor.clone().execute(task.clone(), self.clone());
                 guard.running.push_back((task, handle));
