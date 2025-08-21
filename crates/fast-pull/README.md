@@ -1,10 +1,10 @@
 # fast-pull
 
-[![GitHub last commit](https://img.shields.io/github/last-commit/fast-down/core/main)](https://github.com/fast-down/core/commits/main)
+[![GitHub last commit](https://img.shields.io/github/last-commit/fast-down/core/stable)](https://github.com/fast-down/core/commits/stable)
 [![Test](https://github.com/fast-down/core/workflows/Test/badge.svg)](https://github.com/fast-down/core/actions)
 [![Latest version](https://img.shields.io/crates/v/fast-pull.svg)](https://crates.io/crates/fast-pull)
 [![Documentation](https://docs.rs/fast-pull/badge.svg)](https://docs.rs/fast-pull)
-[![License](https://img.shields.io/crates/l/fast-pull.svg)](https://github.com/fast-down/core/blob/main/crates/fast-pull/LICENSE)
+[![License](https://img.shields.io/crates/l/fast-pull.svg)](https://github.com/fast-down/core/blob/stable/crates/fast-pull/LICENSE)
 
 `fast-pull` **Fastest** concurrent downloader!
 

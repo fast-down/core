@@ -220,7 +220,7 @@ mod tests {
             .prefetch(&format!("{}/test3", server.url()))
             .await
             .unwrap();
-        assert_eq!(url_info.name, "悪い__ファイル_名.txt");
+        assert_eq!(url_info.name, "悪い<>ファイル?名.txt");
         mock3.assert_async().await;
     }
 

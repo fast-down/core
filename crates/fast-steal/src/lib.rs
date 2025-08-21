@@ -1,11 +1,11 @@
 #![no_std]
 //! # fast-steal 神偷
 //!
-//! [![GitHub last commit](https://img.shields.io/github/last-commit/fast-down/core/main)](https://github.com/fast-down/core/commits/main)
+//! [![GitHub last commit](https://img.shields.io/github/last-commit/fast-down/core/stable)](https://github.com/fast-down/core/commits/stable)
 //! [![Test](https://github.com/fast-down/core/workflows/Test/badge.svg)](https://github.com/fast-down/core/actions)
 //! [![Latest version](https://img.shields.io/crates/v/fast-steal.svg)](https://crates.io/crates/fast-steal)
 //! [![Documentation](https://docs.rs/fast-steal/badge.svg)](https://docs.rs/fast-steal)
-//! [![License](https://img.shields.io/crates/l/fast-steal.svg)](https://github.com/fast-down/core/blob/main/crates/fast-steal/LICENSE)
+//! [![License](https://img.shields.io/crates/l/fast-steal.svg)](https://github.com/fast-down/core/blob/stable/crates/fast-steal/LICENSE)
 //!
 //! `fast-steal` 是一个特别快的多线程库，支持超细颗粒度的任务窃取。
 //!
