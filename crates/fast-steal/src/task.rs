@@ -1,5 +1,4 @@
 use core::{
-    hash::Hash,
     ops::Range,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -11,10 +10,11 @@ pub struct Task {
 }
 
 impl Task {
-    pub fn remain(&self) -> u64 {
-        let start = self.start();
-        let end = self.end();
-        end.saturating_sub(start)
+    pub fn new(start: u64, end: u64) -> Self {
+        Self {
+            start: AtomicU64::new(start),
+            end: AtomicU64::new(end),
+        }
     }
 
     pub fn start(&self) -> u64 {
@@ -42,11 +42,10 @@ impl Task {
         self.end.fetch_sub(value, Ordering::AcqRel)
     }
 
-    pub fn new(start: u64, end: u64) -> Self {
-        Self {
-            start: AtomicU64::new(start),
-            end: AtomicU64::new(end),
-        }
+    pub fn remain(&self) -> u64 {
+        let start = self.start();
+        let end = self.end();
+        end.saturating_sub(start)
     }
 
     pub fn split_two(&self) -> (u64, u64) {
@@ -64,20 +63,14 @@ impl PartialEq for Task {
     }
 }
 impl Eq for Task {}
-impl PartialOrd for Task {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
 impl Ord for Task {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.remain().cmp(&other.remain())
     }
 }
-impl Hash for Task {
-    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        self.start().hash(state);
-        self.end().hash(state);
+impl PartialOrd for Task {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 

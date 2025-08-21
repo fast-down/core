@@ -1,7 +1,5 @@
 extern crate alloc;
-use crate::{
-    ProgressEntry, Puller, Pusher, ReadStream, SliceOrBytes, WriteStream,
-};
+use crate::{ProgressEntry, Puller, Pusher, ReadStream, SliceOrBytes, WriteStream};
 use alloc::vec;
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -31,7 +29,7 @@ impl ReadStream for MockPullStream {
         let start = self.1.fetch_add(1, Ordering::SeqCst);
         let end = core::cmp::min(start + 1, self.2);
         if start >= end {
-            return Ok(read_fn(SliceOrBytes::empty()).await)
+            return Ok(read_fn(SliceOrBytes::empty()).await);
         }
         Ok(read_fn(self.0[start..end].into()).await)
     }
@@ -46,7 +44,9 @@ impl Puller for MockRandPuller {
         Ok(MockPullStream(
             self.0.clone(),
             AtomicUsize::new(maybe_entry.map(|entry| entry.start as usize).unwrap_or(0)),
-            maybe_entry.map(|entry| entry.end as usize).unwrap_or(self.0.len()),
+            maybe_entry
+                .map(|entry| entry.end as usize)
+                .unwrap_or(self.0.len()),
         ))
     }
 }
@@ -67,9 +67,9 @@ impl ReadStream for MockSeqPuller {
     {
         let idx = self.1.fetch_add(1, Ordering::SeqCst);
         if idx >= self.0.len() {
-            return Ok(read_fn(SliceOrBytes::empty()).await)
+            return Ok(read_fn(SliceOrBytes::empty()).await);
         }
-        Ok(read_fn(self.0[idx..(idx+1)].into()).await)
+        Ok(read_fn(self.0[idx..(idx + 1)].into()).await)
     }
 }
 

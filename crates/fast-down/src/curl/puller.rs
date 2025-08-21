@@ -50,9 +50,13 @@ impl ReadStream for WorkerPuller {
     async fn read_with<'a, F, Fut, Ret>(&'a mut self, read_fn: F) -> Result<Ret, Self::Error>
     where
         F: FnOnce(SliceOrBytes<'a>) -> Fut,
-        Fut: Future<Output=Ret>
+        Fut: Future<Output = Ret>,
     {
-        let data = self.rx_data.recv().await.map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "data channel closed"))?;
+        let data = self
+            .rx_data
+            .recv()
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "data channel closed"))?;
         Ok(read_fn(data.into()).await)
     }
 }
@@ -64,8 +68,7 @@ impl Puller for WorkerFetcher {
     async fn init_read(
         &self,
         maybe_entry: Option<&ProgressEntry>,
-    ) -> Result<impl ReadStream<Error = Self::StreamError> + Send + Unpin, CreateTaskError>
-    {
+    ) -> Result<impl ReadStream<Error = Self::StreamError> + Send + Unpin, CreateTaskError> {
         let (tx_data, rx_data) = kanal::bounded(self.options.data_channel_cap);
         let signal: Arc<DataSignal> = Default::default();
         let (tx_ret, ret) = oneshot::channel();

@@ -13,8 +13,8 @@ authors = ["share121 <2854631158@qq.com>", "Cyan Changes <contact@cyans.me>"]
 spin = { version = "0.10.0", features = [
     "spin_mutex",
 ], default-features = false }
-fast-pull = { version = "3.0.5", path = "crates/fast-pull" }
-fast-steal = { version = "6.0.5", path = "crates/fast-steal" }
+fast-pull = { version = "4.0.0", path = "crates/fast-pull" }
+fast-steal = { version = "6.0.6", path = "crates/fast-steal" }
 kanal = "0.1.1"
 bytes = { version = "1.10.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }

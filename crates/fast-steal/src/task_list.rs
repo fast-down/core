@@ -19,21 +19,14 @@ struct TaskQueue<E: Executor> {
 }
 
 impl<E: Executor> TaskList<E> {
-    pub fn run(
-        threads: NonZeroUsize,
-        min_chunk_size: NonZeroU64,
-        tasks: &[Range<u64>],
-        executor: E,
-    ) -> Arc<Self> {
-        let t = Arc::new(Self {
+    pub fn run(tasks: &[Range<u64>], executor: Arc<E>) -> Self {
+        Self {
             queue: SpinMutex::new(TaskQueue {
-                running: VecDeque::with_capacity(threads.get()),
+                running: VecDeque::with_capacity(tasks.len()),
                 waiting: tasks.iter().map(Task::from).map(Arc::new).collect(),
             }),
-            executor: Arc::new(executor),
-        });
-        t.clone().set_threads(threads, min_chunk_size);
-        t
+            executor,
+        }
     }
 
     pub fn remove(&self, task: &Task) -> usize {
@@ -57,10 +50,10 @@ impl<E: Executor> TaskList<E> {
             task.set_start(new_task.start());
             return true;
         }
-        if let Some(w) = guard.running.iter().max_by_key(|w| w.0.remain())
-            && w.0.remain() >= min_chunk_size
+        if let Some(steal_task) = guard.running.iter().map(|w| w.0.clone()).max()
+            && steal_task.remain() >= min_chunk_size
         {
-            let (start, end) = w.0.split_two();
+            let (start, end) = steal_task.split_two();
             task.set_end(end);
             task.set_start(start);
             true
@@ -83,11 +76,11 @@ impl<E: Executor> TaskList<E> {
                 temp.push((task.clone(), handle));
             }
             guard.running.extend(temp);
-            while threads > guard.running.len()
-                && let Some(w) = guard.running.iter().max_by_key(|w| w.0.remain())
-                && w.0.remain() >= min_chunk_size
+            while guard.running.len() < threads
+                && let Some(steal_task) = guard.running.iter().map(|w| w.0.clone()).max()
+                && steal_task.remain() >= min_chunk_size
             {
-                let (start, end) = w.0.split_two();
+                let (start, end) = steal_task.split_two();
                 let task = Arc::new(Task::new(start, end));
                 let handle = self.executor.clone().execute(task.clone(), self.clone());
                 guard.running.push_back((task, handle));
@@ -185,14 +178,12 @@ mod tests {
     #[tokio::test]
     async fn test_task_list() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let executor = TokioExecutor { tx };
+        let executor = Arc::new(TokioExecutor { tx });
         let pre_data = [1..20, 41..48];
-        let task_list = TaskList::run(
-            NonZero::new(8).unwrap(),
-            NonZero::new(2).unwrap(),
-            &pre_data[..],
-            executor,
-        );
+        let task_list = Arc::new(TaskList::run(&pre_data[..], executor));
+        task_list
+            .clone()
+            .set_threads(NonZero::new(8).unwrap(), NonZero::new(2).unwrap());
         let handles: Arc<[_]> = task_list.handles(|it| it.collect());
         drop(task_list);
         for handle in handles.iter() {

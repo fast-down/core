@@ -34,13 +34,13 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
       - name: Test
-        run: cargo test --all --verbose
+        run: cargo test --workspace --all-features --all-targets --verbose
 
       - name: Build
-        run: cargo build --all --verbose
+        run: cargo build --workspace --all-features --all-targets --verbose
 
       - name: Clippy
-        run: cargo clippy --all --verbose -- -Dwarnings
+        run: cargo clippy --workspace --all-features --all-targets --verbose -- -Dwarnings
 
   check-minimal:
     name: Check minimal versions
@@ -63,7 +63,7 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
       - name: Check minimal versions
-        run: cargo check --all --all-targets -Z minimal-versions
+        run: cargo check --workspace --all-features --all-targets -Z minimal-versions
 
   format:
     runs-on: ubuntu-latest
@@ -78,4 +78,4 @@ jobs:
           components: rustfmt
 
       - name: Run rustfmt
-        run: cargo fmt --all -- --check
+        run: cargo fmt --all --check

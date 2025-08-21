@@ -75,7 +75,9 @@ where
             tx.send(Event::Finished(ID)).await.unwrap();
             drop(tx);
             barrier.wait().await;
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     });
     DownloadResult::new(
         event_chain,
@@ -90,7 +92,10 @@ where
 mod tests {
     extern crate std;
     use super::*;
-    use crate::{MergeProgress, core::mock::{MockSeqPuller, MockSeqPusher, build_mock_data}, ProgressEntry};
+    use crate::{
+        MergeProgress, ProgressEntry,
+        core::mock::{MockSeqPuller, MockSeqPusher, build_mock_data},
+    };
     use alloc::vec;
     use std::dbg;
     use vec::Vec;

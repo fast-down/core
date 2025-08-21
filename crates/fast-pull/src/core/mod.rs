@@ -1,7 +1,7 @@
 extern crate alloc;
 
-use alloc::boxed::Box;
 use crate::Event;
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 use kanal::AsyncReceiver;

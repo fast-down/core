@@ -2,19 +2,18 @@ extern crate alloc;
 use super::macros::poll_ok;
 use crate::base::SliceOrBytes;
 use crate::{DownloadResult, Event, ProgressEntry, Puller, Pusher, ReadStream, WriteStream};
+use actix_rt::Arbiter;
 use alloc::boxed::Box;
 use alloc::{sync::Arc, vec::Vec};
-use alloc::sync::Weak;
 use core::ops::ControlFlow;
 use core::{
     num::{NonZero, NonZeroU64, NonZeroUsize},
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
-use actix_rt::Arbiter;
 use fast_steal::{Executor, Handle, Task, TaskList};
 use kanal::AsyncSender;
-use tokio::sync::{oneshot, Barrier};
+use tokio::sync::{Barrier, oneshot};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
@@ -32,9 +31,8 @@ async fn forward<R, W, E1, E2>(
     task: &Task,
     mut range_start: u64,
     retry_gap: Duration,
-    tx: AsyncSender<Event<E1, E2, R::Error, W::Error>>
-)
-where
+    tx: AsyncSender<Event<E1, E2, R::Error, W::Error>>,
+) where
     R: ReadStream,
     W: WriteStream,
 {
@@ -84,22 +82,20 @@ where
     let join_handle = barrier.clone();
     let arbiter = Arbiter::new();
     let handle = arbiter.handle();
-    let executor: ArbiterExecutor<R, W> = ArbiterExecutor {
+    let executor: Arc<ArbiterExecutor<R, W>> = Arc::new(ArbiterExecutor {
         tx,
         puller,
         pusher,
-        barrier,
         retry_gap: options.retry_gap,
         id: Arc::new(AtomicUsize::new(0)),
         min_chunk_size: options.min_chunk_size,
+        barrier,
         arbiter,
-    };
-    let task_list = TaskList::run(
-        options.concurrent,
-        options.min_chunk_size,
-        &options.download_chunks[..],
-        executor,
-    );
+    });
+    let task_list = Arc::new(TaskList::run(&options.download_chunks[..], executor));
+    task_list
+        .clone()
+        .set_threads(options.concurrent, options.min_chunk_size);
     DownloadResult::new(
         event_chain,
         join_handle,
@@ -141,7 +137,7 @@ where
     id: Arc<AtomicUsize>,
     min_chunk_size: NonZeroU64,
     barrier: Arc<Barrier>,
-    arbiter: Arbiter
+    arbiter: Arbiter,
 }
 impl<R, W> Executor for ArbiterExecutor<R, W>
 where
@@ -161,7 +157,8 @@ where
                     loop {
                         let start = task.start();
                         if start >= task.end() {
-                            if task_list.steal(&task, NonZero::new(2 * self.min_chunk_size.get()).unwrap())
+                            if task_list
+                                .steal(&task, NonZero::new(2 * self.min_chunk_size.get()).unwrap())
                             {
                                 continue;
                             }
@@ -186,15 +183,16 @@ where
                             &task,
                             start,
                             self.retry_gap,
-                            self.tx.clone()
-                        ).await;
+                            self.tx.clone(),
+                        )
+                        .await;
                     }
                     self.tx.send(Event::Finished(id)).await.unwrap();
                     task_list.remove(&task);
                     drop(task_list);
                     drop(self);
                 }
-               barrier.wait().await;
+                barrier.wait().await;
             }));
         });
         drop(this);
@@ -207,8 +205,8 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::{
-        core::mock::{build_mock_data, MockRandPuller, MockRandPusher}, MergeProgress,
-        ProgressEntry,
+        MergeProgress, ProgressEntry,
+        core::mock::{MockRandPuller, MockRandPusher, build_mock_data},
     };
     use alloc::vec;
     use std::dbg;
