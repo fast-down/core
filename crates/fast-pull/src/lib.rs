@@ -1,4 +1,6 @@
 #![no_std]
+extern crate alloc;
+
 mod base;
 mod core;
 #[cfg(feature = "file")]

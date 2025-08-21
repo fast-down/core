@@ -1,6 +1,9 @@
 extern crate std;
-use crate::{ProgressEntry, RandPusher, SeqPusher, Total};
+
+use crate::{Pusher, SliceOrBytes, WriteStream};
+use alloc::sync::Arc;
 use bytes::Bytes;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use mmap_io::{MemoryMappedFile, MmapIoError, MmapMode, flush::FlushPolicy};
 use std::{path::Path, vec::Vec};
 use thiserror::Error;
@@ -28,10 +31,11 @@ impl SeqFilePusher {
         }
     }
 }
-impl SeqPusher for SeqFilePusher {
+
+impl WriteStream for SeqFilePusher {
     type Error = FilePusherError;
-    async fn push(&mut self, content: Bytes) -> Result<(), Self::Error> {
-        Ok(self.buffer.write_all(&content).await?)
+    async fn write(&mut self, data: SliceOrBytes<'_>) -> Result<(), Self::Error> {
+        Ok(self.buffer.write_all(&data).await?)
     }
     async fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(self.buffer.flush().await?)
@@ -39,12 +43,27 @@ impl SeqPusher for SeqFilePusher {
 }
 
 #[derive(Debug)]
-pub struct RandFilePusherMmap {
-    mmap: MemoryMappedFile,
-    downloaded: usize,
-    buffer_size: usize,
+struct MmapPusherShared {
+    threshold: usize,
+    current: AtomicUsize,
 }
-impl RandFilePusherMmap {
+
+impl MmapPusherShared {
+    fn new(threshold: usize) -> Self {
+        Self {
+            threshold,
+            current: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct MmapFilePusher {
+    mmap: MemoryMappedFile,
+    shared: Arc<MmapPusherShared>,
+}
+
+impl MmapFilePusher {
     pub async fn new(
         path: impl AsRef<Path>,
         size: u64,
@@ -65,75 +84,137 @@ impl RandFilePusherMmap {
             } else {
                 mmap_builder.size(size).create()
             }?,
-            downloaded: 0,
-            buffer_size,
+            shared: Arc::new(MmapPusherShared::new(buffer_size)),
         })
     }
 }
-impl RandPusher for RandFilePusherMmap {
+
+struct MmapFilePushStream {
+    mmap: MemoryMappedFile,
+    shared: Arc<MmapPusherShared>,
+    start_point: u64,
+}
+
+impl Pusher for MmapFilePusher {
     type Error = FilePusherError;
-    async fn push(&mut self, range: ProgressEntry, bytes: Bytes) -> Result<(), Self::Error> {
-        self.mmap
-            .as_slice_mut(range.start, range.total())?
-            .as_mut()
-            .copy_from_slice(&bytes[0..(range.total() as usize)]);
-        self.downloaded += bytes.len();
-        if self.downloaded >= self.buffer_size {
-            self.mmap.flush_async().await?;
-            self.downloaded = 0;
-        }
-        Ok(())
+    type StreamError = FilePusherError;
+
+    async fn init_write(
+        &self,
+        start_point: u64,
+    ) -> Result<impl WriteStream<Error = Self::StreamError>, Self::Error> {
+        Ok(MmapFilePushStream {
+            mmap: self.mmap.clone(),
+            shared: self.shared.clone(),
+            start_point,
+        })
     }
+
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        self.mmap.flush_async().await?;
+        Ok(self.mmap.flush_async().await?)
+    }
+}
+
+impl WriteStream for MmapFilePushStream {
+    type Error = FilePusherError;
+    async fn write(&mut self, data: SliceOrBytes<'_>) -> Result<(), Self::Error> {
+        self.mmap
+            .as_slice_mut(self.start_point, data.len() as u64)?
+            .as_mut()
+            .copy_from_slice(&data);
+        self.start_point += data.len() as u64;
+        let current = self.shared.current.fetch_add(data.len(), Ordering::SeqCst) + data.len();
+        if current >= self.shared.threshold {
+            self.mmap.flush_async().await?;
+            self.shared.current.store(0, Ordering::Relaxed);
+        }
         Ok(())
     }
 }
 
 #[derive(Debug)]
-pub struct RandFilePusherStd {
-    buffer: BufWriter<File>,
-    cache: Vec<(u64, Bytes)>,
-    p: u64,
-    cache_size: usize,
-    buffer_size: usize,
+pub struct FilePusherStd(Arc<StdPusherShared>);
+#[derive(Debug)]
+struct StdPusherShared {
+    buffer: tokio::sync::Mutex<BufWriter<File>>,
+    cache: spin::Mutex<Vec<(u64, Bytes)>>,
+    p: AtomicU64,
+    cache_size: AtomicUsize,
+    threshold: usize,
 }
-impl RandFilePusherStd {
+
+struct StdFilePushStream {
+    shared: Arc<StdPusherShared>,
+    start_point: u64,
+}
+
+impl FilePusherStd {
     pub async fn new(file: File, size: u64, buffer_size: usize) -> Result<Self, FilePusherError> {
         file.set_len(size).await?;
-        Ok(Self {
-            buffer: BufWriter::with_capacity(buffer_size, file),
-            cache: Vec::new(),
-            p: 0,
-            cache_size: 0,
-            buffer_size,
-        })
+        Ok(Self(Arc::new(StdPusherShared {
+            buffer: tokio::sync::Mutex::new(BufWriter::with_capacity(buffer_size, file)),
+            cache: spin::Mutex::new(Vec::new()),
+            p: AtomicU64::new(0),
+            cache_size: AtomicUsize::new(0),
+            threshold: buffer_size,
+        })))
     }
 }
-impl RandPusher for RandFilePusherStd {
-    type Error = FilePusherError;
-    async fn push(&mut self, range: ProgressEntry, mut bytes: Bytes) -> Result<(), Self::Error> {
-        let pos = self.cache.partition_point(|(i, _)| i < &range.start);
-        self.cache_size += bytes.len();
-        drop(bytes.split_off(range.total() as usize));
-        self.cache.insert(pos, (range.start, bytes));
-        if self.cache_size >= self.buffer_size {
-            self.flush().await?;
+
+impl StdPusherShared {
+    async fn flush_with_cache(
+        &self,
+        mut cache_guard: spin::MutexGuard<'_, Vec<(u64, Bytes)>>,
+    ) -> Result<(), FilePusherError> {
+        let mut guard = self.buffer.lock().await;
+        let mut p = self.p.load(Ordering::Acquire);
+        for (start, bytes) in cache_guard.drain(..) {
+            let len = bytes.len();
+            self.cache_size.fetch_sub(len, Ordering::SeqCst);
+            if start != p {
+                guard.seek(SeekFrom::Start(start)).await?;
+                p = start;
+            }
+            guard.write_all(&bytes).await?;
+            p += len as u64;
         }
+        guard.flush().await?;
+        self.p.store(p, Ordering::Release);
         Ok(())
     }
-    async fn flush(&mut self) -> Result<(), Self::Error> {
-        for (start, bytes) in self.cache.drain(..) {
-            let len = bytes.len();
-            self.cache_size -= len;
-            if start != self.p {
-                self.buffer.seek(SeekFrom::Start(start)).await?;
-                self.p = start;
-            }
-            self.buffer.write_all(&bytes).await?;
-            self.p += len as u64;
+}
+impl Pusher for FilePusherStd {
+    type Error = FilePusherError;
+    type StreamError = FilePusherError;
+
+    async fn init_write(
+        &self,
+        start_point: u64,
+    ) -> Result<impl WriteStream<Error = Self::StreamError>, Self::Error> {
+        Ok(StdFilePushStream {
+            shared: self.0.clone(),
+            start_point,
+        })
+    }
+
+    fn flush(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.0.flush_with_cache(self.0.cache.lock())
+    }
+}
+impl WriteStream for StdFilePushStream {
+    type Error = FilePusherError;
+    async fn write(&mut self, chunk: SliceOrBytes<'_>) -> Result<(), Self::Error> {
+        let mut cache_guard = self.shared.cache.lock();
+        let pos = cache_guard.partition_point(|(i, _)| i < &self.start_point);
+        let size = self
+            .shared
+            .cache_size
+            .fetch_add(chunk.len(), Ordering::SeqCst)
+            + chunk.len();
+        cache_guard.insert(pos, (self.start_point, chunk.into_bytes()));
+        if size >= self.shared.threshold {
+            self.shared.flush_with_cache(cache_guard).await?;
         }
-        self.buffer.flush().await?;
         Ok(())
     }
 }
@@ -141,7 +222,6 @@ impl RandPusher for RandFilePusherStd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use tempfile::NamedTempFile;
     use tokio::io::AsyncReadExt;
 
@@ -155,10 +235,8 @@ mod tests {
         let mut pusher = SeqFilePusher::new(temp_file.reopen().unwrap().into(), 1024);
 
         // 写入数据
-        let data1 = Bytes::from("Hello, ");
-        let data2 = Bytes::from("world!");
-        pusher.push(data1).await.unwrap();
-        pusher.push(data2).await.unwrap();
+        pusher.write(b"Hello, "[..].into()).await.unwrap();
+        pusher.write(b"world!"[..].into()).await.unwrap();
         pusher.flush().await.unwrap();
 
         // 验证文件内容
@@ -179,15 +257,14 @@ mod tests {
         let file_path = temp_file.path();
 
         // 初始化 RandFilePusher，假设文件大小为 10 字节
-        let mut pusher = RandFilePusherMmap::new(file_path, 10, 8 * 1024 * 1024)
+        let pusher = MmapFilePusher::new(file_path, 10, 8 * 1024 * 1024)
             .await
             .unwrap();
 
         // 写入数据
-        let data = Bytes::from("234");
-        let range = 2..5;
-        pusher.push(range, data).await.unwrap();
-        pusher.flush().await.unwrap();
+        let mut writer = pusher.init_write(2).await.unwrap();
+        writer.write(b"234"[..].into()).await.unwrap();
+        writer.flush().await.unwrap();
 
         // 验证文件内容
         let mut file_content = Vec::new();

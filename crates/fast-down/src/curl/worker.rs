@@ -5,7 +5,7 @@ use curl::multi::Multi;
 use kanal::{ReceiveError, Receiver, SendError, Sender};
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default, Clone)]
@@ -61,7 +61,6 @@ enum SignalWaker {
     None,
 }
 
-
 pub struct DataSignal {
     waker: SignalWaker,
     state: AtomicU32,
@@ -116,17 +115,27 @@ impl DataSignal {
 
     fn reset_from(&self, old_state: Option<u32>, old_signal: Option<u32>) -> bool {
         if let Some(state) = old_state {
-            match self.state.compare_exchange(state, STATE_NONE, Ordering::Acquire, Ordering::Acquire) {
-                Ok(_) => {},
-                Err(_) => return false
+            match self.state.compare_exchange(
+                state,
+                STATE_NONE,
+                Ordering::Acquire,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {}
+                Err(_) => return false,
             }
         } else {
             self.state.store(STATE_NONE, Ordering::Release);
         }
         if let Some(signal) = old_signal {
-            match self.signal.compare_exchange(signal, SIG_NONE, Ordering::Acquire, Ordering::Acquire) {
-                Ok(_) => {},
-                Err(_) => return false
+            match self.signal.compare_exchange(
+                signal,
+                SIG_NONE,
+                Ordering::Acquire,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {}
+                Err(_) => return false,
             }
         } else {
             self.signal.store(SIG_NONE, Ordering::Release);

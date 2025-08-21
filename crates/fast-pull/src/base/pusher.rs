@@ -1,25 +1,21 @@
-use crate::ProgressEntry;
-use bytes::Bytes;
+use crate::base::data::SliceOrBytes;
 use core::future;
 
-/// Random Pusher
-///
-/// Implementation should only overwrite content in `range`, even if `content.len()` is larger than `range.total()`
-pub trait RandPusher: Send {
+pub trait WriteStream {
     type Error: Send;
-    fn push(
-        &mut self,
-        range: ProgressEntry,
-        content: Bytes,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn write(&mut self, buf: SliceOrBytes) -> impl Future<Output = Result<(), Self::Error>> + Send;
     fn flush(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
         future::ready(Ok(()))
     }
 }
 
-pub trait SeqPusher: Send {
+pub trait Pusher: Send {
     type Error: Send;
-    fn push(&mut self, content: Bytes) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    type StreamError: Send;
+    fn init_write(
+        &self,
+        start_point: u64,
+    ) -> impl Future<Output = Result<impl WriteStream<Error = Self::StreamError>, Self::Error>> + Send;
     fn flush(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
         future::ready(Ok(()))
     }

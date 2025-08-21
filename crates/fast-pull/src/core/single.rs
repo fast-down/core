@@ -1,98 +1,112 @@
 extern crate alloc;
+
 use super::macros::poll_ok;
-use crate::{DownloadResult, Event, ProgressEntry, SeqPuller, SeqPusher};
-use bytes::Bytes;
+use crate::{DownloadResult, Event, ReadStream, SliceOrBytes, WriteStream};
+use actix_rt::Arbiter;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use core::ops::ControlFlow;
 use core::time::Duration;
-use futures::TryStreamExt;
+use kanal::AsyncSender;
+use tokio::sync::Barrier;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub retry_gap: Duration,
-    pub push_queue_cap: usize,
+}
+
+pub(crate) async fn forward<R, W: 'static + Send>(
+    mut puller: R,
+    mut pusher: W,
+    id: usize,
+    options: DownloadOptions,
+    tx: AsyncSender<
+        Event<core::convert::Infallible, core::convert::Infallible, R::Error, W::Error>,
+    >,
+) where
+    R: ReadStream + 'static + Send,
+    W: WriteStream + 'static + Send,
+{
+    let mut downloaded: u64 = 0;
+    loop {
+        if let ControlFlow::Break(()) = poll_ok!(puller.read_with(async |chunk: SliceOrBytes| {
+            let len = chunk.len() as u64;
+            if len == 0 {
+                return ControlFlow::Break(());
+            }
+            let span = downloaded..(downloaded + len);
+            tx.send(Event::PullProgress(id, span.clone()))
+                .await
+                .unwrap();
+            poll_ok!(
+              pusher.write(chunk.clone()).await,
+              id @ tx => PushStreamError,
+              options.retry_gap
+            );
+            tx.send(Event::PushProgress(id, span.clone()))
+                .await
+                .unwrap();
+            downloaded += len;
+            ControlFlow::Continue(())
+        }).await, id @ tx => PullStreamError, options.retry_gap)
+        {
+            break;
+        }
+    }
 }
 
 pub async fn download_single<R, W>(
-    mut puller: R,
-    mut pusher: W,
+    puller: R,
+    pusher: W,
     options: DownloadOptions,
-) -> DownloadResult<R::Error, W::Error>
+) -> DownloadResult<core::convert::Infallible, core::convert::Infallible, R::Error, W::Error>
 where
-    R: SeqPuller + 'static,
-    W: SeqPusher + 'static,
+    R: ReadStream + 'static + Send,
+    W: WriteStream + 'static + Send,
 {
     let (tx, event_chain) = kanal::unbounded_async();
-    let (tx_push, rx_push) = kanal::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);
-    let tx_clone = tx.clone();
+    let barrier = Arc::new(Barrier::new(1 + 1));
+    let join_handle = barrier.clone();
     const ID: usize = 0;
-    let push_handle = tokio::spawn(async move {
-        while let Ok((spin, data)) = rx_push.recv().await {
-            poll_ok!(
-                {},
-                pusher.push(data.clone()).await,
-                ID @ tx_clone => PushError,
-                options.retry_gap
-            );
-            tx_clone.send(Event::PushProgress(ID, spin)).await.unwrap();
-        }
-        poll_ok!(
-            {},
-            pusher.flush().await,
-            tx_clone => FlushError,
-            options.retry_gap
-        );
+    let arbiter = Arbiter::new();
+    arbiter.spawn(async move {
+        actix_rt::spawn(async move {
+            forward(puller, pusher, ID, options, tx.clone()).await;
+            tx.send(Event::Finished(ID)).await.unwrap();
+            drop(tx);
+            barrier.wait().await;
+        }).await.unwrap();
     });
-    let handle = tokio::spawn(async move {
-        tx.send(Event::Pulling(ID)).await.unwrap();
-        let mut downloaded: u64 = 0;
-        let mut stream = puller.pull();
-        loop {
-            match stream.try_next().await {
-                Ok(Some(chunk)) => {
-                    let len = chunk.len() as u64;
-                    let span = downloaded..(downloaded + len);
-                    tx.send(Event::PullProgress(ID, span.clone()))
-                        .await
-                        .unwrap();
-                    tx_push.send((span, chunk)).await.unwrap();
-                    downloaded += len;
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    tx.send(Event::PullError(ID, e)).await.unwrap();
-                    tokio::time::sleep(options.retry_gap).await;
-                }
-            }
-        }
-        tx.send(Event::Finished(ID)).await.unwrap();
-    });
-    DownloadResult::new(event_chain, push_handle, &[handle.abort_handle()])
+    DownloadResult::new(
+        event_chain,
+        join_handle,
+        Box::new(move || {
+            arbiter.stop();
+        }),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     extern crate std;
     use super::*;
-    use crate::{
-        MergeProgress,
-        core::mock::{MockSeqPuller, MockSeqPusher, build_mock_data},
-    };
+    use crate::{MergeProgress, core::mock::{MockSeqPuller, MockSeqPusher, build_mock_data}, ProgressEntry};
     use alloc::vec;
     use std::dbg;
     use vec::Vec;
 
-    #[tokio::test]
+    #[actix_rt::test]
     async fn test_sequential_download() {
         let mock_data = build_mock_data(3 * 1024);
         let puller = MockSeqPuller::new(mock_data.clone());
-        let pusher = MockSeqPusher::new(&mock_data);
+        let pusher = MockSeqPusher::new();
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
-        let result = download_single(
+        let mut result = download_single(
             puller,
             pusher.clone(),
             DownloadOptions {
                 retry_gap: Duration::from_secs(1),
-                push_queue_cap: 1024,
             },
         )
         .await;
@@ -116,6 +130,6 @@ mod tests {
         assert_eq!(push_progress, download_chunks);
 
         result.join().await.unwrap();
-        pusher.assert().await;
+        assert_eq!(pusher.into_vec(), mock_data);
     }
 }

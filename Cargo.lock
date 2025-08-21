@@ -3,6 +3,27 @@
 version = 4
 
 [[package]]
+name = "actix-macros"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e01ed3140b2f8d422c68afa1ed2e85d996ea619c988ac834d255db32138655cb"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "actix-rt"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24eda4e2a6e042aa4e55ac438a2ae052d3b5da0ecf83d7411e1a368946925208"
+dependencies = [
+ "actix-macros",
+ "futures-core",
+ "tokio",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -184,8 +205,6 @@ dependencies = [
  "cc",
  "libc",
  "libnghttp2-sys",
- "libnghttp3-sys",
- "libngtcp2-sys",
  "libz-sys",
  "openssl-sys",
  "pkg-config",
@@ -240,12 +259,14 @@ dependencies = [
  "curl",
  "fast-pull",
  "futures",
+ "http",
  "kanal",
  "mockito",
  "oneshot",
  "reqwest",
  "sanitize-filename",
  "slab",
+ "thiserror 2.0.16",
  "tokio",
  "url",
  "urlencoding",
@@ -255,6 +276,7 @@ dependencies = [
 name = "fast-pull"
 version = "3.1.0"
 dependencies = [
+ "actix-rt",
  "bytes",
  "content_disposition",
  "fast-steal",
@@ -264,8 +286,9 @@ dependencies = [
  "mockito",
  "reqwest",
  "sanitize-filename",
+ "spin",
  "tempfile",
- "thiserror 2.0.14",
+ "thiserror 2.0.16",
  "tokio",
  "url",
  "urlencoding",
@@ -751,24 +774,6 @@ name = "libnghttp2-sys"
 version = "0.1.11+1.64.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b6c24e48a7167cffa7119da39d577fa482e66c688a4aac016bee862e1a713c4"
-dependencies = [
- "cc",
- "libc",
-]
-
-[[package]]
-name = "libnghttp3-sys"
-version = "0.0.1+1.11.0"
-source = "git+https://github.com/CyanProjects/nghttp3-rs#51dace002e1b6af631f8c3297c5f2fa17dfcfb22"
-dependencies = [
- "cc",
- "libc",
-]
-
-[[package]]
-name = "libngtcp2-sys"
-version = "0.0.1+1.14.0"
-source = "git+https://github.com/CyanProjects/ngtcp2-rs#69d013ffd0c56ace380269fcce6bc3d3e1d50bbc"
 dependencies = [
  "cc",
  "libc",
@@ -1362,6 +1367,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
+name = "signal-hook-registry"
+version = "1.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a4719bff48cee6b39d12c020eeb490953ad2443b7055bd0b21fca26bd8c28b"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "similar"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1483,11 +1497,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.14"
+version = "2.0.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b0949c3a6c842cbde3f1686d6eea5a010516deb7085f79db747562d4102f41e"
+checksum = "3467d614147380f2e4e374161426ff399c91084acd2363eaf549172b3d5e60c0"
 dependencies = [
- "thiserror-impl 2.0.14",
+ "thiserror-impl 2.0.16",
 ]
 
 [[package]]
@@ -1503,9 +1517,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.14"
+version = "2.0.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc5b44b4ab9c2fdd0e0512e6bece8388e214c0749f5862b114cc5b7a25daf227"
+checksum = "6c5e1be1c48b9172ee610da68fd9cd2770e7a4056cb3fc98710ee6906f0c7960"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1535,6 +1549,7 @@ dependencies = [
  "mio",
  "parking_lot",
  "pin-project-lite",
+ "signal-hook-registry",
  "slab",
  "socket2",
  "tokio-macros",

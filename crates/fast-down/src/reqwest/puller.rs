@@ -3,9 +3,9 @@ use core::{
     pin::{Pin, pin},
     task::{Context, Poll},
 };
-use fast_pull::{RandPuller, SeqPuller};
+use fast_pull::{Puller, SeqPuller};
 use futures::{Stream, TryFutureExt, TryStream};
-use reqwest::{Client, Response, header};
+use reqwest::{Client, Response};
 use std::sync::Arc;
 use url::Url;
 
@@ -40,7 +40,7 @@ impl ReqwestPuller {
     }
 }
 
-impl RandPuller for ReqwestPuller {
+impl Puller for ReqwestPuller {
     type Error = reqwest::Error;
     fn pull(
         &mut self,
@@ -95,7 +95,7 @@ impl Stream for ReqwestStream {
                     .client
                     .get(self.url.clone())
                     .header(
-                        header::RANGE,
+                        http::header::RANGE,
                         format!("bytes={}-{}", self.start, self.end - 1),
                     )
                     .send();

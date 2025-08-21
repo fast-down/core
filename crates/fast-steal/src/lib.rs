@@ -106,6 +106,8 @@
 //! }
 //! ```
 
+extern crate alloc;
+
 mod executor;
 mod task;
 mod task_list;

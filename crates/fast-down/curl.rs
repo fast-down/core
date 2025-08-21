@@ -1,4 +1,4 @@
-use fast_down::curl::worker::{DataSignal, Op, multi, options, SIG_EVENT, STATE_SEND_FAILED};
+use fast_down::curl::worker::{DataSignal, Op, SIG_EVENT, STATE_SEND_FAILED, multi, options};
 use kanal::ReceiveError;
 use std::sync::Arc;
 use std::thread;
