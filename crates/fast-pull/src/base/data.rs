@@ -24,6 +24,12 @@ impl SliceOrBytes<'_> {
     }
 }
 
+impl<'b> SliceOrBytes<'b> {
+    pub unsafe fn from_slice_any_lifetime<'a>(value: &'a [u8]) -> Self {
+        SliceOrBytes::Slice(unsafe { core::mem::transmute::<&'a [u8], &'b [u8]>(value) })
+    }
+}
+
 impl<'a> From<&'a [u8]> for SliceOrBytes<'a> {
     fn from(value: &'a [u8]) -> Self {
         Self::Slice(value)

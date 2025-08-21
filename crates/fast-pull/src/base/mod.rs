@@ -6,6 +6,13 @@ mod puller;
 mod pusher;
 mod total;
 
+mod traits;
+
+pub use traits::*;
+
+#[cfg(feature = "std")]
+pub use traits::std::*;
+
 pub use data::SliceOrBytes;
 pub use event::*;
 pub use merge_progress::*;

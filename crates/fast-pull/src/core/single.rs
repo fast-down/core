@@ -11,21 +11,21 @@ use kanal::AsyncSender;
 use tokio::sync::Barrier;
 
 #[derive(Debug, Clone)]
-pub struct DownloadOptions {
+pub struct TransferOptions {
     pub retry_gap: Duration,
 }
 
-pub(crate) async fn forward<R, W: 'static + Send>(
+pub(crate) async fn forward<R, W>(
     mut puller: R,
     mut pusher: W,
     id: usize,
-    options: DownloadOptions,
+    options: TransferOptions,
     tx: AsyncSender<
         Event<core::convert::Infallible, core::convert::Infallible, R::Error, W::Error>,
     >,
 ) where
-    R: ReadStream + 'static + Send,
-    W: WriteStream + 'static + Send,
+    R: ReadStream + Send,
+    W: WriteStream + Send,
 {
     let mut downloaded: u64 = 0;
     loop {
@@ -55,30 +55,45 @@ pub(crate) async fn forward<R, W: 'static + Send>(
     }
 }
 
-pub async fn download_single<R, W>(
+pub(crate) mod internal {
+    use futures::future::{BoxFuture, LocalBoxFuture};
+    use futures::FutureExt;
+
+    pub unsafe fn boxed_expanded<T>(fut: impl Future<Output = T> + Send) -> BoxFuture<'static, T> {
+        unsafe { core::mem::transmute(fut.boxed()) }
+    }
+
+    pub unsafe fn boxed_local_expanded<T>(fut: impl Future<Output = T>) -> LocalBoxFuture<'static, T> {
+        unsafe { core::mem::transmute(fut.boxed_local()) }
+    }
+}
+
+pub async fn transfer<'a, 'b, R: 'a, W: 'b + 'a>(
     puller: R,
     pusher: W,
-    options: DownloadOptions,
-) -> DownloadResult<core::convert::Infallible, core::convert::Infallible, R::Error, W::Error>
+    options: TransferOptions,
+) -> DownloadResult<'a, 'b, core::convert::Infallible, core::convert::Infallible, R::Error, W::Error>
 where
-    R: ReadStream + 'static + Send,
-    W: WriteStream + 'static + Send,
+    R: ReadStream + Send,
+    R::Error: 'static,
+    W: WriteStream + Send,
+    W::Error: 'static,
 {
     let (tx, event_chain) = kanal::unbounded_async();
     let barrier = Arc::new(Barrier::new(1 + 1));
     let join_handle = barrier.clone();
     const ID: usize = 0;
     let arbiter = Arbiter::new();
-    arbiter.spawn(async move {
-        actix_rt::spawn(async move {
+    arbiter.spawn(unsafe { internal::boxed_expanded(async move {
+        actix_rt::spawn(internal::boxed_local_expanded(async move {
             forward(puller, pusher, ID, options, tx.clone()).await;
             tx.send(Event::Finished(ID)).await.unwrap();
             drop(tx);
             barrier.wait().await;
-        })
+        }))
         .await
         .unwrap();
-    });
+    }) });
     DownloadResult::new(
         event_chain,
         join_handle,
@@ -107,10 +122,10 @@ mod tests {
         let pusher = MockSeqPusher::new();
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
-        let mut result = download_single(
+        let mut result = transfer(
             puller,
             pusher.clone(),
-            DownloadOptions {
+            TransferOptions {
                 retry_gap: Duration::from_secs(1),
             },
         )

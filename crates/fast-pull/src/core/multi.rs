@@ -17,7 +17,7 @@ use tokio::sync::{Barrier, oneshot};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
-pub struct DownloadOptions {
+pub struct TransferOptions {
     pub download_chunks: Vec<ProgressEntry>,
     pub concurrent: NonZeroUsize,
     pub retry_gap: Duration,
@@ -68,14 +68,27 @@ async fn forward<R, W, E1, E2>(
     }
 }
 
-pub async fn download_multi<R, W>(
+pub(crate) mod internal {
+    use futures::future::{BoxFuture, LocalBoxFuture};
+    use futures::FutureExt;
+
+    pub unsafe fn boxed_expanded<T>(fut: impl Future<Output = T> + Send) -> BoxFuture<'static, T> {
+        unsafe { core::mem::transmute(fut.boxed()) }
+    }
+
+    pub unsafe fn boxed_local_expanded<T>(fut: impl Future<Output = T>) -> LocalBoxFuture<'static, T> {
+        unsafe { core::mem::transmute(fut.boxed_local()) }
+    }
+}
+
+pub async fn transfer<'a, 'b, R, W>(
     puller: R,
     pusher: W,
-    options: DownloadOptions,
-) -> DownloadResult<R::Error, W::Error, R::StreamError, W::StreamError>
+    options: TransferOptions,
+) -> DownloadResult<'a, 'b, R::Error, W::Error, R::StreamError, W::StreamError>
 where
-    R: Puller + 'static + Sync,
-    W: Pusher + 'static + Clone + Sync,
+    R: Puller + Sync + 'a,
+    W: Pusher + Sync + 'b,
 {
     let (tx, event_chain) = kanal::unbounded_async();
     let barrier = Arc::new(Barrier::new(options.concurrent.get() + 1));
@@ -127,8 +140,8 @@ impl Handle for OneshotHandle {
 }
 pub struct ArbiterExecutor<R, W>
 where
-    R: Puller + 'static,
-    W: Pusher + 'static + Clone,
+    R: Puller,
+    W: Pusher,
 {
     tx: AsyncSender<Event<R::Error, W::Error, R::StreamError, W::StreamError>>,
     puller: R,
@@ -141,8 +154,8 @@ where
 }
 impl<R, W> Executor for ArbiterExecutor<R, W>
 where
-    R: Puller + 'static + Sync,
-    W: Pusher + 'static + Clone + Sync,
+    R: Puller + Sync,
+    W: Pusher + Sync,
 {
     type Handle = OneshotHandle;
     fn execute(self: Arc<Self>, task: Arc<Task>, task_list: Arc<TaskList<Self>>) -> Self::Handle {
@@ -150,8 +163,8 @@ where
 
         let (tx_handle, rx_handle) = oneshot::channel();
         let this = self.clone();
-        this.arbiter.spawn(async move {
-            let _ = tx_handle.send(actix_rt::spawn(async move {
+        this.arbiter.spawn(unsafe { internal::boxed_expanded(async move {
+            let _ = tx_handle.send(actix_rt::spawn(internal::boxed_local_expanded(async move {
                 let barrier = self.barrier.clone();
                 {
                     loop {
@@ -193,8 +206,8 @@ where
                     drop(self);
                 }
                 barrier.wait().await;
-            }));
-        });
+            })));
+        })});
         drop(this);
         OneshotHandle::new(rx_handle)
     }
@@ -218,10 +231,10 @@ mod tests {
         let pusher = MockRandPusher::new(mock_data.len());
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
-        let mut result = download_multi(
+        let mut result = transfer(
             puller,
             pusher.clone(),
-            DownloadOptions {
+            TransferOptions {
                 concurrent: NonZero::new(32).unwrap(),
                 retry_gap: Duration::from_secs(1),
                 download_chunks: download_chunks.clone(),

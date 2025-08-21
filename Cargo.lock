@@ -252,6 +252,7 @@ dependencies = [
 name = "fast-down"
 version = "3.1.0"
 dependencies = [
+ "actix-rt",
  "anyhow",
  "atomic-wait",
  "bytes",
@@ -267,7 +268,6 @@ dependencies = [
  "sanitize-filename",
  "slab",
  "thiserror 2.0.16",
- "tokio",
  "url",
  "urlencoding",
 ]

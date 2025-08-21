@@ -1,49 +1,47 @@
-use fast_down::curl::worker::{DataSignal, Op, SIG_EVENT, STATE_SEND_FAILED, multi, options};
-use kanal::ReceiveError;
-use std::sync::Arc;
+use std::convert::Infallible;
+use std::io::Error;
+use fast_down::curl::puller::{Options, WorkerPuller};
+use fast_down::curl::worker::multi;
+use fast_pull::single::TransferOptions;
 use std::thread;
-use std::time::Duration;
+use futures::StreamExt;
+use fast_pull::{Event, Puller};
 
-pub fn main() {
+#[actix_rt::main]
+async fn main() {
     let (tx_ops, rx_ops) = kanal::unbounded();
     let handle = thread::spawn(move || {
         multi(rx_ops).unwrap();
     });
-    let (tx_ret, ret) = oneshot::channel();
-    let (tx_data, rx_data) = kanal::bounded(1);
-    let signal: Arc<DataSignal> = Default::default();
-    tx_ops
-        .send(Op::New(
-            tx_data,
-            options::New {
-                signal: signal.clone(),
-                headers: curl::easy::List::new(),
-                url: "https://github.com/".to_string(),
-                extra: None,
-            },
-            tx_ret,
-        ))
-        .unwrap();
-    let th = ret.recv().unwrap();
-    loop {
-        if signal.is_send_failed() {
-            tx_ops.send(Op::UnpauseData(th)).unwrap();
-        }
 
-        match rx_data.try_recv() {
-            Ok(Some(data)) => {
-                eprint!("{}", std::str::from_utf8(&data).unwrap());
-                thread::sleep(Duration::from_millis(100));
+    let puller = WorkerPuller::create(tx_ops.to_async(), Options {
+        url: "http://localhost".to_string(),
+        data_channel_cap: 16,
+        headers: vec!["user-agent: curl/1.41".to_string()],
+    }).await.unwrap();
+    let mut data: Vec<u8> = Vec::new();
+    let mut result = fast_pull::single::transfer(puller.init_read(None).await.unwrap(), &mut data, TransferOptions {
+        retry_gap: Default::default(),
+    }).await;
+    let mut stream = result.event_chain.stream();
+    while let Some(event) = stream.next().await {
+        match event {
+            Event::Pulling(_) => {}
+            Event::PullError(_, _) => {}
+            Event::PullStreamError(id, err) => {
+                dbg!(id, err);
             }
-            Ok(None) => {
-                if signal.is_send_failed() {
-                    tx_ops.send(Op::UnpauseData(th)).unwrap();
-                }
-                atomic_wait::wait(signal.signal(), SIG_EVENT);
-            }
-            Err(ReceiveError::SendClosed) => break,
-            Err(ReceiveError::Closed) => unreachable!(),
+            Event::PullProgress(_, _) => {}
+            Event::PushError(_, _) => {}
+            Event::PushStreamError(_, _) => {}
+            Event::PushProgress(_, _) => {}
+            Event::FlushError(_) => {}
+            Event::Finished(_) => {}
         }
     }
-    handle.join().unwrap();
+    result.join().await.unwrap();
+    drop(stream);
+    drop(result);
+
+    dbg!(data);
 }

@@ -1,8 +1,8 @@
-use crate::curl::worker::{DataSignal, Op, TaskHandle, options};
+use crate::curl::worker::{DataSignal, Op, TaskHandle, options, ChannelData};
 use bytes::Bytes;
 use fast_pull::{ProgressEntry, Puller, ReadStream, SliceOrBytes};
 use futures::TryStream;
-use kanal::{AsyncReceiver, AsyncSender};
+use kanal::{AsyncReceiver, AsyncSender, ReceiveError};
 use std::io;
 use std::sync::Arc;
 use thiserror::Error;
@@ -15,12 +15,12 @@ pub struct Options {
 }
 
 #[derive(Clone)]
-pub struct WorkerFetcher {
+pub struct WorkerPuller {
     tx_ops: AsyncSender<Op>,
     options: Arc<Options>,
 }
 
-impl WorkerFetcher {
+impl WorkerPuller {
     pub async fn create(tx_ops: AsyncSender<Op>, options: Options) -> Result<Self, anyhow::Error> {
         Ok(Self {
             tx_ops,
@@ -37,14 +37,33 @@ pub enum CreateTaskError {
     Recv,
 }
 
-struct WorkerPuller {
+struct DataStream {
     tx_ops: AsyncSender<Op>,
-    rx_data: AsyncReceiver<Bytes>,
+    rx_data: AsyncReceiver<ChannelData>,
     signal: Arc<DataSignal>,
-    th: TaskHandle,
+    th: Option<TaskHandle>,
 }
 
-impl ReadStream for WorkerPuller {
+fn map_channel_data_err(data: ChannelData) -> io::Result<Bytes> {
+    match data {
+        ChannelData::Data(data) => Ok(data),
+        ChannelData::Error(errno) => Err(io::Error::from_raw_os_error(errno))
+    }
+}
+
+macro_rules! destory_if_error {
+    ($result:expr, $th:expr) => {
+        match $result {
+            Ok(data) => data,
+            Err(err) => {
+                drop($th.take());
+                return Err(err);
+            }
+        }
+    };
+}
+
+impl ReadStream for DataStream {
     type Error = io::Error;
 
     async fn read_with<'a, F, Fut, Ret>(&'a mut self, read_fn: F) -> Result<Ret, Self::Error>
@@ -52,16 +71,34 @@ impl ReadStream for WorkerPuller {
         F: FnOnce(SliceOrBytes<'a>) -> Fut,
         Fut: Future<Output = Ret>,
     {
-        let data = self
+        let th = if let Some(th) = self.th.clone() { th } else {
+            return Ok(read_fn(SliceOrBytes::empty()).await);
+        };
+        let data = match self
             .rx_data
-            .recv()
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "data channel closed"))?;
+            .try_recv()
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "data channel closed"))?
+        {
+            Some(data) => destory_if_error!(map_channel_data_err(data), self.th),
+            None => {
+                if self.signal.is_send_failed() {
+                    self.tx_ops
+                        .send(Op::UnpauseData(th))
+                        .await
+                        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "op channel closed"))?;
+                }
+                let data = self.rx_data
+                    .recv()
+                    .await
+                    .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "data channel closed"))?;
+                destory_if_error!(map_channel_data_err(data), self.th)
+            }
+        };
         Ok(read_fn(data.into()).await)
     }
 }
 
-impl Puller for WorkerFetcher {
+impl Puller for WorkerPuller {
     type StreamError = io::Error;
     type Error = CreateTaskError;
 
@@ -98,13 +135,13 @@ impl Puller for WorkerFetcher {
                 tx_ret,
             ))
             .await
-            .map_err(|e| CreateTaskError::Send)?;
+            .map_err(|_| CreateTaskError::Send)?;
         let th = ret.await.map_err(|_| CreateTaskError::Recv)?;
-        Ok(WorkerPuller {
+        Ok(DataStream {
             tx_ops: self.tx_ops.clone(),
             rx_data: rx_data.to_async(),
             signal,
-            th,
+            th: Some(th),
         })
     }
 }

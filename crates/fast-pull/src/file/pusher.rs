@@ -197,7 +197,7 @@ impl Pusher for FilePusherStd {
         })
     }
 
-    fn flush(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+    fn flush(&mut self) -> impl Future<Output = Result<(), Self::Error>> {
         self.0.flush_with_cache(self.0.cache.lock())
     }
 }

@@ -3,6 +3,7 @@ extern crate alloc;
 use crate::Event;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
 use kanal::AsyncReceiver;
 use spin::Mutex;
@@ -18,14 +19,22 @@ pub mod single;
 type AbortHandle = Box<dyn FnOnce() + Send + 'static>;
 
 #[derive(Clone)]
-pub struct DownloadResult<PullError, PushError, PullStreamError, PushStreamError> {
+pub struct DownloadResult<'a, 'b, PullError, PushError, PullStreamError, PushStreamError> {
+    _phantom1: PhantomData<&'a ()>,
+    _phantom2: PhantomData<&'b ()>,
     pub event_chain: AsyncReceiver<Event<PullError, PushError, PullStreamError, PushStreamError>>,
     joined: Arc<AtomicBool>,
     join_handle: Arc<Barrier>,
     abort_handle: Arc<Mutex<Option<AbortHandle>>>,
 }
 
-impl<RE, WE, RSE, WSE> DownloadResult<RE, WE, RSE, WSE> {
+impl<RE, WE, RSE, WSE> Drop for DownloadResult<'_, '_, RE, WE, RSE, WSE> {
+    fn drop(&mut self) {
+        self.abort()
+    }
+}
+
+impl<RE, WE, RSE, WSE> DownloadResult<'_, '_, RE, WE, RSE, WSE> {
     pub fn new(
         event_chain: AsyncReceiver<Event<RE, WE, RSE, WSE>>,
         join_handle: Arc<Barrier>,
@@ -36,19 +45,19 @@ impl<RE, WE, RSE, WSE> DownloadResult<RE, WE, RSE, WSE> {
             join_handle,
             abort_handle: Arc::new(Mutex::new(Some(abort_handle))),
             joined: Default::default(),
+            _phantom1: PhantomData,
+            _phantom2: PhantomData,
         }
     }
 
     /// 只有第一次调用有效
-    pub async fn join(&mut self) -> Result<(), JoinError> {
-        match self
+    pub async fn join(&self) -> Result<(), JoinError> {
+        if self
             .joined
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
         {
-            Ok(_) => {
-                self.join_handle.wait().await;
-            }
-            Err(_) => {}
+            self.join_handle.wait().await;
         };
         Ok(())
     }

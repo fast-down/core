@@ -1,10 +1,12 @@
 use bytes::Bytes;
-use curl::easy::{Easy, Handler, WriteError};
+use curl::easy::{Easy, Handler, SeekResult, WriteError};
 use curl::easy::{Easy2, HttpVersion, List};
-use curl::multi::Multi;
+use curl::multi::{Easy2Handle, Multi};
 use kanal::{ReceiveError, Receiver, SendError, Sender};
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::fmt::{Debug, Formatter};
+use std::io::SeekFrom;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -28,17 +30,24 @@ impl Handler for BufferedDataCollector {
         Ok(data.len())
     }
 }
-pub struct ChannelDataCollector(Arc<DataSignal>, Sender<Bytes>);
+
+#[derive(Debug)]
+pub enum ChannelData {
+    Data(Bytes),
+    Error(i32)
+}
+
+#[derive(Debug)]
+pub struct ChannelDataCollector(Arc<DataSignal>, Sender<ChannelData>);
 
 impl Handler for ChannelDataCollector {
     fn header(&mut self, header: &[u8]) -> bool {
-        dbg!(std::str::from_utf8(header));
         true
     }
 
     fn write(&mut self, data: &[u8]) -> Result<usize, WriteError> {
         let bytes = Bytes::copy_from_slice(data);
-        match self.1.try_send(bytes) {
+        match self.1.try_send(ChannelData::Data(bytes)) {
             Ok(true) => {
                 self.0.notify(false);
                 Ok(data.len())
@@ -65,6 +74,12 @@ pub struct DataSignal {
     waker: SignalWaker,
     state: AtomicU32,
     signal: AtomicU32,
+}
+
+impl Debug for DataSignal {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "signal%<>")
+    }
 }
 
 pub const STATE_SEND_FAILED: u32 = 2;
@@ -197,62 +212,97 @@ pub mod options {
             Box<dyn FnOnce(Easy2<ChannelDataCollector>) -> Easy2<ChannelDataCollector> + Send>,
         >,
     }
+
+    impl Debug for New {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("options::New")
+                .field("headers", &self.headers)
+                .field("url", &self.url)
+                .field("signal", &self.signal)
+                .finish()
+        }
+    }
 }
 
+#[derive(Debug)]
 pub enum Op {
-    New(Sender<Bytes>, options::New, oneshot::Sender<TaskHandle>),
+    New(Sender<ChannelData>, options::New, oneshot::Sender<TaskHandle>),
     Kill(TaskHandle),
     UnpauseData(TaskHandle),
 }
 
-pub fn multi(rx_ops: Receiver<Op>) -> Result<(), anyhow::Error> {
-    let multi = Multi::new();
-    let mut handles = slab::Slab::with_capacity(32);
-    loop {
-        let maybe_task = match rx_ops.try_recv() {
-            Ok(maybe_task) => maybe_task,
-            Err(ReceiveError::Closed) => break Ok(()),
-            Err(ReceiveError::SendClosed) => unreachable!(),
-        };
-        match maybe_task {
-            None => {}
-            Some(Op::New(
-                tx,
-                options::New {
-                    headers,
-                    url,
-                    signal,
-                    extra,
-                },
-                ret,
-            )) => {
-                let mut easy2 = Easy2::new(ChannelDataCollector(signal, tx));
-                easy2.url(&url)?;
-                easy2.http_headers(headers)?;
-                let easy2 = if let Some(f) = extra { f(easy2) } else { easy2 };
-                ret.send(TaskHandle(handles.insert(multi.add2(easy2)?)))
-                    .expect("cannot send back handle");
-            }
-            Some(Op::Kill(TaskHandle(key))) => {
-                let handle = handles
-                    .try_remove(key)
-                    .ok_or_else(|| format!("no such handle: {key}"))
-                    .unwrap();
+fn handle_op(
+    op: Op,
+    multi: &mut Multi,
+    handles: &mut slab::Slab<Easy2Handle<ChannelDataCollector>>,
+) -> Result<(), anyhow::Error> {
+    match op {
+        Op::New(
+            tx,
+            options::New {
+                headers,
+                url,
+                signal,
+                extra,
+            },
+            ret,
+        ) => {
+            let mut easy2 = Easy2::new(ChannelDataCollector(signal, tx));
+            easy2.url(&url)?;
+            easy2.http_headers(headers)?;
+            let easy2 = if let Some(f) = extra { f(easy2) } else { easy2 };
+            ret.send(TaskHandle(handles.insert(multi.add2(easy2)?)))
+                .expect("cannot send back handle");
+        }
+        Op::Kill(TaskHandle(key)) => {
+            if let Some(handle) = handles
+                .try_remove(key) {
                 multi.remove2(handle)?;
             }
-            Some(Op::UnpauseData(TaskHandle(key))) => {
-                let handle = handles
-                    .get(key)
-                    .ok_or_else(|| format!("no such handle: {key}"))
-                    .unwrap();
+        }
+        Op::UnpauseData(TaskHandle(key)) => {
+            if let Some(handle) = handles
+                .get(key) {
                 handle.get_ref().0.reset_from(None, None);
                 handle.unpause_write()?;
             }
         }
+    }
+
+    Ok(())
+}
+
+pub fn multi(rx_ops: Receiver<Op>) -> Result<(), anyhow::Error> {
+    let mut multi = Multi::new();
+    let mut handles = slab::Slab::with_capacity(32);
+    let mut performed = 0;
+    let mut pending_removals = Vec::new();
+    loop {
+        let maybe_task = match rx_ops.try_recv() {
+            Ok(maybe_task) => maybe_task,
+            Err(_) => break Ok(()),
+        };
+        if let Some(task) = maybe_task {
+            handle_op(task, &mut multi, &mut handles)?;
+        } else if performed == 0 {
+            let task = match rx_ops.recv() {
+                Ok(maybe_task) => maybe_task,
+                Err(_) => break Ok(()),
+            };
+            handle_op(task, &mut multi, &mut handles)?;
+        }
         match multi.perform() {
-            Ok(0) => break Ok(()),
-            Ok(_) => continue,
+            Ok(num) => performed = num,
             Err(e) => return Err(anyhow::anyhow!(e)),
+        };
+        for (code, handle) in &mut handles {
+            if let Ok(errno) = handle.os_errno() && errno != 0 {
+                handle.get_ref().1.send(ChannelData::Error(errno)).expect("failed to send back error");
+                pending_removals.push(code);
+            }
+        }
+        for removal in pending_removals.drain(..) {
+            handles.remove(removal);
         }
     }
 }
