@@ -9,7 +9,6 @@ use tokio::{
 };
 
 mod macros;
-#[cfg(test)]
 pub mod mock;
 pub mod multi;
 pub mod single;

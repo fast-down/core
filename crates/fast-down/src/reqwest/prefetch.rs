@@ -1,12 +1,10 @@
-use std::future::Future;
-
 use crate::UrlInfo;
 use content_disposition;
 use reqwest::{
     Client, IntoUrl, StatusCode, Url,
     header::{self, HeaderMap},
 };
-use sanitize_filename;
+use std::future::Future;
 
 pub trait Prefetch {
     fn prefetch(
@@ -60,18 +58,9 @@ fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string());
 
-    let raw_name = from_disposition
+    from_disposition
         .or(from_url)
-        .unwrap_or_else(|| final_url.to_string());
-
-    sanitize_filename::sanitize_with_options(
-        &raw_name,
-        sanitize_filename::Options {
-            windows: false,
-            truncate: false,
-            replacement: "_",
-        },
-    )
+        .unwrap_or_else(|| final_url.to_string())
 }
 
 async fn prefetch(client: &Client, url: impl IntoUrl) -> Result<UrlInfo, reqwest::Error> {

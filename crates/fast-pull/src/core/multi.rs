@@ -151,7 +151,8 @@ mod tests {
     use super::*;
     use crate::{
         MergeProgress, ProgressEntry,
-        core::mock::{MockRandPuller, MockRandPusher, build_mock_data},
+        mem::MemPusher,
+        mock::{MockPuller, build_mock_data},
     };
     use alloc::vec;
     use std::dbg;
@@ -159,8 +160,8 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_download() {
         let mock_data = build_mock_data(3 * 1024);
-        let puller = MockRandPuller::new(&mock_data);
-        let pusher = MockRandPusher::new(&mock_data);
+        let puller = MockPuller::new(&mock_data);
+        let pusher = MemPusher::with_capacity(mock_data.len());
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_multi(
@@ -201,6 +202,6 @@ mod tests {
         assert_eq!(push_ids, [true; 32]);
 
         result.join().await.unwrap();
-        pusher.assert().await;
+        assert_eq!(&**pusher.receive.lock().await, mock_data);
     }
 }
