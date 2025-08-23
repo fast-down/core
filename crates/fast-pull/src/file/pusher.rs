@@ -50,6 +50,7 @@ impl RandFilePusherMmap {
     ) -> Result<Self, FilePusherError> {
         let mmap_builder = MemoryMappedFile::builder(&path)
             .mode(MmapMode::ReadWrite)
+            .huge_pages(true)
             .flush_policy(FlushPolicy::Manual);
         Ok(Self {
             mmap: if path.as_ref().try_exists()? {
