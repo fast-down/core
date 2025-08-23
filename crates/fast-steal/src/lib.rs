@@ -80,9 +80,12 @@
 //! #[tokio::main]
 //! async fn main() {
 //!     let (tx, mut rx) = mpsc::unbounded_channel();
-//!     let executor = TokioExecutor { tx };
+//!     let executor = Arc::new(TokioExecutor { tx });
 //!     let pre_data = [1..20, 41..48];
-//!     let task_list = TaskList::run(NonZero::new(8).unwrap(), NonZero::new(2).unwrap(), &pre_data[..], executor);
+//!     let task_list = Arc::new(TaskList::run(&pre_data[..], executor));
+//!     task_list
+//!         .clone()
+//!         .set_threads(NonZero::new(8).unwrap(), NonZero::new(2).unwrap());
 //!     let handles: Arc<[_]> = task_list.handles(|it| it.collect());
 //!     drop(task_list);
 //!     for handle in handles.iter() {

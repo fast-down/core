@@ -27,12 +27,15 @@ mmap-io = { version = "0.9.0", features = [
     "async",
     "hugepages",
 ], optional = true }
+spin = { version = "0.10.0", features = [
+    "spin_mutex",
+], default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3.20.0"
 
 [features]
-default = ["file"]
+default = ["file", "mem"]
 
-file = ["mmap-io"]
-mmap-io = ["dep:mmap-io"]
+file = ["dep:mmap-io"]
+mem = ["dep:spin"]

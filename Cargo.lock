@@ -188,6 +188,7 @@ dependencies = [
  "futures",
  "kanal",
  "mmap-io",
+ "spin",
  "tempfile",
  "thiserror 2.0.14",
  "tokio",

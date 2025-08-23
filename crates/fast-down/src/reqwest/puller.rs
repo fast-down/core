@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(push_progress, download_chunks);
 
         result.join().await.unwrap();
-        assert_eq!(&**pusher.receive.lock().await, mock_data);
+        assert_eq!(&**pusher.receive.lock(), mock_data);
     }
 
     #[tokio::test]
@@ -253,6 +253,6 @@ mod tests {
         assert_eq!(push_progress, download_chunks);
 
         result.join().await.unwrap();
-        assert_eq!(&**pusher.receive.lock().await, mock_data);
+        assert_eq!(&**pusher.receive.lock(), mock_data);
     }
 }
