@@ -25,7 +25,7 @@ pub async fn download_multi<R, W>(
     puller: R,
     mut pusher: W,
     options: DownloadOptions,
-) -> DownloadResult<R::Error, W::Error>
+) -> DownloadResult<TokioExecutor<R, W>, R::Error, W::Error>
 where
     R: RandPuller + 'static + Sync,
     W: RandPusher + 'static,
@@ -65,6 +65,7 @@ where
         event_chain,
         push_handle,
         &task_list.handles(|iter| iter.map(|h| h.0.clone()).collect::<Arc<[_]>>()),
+        Some(Arc::downgrade(&task_list)),
     )
 }
 

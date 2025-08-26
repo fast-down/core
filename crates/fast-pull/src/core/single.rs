@@ -3,6 +3,7 @@ use super::macros::poll_ok;
 use crate::{DownloadResult, Event, ProgressEntry, SeqPuller, SeqPusher};
 use bytes::Bytes;
 use core::time::Duration;
+use fast_steal::{Executor, Handle};
 use futures::TryStreamExt;
 
 #[derive(Debug, Clone)]
@@ -11,11 +12,29 @@ pub struct DownloadOptions {
     pub push_queue_cap: usize,
 }
 
+#[derive(Clone)]
+pub struct EmptyHandle;
+impl Handle for EmptyHandle {
+    type Output = ();
+    fn abort(&mut self) -> Self::Output {}
+}
+pub struct EmptyExecutor;
+impl Executor for EmptyExecutor {
+    type Handle = EmptyHandle;
+    fn execute(
+        self: alloc::sync::Arc<Self>,
+        _: alloc::sync::Arc<fast_steal::Task>,
+        _: alloc::sync::Arc<fast_steal::TaskList<Self>>,
+    ) -> Self::Handle {
+        EmptyHandle
+    }
+}
+
 pub async fn download_single<R, W>(
     mut puller: R,
     mut pusher: W,
     options: DownloadOptions,
-) -> DownloadResult<R::Error, W::Error>
+) -> DownloadResult<EmptyExecutor, R::Error, W::Error>
 where
     R: SeqPuller + 'static,
     W: SeqPusher + 'static,
@@ -63,7 +82,7 @@ where
         }
         tx.send(Event::Finished(ID)).await.unwrap();
     });
-    DownloadResult::new(event_chain, push_handle, &[handle.abort_handle()])
+    DownloadResult::new(event_chain, push_handle, &[handle.abort_handle()], None)
 }
 
 #[cfg(test)]
