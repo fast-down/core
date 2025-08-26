@@ -1,7 +1,7 @@
 [package]
 name = "fast-down"
 description = "Fast Down Multiplex and Demultiplexes library"
-version = "3.1.2"
+version = "3.1.3"
 readme = "README.md"
 documentation = "https://docs.rs/fast-down"
 keywords = ["download", "fast", "parallel", "concurrency"]
@@ -23,6 +23,7 @@ reqwest = { version = "0.12.22", default-features = false, features = [
   "stream",
 ], optional = true }
 kanal.workspace = true
+log = "0.4.27"
 
 [features]
 default = ["reqwest"]

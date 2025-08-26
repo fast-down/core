@@ -59,6 +59,7 @@ impl Stream for ReqwestStream {
                 return match resp.try_poll_unpin(cx) {
                     Poll::Ready(resp) => match resp {
                         Ok(resp) => {
+                            log::debug!("[ReqwestPuller] {}: {:?}", self.url, resp);
                             self.resp = ResponseState::Ready(resp);
                             self.poll_next(cx)
                         }
@@ -115,6 +116,7 @@ impl SeqPuller for ReqwestPuller {
         let req = self.client.get(self.url.clone());
         Box::pin(async move {
             let resp = req.send().await?;
+            log::debug!("[ReqwestPuller] {}: {:?}", self.url, resp);
             Ok(resp.bytes_stream())
         })
         .try_flatten_stream()

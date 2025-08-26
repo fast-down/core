@@ -69,6 +69,7 @@ async fn prefetch(client: &Client, url: impl IntoUrl) -> Result<UrlInfo, reqwest
         Ok(resp) => resp,
         Err(_) => return prefetch_fallback(url, client).await,
     };
+    log::debug!("Prefetch {url}: {resp:?}");
     let resp = match resp.error_for_status() {
         Ok(resp) => resp,
         Err(_) => return prefetch_fallback(url, client).await,
@@ -99,11 +100,12 @@ async fn prefetch(client: &Client, url: impl IntoUrl) -> Result<UrlInfo, reqwest
 
 async fn prefetch_fallback(url: Url, client: &Client) -> Result<UrlInfo, reqwest::Error> {
     let resp = client
-        .get(url)
+        .get(url.clone())
         .header(header::RANGE, "bytes=0-")
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    log::debug!("Prefetch fallback {url}: {resp:?}");
+    let resp = resp.error_for_status()?;
     let status = resp.status();
     let resp_headers = resp.headers();
     let size = get_file_size(resp_headers, &status);
