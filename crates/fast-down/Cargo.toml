@@ -24,10 +24,13 @@ reqwest = { version = "0.12.22", default-features = false, features = [
 ], optional = true }
 kanal.workspace = true
 log = "0.4.27"
+reqwest-middleware = { version = "0.4.2", optional = true }
+thiserror.workspace = true
 
 [features]
-default = ["reqwest"]
+default = ["reqwest-middleware"]
 reqwest = ["dep:reqwest", "dep:content_disposition", "dep:urlencoding"]
+reqwest-middleware = ["reqwest", "dep:reqwest-middleware"]
 
 [dev-dependencies]
 tokio = { version = "1.47.1", features = [

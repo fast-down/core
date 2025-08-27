@@ -1,72 +1,31 @@
-use crate::UrlInfo;
-use content_disposition;
-use reqwest::{
-    Client, IntoUrl, StatusCode, Url,
-    header::{self, HeaderMap},
+use crate::{
+    UrlInfo,
+    reqwest::{get_file_size, get_filename, get_header_str},
 };
+use reqwest::{IntoUrl, StatusCode, Url, header};
+use reqwest_middleware::ClientWithMiddleware;
 use std::future::Future;
 
 pub trait Prefetch {
     fn prefetch(
         &self,
         url: impl IntoUrl + Send,
-    ) -> impl Future<Output = Result<UrlInfo, reqwest::Error>> + Send;
+    ) -> impl Future<Output = Result<UrlInfo, reqwest_middleware::Error>> + Send;
 }
 
-impl Prefetch for Client {
-    async fn prefetch(&self, url: impl IntoUrl + Send) -> Result<UrlInfo, reqwest::Error> {
+impl Prefetch for ClientWithMiddleware {
+    async fn prefetch(
+        &self,
+        url: impl IntoUrl + Send,
+    ) -> Result<UrlInfo, reqwest_middleware::Error> {
         prefetch(self, url).await
     }
 }
 
-pub(crate) fn get_file_size(headers: &HeaderMap, status: &StatusCode) -> u64 {
-    if *status == StatusCode::PARTIAL_CONTENT {
-        headers
-            .get(header::CONTENT_RANGE)
-            .and_then(|hv| hv.to_str().ok())
-            .and_then(|s| s.rsplit('/').next())
-            .and_then(|total| total.parse().ok())
-            .unwrap_or(0)
-    } else {
-        headers
-            .get(header::CONTENT_LENGTH)
-            .and_then(|hv| hv.to_str().ok())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0)
-    }
-}
-
-pub(crate) fn get_header_str(
-    headers: &HeaderMap,
-    header_name: &header::HeaderName,
-) -> Option<String> {
-    headers
-        .get(header_name)
-        .and_then(|hv| hv.to_str().ok())
-        .map(String::from)
-}
-
-pub(crate) fn get_filename(headers: &HeaderMap, final_url: &Url) -> String {
-    let from_disposition = headers
-        .get(header::CONTENT_DISPOSITION)
-        .and_then(|hv| hv.to_str().ok())
-        .and_then(|s| content_disposition::parse_content_disposition(s).filename_full())
-        .map(|s| urlencoding::decode(&s).map(String::from).unwrap_or(s))
-        .filter(|s| !s.trim().is_empty());
-
-    let from_url = final_url
-        .path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .map(|s| urlencoding::decode(s).unwrap_or(s.into()))
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.to_string());
-
-    from_disposition
-        .or(from_url)
-        .unwrap_or_else(|| final_url.to_string())
-}
-
-async fn prefetch(client: &Client, url: impl IntoUrl) -> Result<UrlInfo, reqwest::Error> {
+async fn prefetch(
+    client: &ClientWithMiddleware,
+    url: impl IntoUrl,
+) -> Result<UrlInfo, reqwest_middleware::Error> {
     let url = url.into_url()?;
     let resp = match client.head(url.clone()).send().await {
         Ok(resp) => resp,
@@ -101,7 +60,10 @@ async fn prefetch(client: &Client, url: impl IntoUrl) -> Result<UrlInfo, reqwest
     })
 }
 
-async fn prefetch_fallback(url: Url, client: &Client) -> Result<UrlInfo, reqwest::Error> {
+async fn prefetch_fallback(
+    url: Url,
+    client: &ClientWithMiddleware,
+) -> Result<UrlInfo, reqwest_middleware::Error> {
     let resp = client
         .get(url.clone())
         .header(header::RANGE, "bytes=0-")
@@ -127,6 +89,8 @@ async fn prefetch_fallback(url: Url, client: &Client) -> Result<UrlInfo, reqwest
 
 #[cfg(test)]
 mod tests {
+    use reqwest_middleware::ClientBuilder;
+
     use super::*;
 
     #[tokio::test]
@@ -148,7 +112,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Client::new();
+        let client = ClientBuilder::new(reqwest::Client::new()).build();
         let url_info = client
             .prefetch(&format!("{}/redirect", server.url()))
             .await
@@ -176,7 +140,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Client::new();
+        let client = ClientBuilder::new(reqwest::Client::new()).build();
         let url_info = client
             .prefetch(&format!("{}/file", server.url()))
             .await
@@ -196,7 +160,8 @@ mod tests {
             .with_header("Content-Disposition", "attachment; filename=\"test.txt\"")
             .create_async()
             .await;
-        let url_info = Client::new()
+        let url_info = ClientBuilder::new(reqwest::Client::new())
+            .build()
             .prefetch(&format!("{}/test1", server.url()))
             .await
             .unwrap();
@@ -205,7 +170,8 @@ mod tests {
 
         // Test URL path source
         let mock2 = server.mock("GET", "/test2/file.pdf").create_async().await;
-        let url_info = Client::new()
+        let url_info = ClientBuilder::new(reqwest::Client::new())
+            .build()
             .prefetch(&format!("{}/test2/file.pdf", server.url()))
             .await
             .unwrap();
@@ -221,7 +187,8 @@ mod tests {
       )
       .create_async()
       .await;
-        let url_info = Client::new()
+        let url_info = ClientBuilder::new(reqwest::Client::new())
+            .build()
             .prefetch(&format!("{}/test3", server.url()))
             .await
             .unwrap();
@@ -238,8 +205,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Client::new();
-
+        let client = ClientBuilder::new(reqwest::Client::new()).build();
         match client.prefetch(&format!("{}/404", server.url())).await {
             Ok(info) => panic!("404 status code should not success: {info:?}"),
             Err(err) => {

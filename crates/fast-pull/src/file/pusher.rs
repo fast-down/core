@@ -140,7 +140,6 @@ impl RandPusher for RandFilePusherStd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use std::vec::Vec;
     use tempfile::NamedTempFile;
     use tokio::io::AsyncReadExt;
@@ -155,10 +154,10 @@ mod tests {
         let mut pusher = SeqFilePusher::new(temp_file.reopen().unwrap().into(), 1024);
 
         // 写入数据
-        let data1 = Bytes::from("Hello, ");
-        let data2 = Bytes::from("world!");
-        pusher.push(&data1).await.unwrap();
-        pusher.push(&data2).await.unwrap();
+        let data1 = b"Hello, ";
+        let data2 = b"world!";
+        pusher.push(&data1[..]).await.unwrap();
+        pusher.push(&data2[..]).await.unwrap();
         pusher.flush().await.unwrap();
 
         // 验证文件内容
@@ -184,9 +183,9 @@ mod tests {
             .unwrap();
 
         // 写入数据
-        let data = Bytes::from("234");
+        let data = b"234";
         let range = 2..5;
-        pusher.push(range, &data).await.unwrap();
+        pusher.push(range, &data[..]).await.unwrap();
         pusher.flush().await.unwrap();
 
         // 验证文件内容
