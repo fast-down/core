@@ -6,5 +6,5 @@ pub use url_info::UrlInfo;
 pub mod http;
 #[cfg(feature = "reqwest")]
 pub mod reqwest;
-#[cfg(feature = "reqwest-middleware")]
-pub mod reqwest_middleware;
+// #[cfg(feature = "reqwest-middleware")]
+// pub mod reqwest_middleware;
