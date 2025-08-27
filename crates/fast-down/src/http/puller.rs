@@ -5,7 +5,6 @@ use bytes::Bytes;
 use fast_pull::{ProgressEntry, RandPuller, SeqPuller};
 use futures::{Stream, TryFutureExt, TryStream};
 use std::{
-    marker::PhantomData,
     pin::{Pin, pin},
     task::{Context, Poll},
 };
@@ -22,6 +21,14 @@ impl<Client: HttpClient> HttpPuller<Client> {
     }
 }
 
+type ResponseFut<Client> =
+    Pin<Box<dyn Future<Output = Result<GetResponse<Client>, GetRequestError<Client>>> + Send>>;
+enum ResponseState<Client: HttpClient> {
+    Pending(ResponseFut<Client>),
+    Ready(GetResponse<Client>),
+    None,
+}
+
 impl<Client: HttpClient + 'static> RandPuller for HttpPuller<Client> {
     type Error = HttpError<Client>;
     fn pull(
@@ -36,13 +43,6 @@ impl<Client: HttpClient + 'static> RandPuller for HttpPuller<Client> {
             state: ResponseState::None,
         }
     }
-}
-type ResponseFut<Client> =
-    Pin<Box<dyn Future<Output = Result<GetResponse<Client>, GetRequestError<Client>>> + Send>>;
-enum ResponseState<Client: HttpClient> {
-    Pending(ResponseFut<Client>),
-    Ready(GetResponse<Client>),
-    None,
 }
 struct RandRequestStream<Client: HttpClient + 'static> {
     client: Client,
@@ -107,38 +107,50 @@ impl<Client: HttpClient + 'static> SeqPuller for HttpPuller<Client> {
     fn pull(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
         let req = self.client.get(self.url.clone(), None).send();
         SeqRequestStream {
-            resp: Box::pin(req),
-            _client: PhantomData,
+            state: ResponseState::Pending(Box::pin(req)),
         }
     }
 }
-struct SeqRequestStream<Client: HttpClient + 'static, Fut>
-where
-    Fut: Future<Output = Result<GetResponse<Client>, GetRequestError<Client>>> + Unpin,
-{
-    _client: PhantomData<Client>,
-    resp: Fut,
+struct SeqRequestStream<Client: HttpClient + 'static> {
+    state: ResponseState<Client>,
 }
-impl<Client: HttpClient, Fut> Stream for SeqRequestStream<Client, Fut>
-where
-    Fut: Future<Output = Result<GetResponse<Client>, GetRequestError<Client>>> + Unpin,
-{
+impl<Client: HttpClient> Stream for SeqRequestStream<Client> {
     type Item = Result<Bytes, HttpError<Client>>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut response;
-        match self.resp.try_poll_unpin(cx) {
-            Poll::Ready(resp) => match resp {
-                Ok(resp) => response = resp,
-                Err(e) => return Poll::Ready(Some(Err(HttpError::Request(e)))),
-            },
-            Poll::Pending => return Poll::Pending,
+        let chunk_global;
+        match &mut self.state {
+            ResponseState::Pending(resp) => {
+                return match resp.try_poll_unpin(cx) {
+                    Poll::Ready(resp) => match resp {
+                        Ok(resp) => {
+                            self.state = ResponseState::Ready(resp);
+                            self.poll_next(cx)
+                        }
+                        Err(e) => {
+                            self.state = ResponseState::None;
+                            Poll::Ready(Some(Err(HttpError::Request(e))))
+                        }
+                    },
+                    Poll::Pending => Poll::Pending,
+                };
+            }
+            ResponseState::None => return Poll::Ready(Some(Err(HttpError::Irrecoverable))),
+            ResponseState::Ready(resp) => {
+                let mut chunk = pin!(resp.chunk());
+                match chunk.try_poll_unpin(cx) {
+                    Poll::Ready(Ok(Some(chunk))) => chunk_global = Ok(chunk),
+                    Poll::Ready(Ok(None)) => return Poll::Ready(None),
+                    Poll::Ready(Err(e)) => chunk_global = Err(e),
+                    Poll::Pending => return Poll::Pending,
+                };
+            }
         };
-        let mut chunk = pin!(response.chunk());
-        match chunk.try_poll_unpin(cx) {
-            Poll::Ready(Ok(Some(chunk))) => Poll::Ready(Some(Ok(chunk))),
-            Poll::Ready(Ok(None)) => Poll::Ready(None),
-            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(HttpError::Chunk(e)))),
-            Poll::Pending => Poll::Pending,
+        match chunk_global {
+            Ok(chunk) => Poll::Ready(Some(Ok(chunk))),
+            Err(e) => {
+                self.state = ResponseState::None;
+                Poll::Ready(Some(Err(HttpError::Chunk(e))))
+            }
         }
     }
 }

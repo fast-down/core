@@ -77,6 +77,7 @@ mod tests {
         mem::MemPusher,
         mock::build_mock_data,
         multi::{self, download_multi},
+        single::{self, download_single},
     };
     use reqwest::{Client, StatusCode};
     use std::{num::NonZero, time::Duration};
@@ -164,6 +165,7 @@ mod tests {
                 HttpError::Request(e) => assert_eq!(e.status(), Some(StatusCode::NOT_FOUND)),
                 HttpError::Chunk(_) => unreachable!(),
                 HttpError::GetHeader(_) => unreachable!(),
+                HttpError::Irrecoverable => unreachable!(),
             },
         }
         mock1.assert_async().await;
@@ -244,52 +246,52 @@ mod tests {
         assert_eq!(&**pusher.receive.lock(), mock_data);
     }
 
-    // #[tokio::test]
-    // async fn test_sequential_download() {
-    //     let mock_data = build_mock_data(300 * 1024 * 1024);
-    //     let mut server = mockito::Server::new_async().await;
-    //     let _mock = server
-    //         .mock("GET", "/sequential")
-    //         .with_status(200)
-    //         .with_body(mock_data.clone())
-    //         .create_async()
-    //         .await;
-    //     let puller = HttpPuller::new(
-    //         format!("{}/sequential", server.url()).parse().unwrap(),
-    //         Client::new(),
-    //     );
-    //     let pusher = MemPusher::with_capacity(mock_data.len());
-    //     #[allow(clippy::single_range_in_vec_init)]
-    //     let download_chunks = vec![0..mock_data.len() as u64];
-    //     let result = download_single(
-    //         puller,
-    //         pusher.clone(),
-    //         single::DownloadOptions {
-    //             retry_gap: Duration::from_secs(1),
-    //             push_queue_cap: 1024,
-    //         },
-    //     )
-    //     .await;
+    #[tokio::test]
+    async fn test_sequential_download() {
+        let mock_data = build_mock_data(300 * 1024 * 1024);
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/sequential")
+            .with_status(200)
+            .with_body(mock_data.clone())
+            .create_async()
+            .await;
+        let puller = HttpPuller::new(
+            format!("{}/sequential", server.url()).parse().unwrap(),
+            Client::new(),
+        );
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = vec![0..mock_data.len() as u64];
+        let result = download_single(
+            puller,
+            pusher.clone(),
+            single::DownloadOptions {
+                retry_gap: Duration::from_secs(1),
+                push_queue_cap: 1024,
+            },
+        )
+        .await;
 
-    //     let mut pull_progress: Vec<ProgressEntry> = Vec::new();
-    //     let mut push_progress: Vec<ProgressEntry> = Vec::new();
-    //     while let Ok(e) = result.event_chain.recv().await {
-    //         match e {
-    //             Event::PullProgress(_, p) => {
-    //                 pull_progress.merge_progress(p);
-    //             }
-    //             Event::PushProgress(_, p) => {
-    //                 push_progress.merge_progress(p);
-    //             }
-    //             _ => {}
-    //         }
-    //     }
-    //     dbg!(&pull_progress);
-    //     dbg!(&push_progress);
-    //     assert_eq!(pull_progress, download_chunks);
-    //     assert_eq!(push_progress, download_chunks);
+        let mut pull_progress: Vec<ProgressEntry> = Vec::new();
+        let mut push_progress: Vec<ProgressEntry> = Vec::new();
+        while let Ok(e) = result.event_chain.recv().await {
+            match e {
+                Event::PullProgress(_, p) => {
+                    pull_progress.merge_progress(p);
+                }
+                Event::PushProgress(_, p) => {
+                    push_progress.merge_progress(p);
+                }
+                _ => {}
+            }
+        }
+        dbg!(&pull_progress);
+        dbg!(&push_progress);
+        assert_eq!(pull_progress, download_chunks);
+        assert_eq!(push_progress, download_chunks);
 
-    //     result.join().await.unwrap();
-    //     assert_eq!(&**pusher.receive.lock(), mock_data);
-    // }
+        result.join().await.unwrap();
+        assert_eq!(&**pusher.receive.lock(), mock_data);
+    }
 }

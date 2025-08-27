@@ -42,4 +42,5 @@ pub enum HttpError<Client: HttpClient> {
     Request(GetRequestError<Client>),
     Chunk(GetChunkError<Client>),
     GetHeader(GetHeaderError<Client>),
+    Irrecoverable,
 }
