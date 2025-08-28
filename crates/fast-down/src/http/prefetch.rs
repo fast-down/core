@@ -1,6 +1,7 @@
 use crate::{
     UrlInfo,
     http::{GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse},
+    url_info::FileId,
 };
 use content_disposition;
 use std::future::Future;
@@ -65,8 +66,7 @@ async fn prefetch<Client: HttpClient>(
             size,
             supports_range,
             fast_download: size > 0 && supports_range,
-            etag: headers.get("etag").ok().map(|s| s.to_string()),
-            last_modified: headers.get("last-modified").ok().map(|s| s.to_string()),
+            file_id: FileId::new(headers.get("etag").ok(), headers.get("last-modified").ok()),
         },
         resp,
     ))

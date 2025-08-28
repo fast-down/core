@@ -3,6 +3,7 @@ mod puller;
 pub use prefetch::*;
 pub use puller::*;
 
+use crate::url_info::FileId;
 use bytes::Bytes;
 use fast_pull::ProgressEntry;
 use std::{fmt::Debug, future::Future};
@@ -43,4 +44,5 @@ pub enum HttpError<Client: HttpClient> {
     Chunk(GetChunkError<Client>),
     GetHeader(GetHeaderError<Client>),
     Irrecoverable,
+    MismatchedBody(FileId),
 }

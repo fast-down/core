@@ -90,7 +90,10 @@ pub enum ReqwestGetHeaderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::{HttpError, HttpPuller, Prefetch};
+    use crate::{
+        http::{HttpError, HttpPuller, Prefetch},
+        url_info::FileId,
+    };
     use fast_pull::{
         Event, MergeProgress,
         mem::MemPusher,
@@ -185,6 +188,9 @@ mod tests {
                 HttpError::Chunk(_) => unreachable!(),
                 HttpError::GetHeader(_) => unreachable!(),
                 HttpError::Irrecoverable => unreachable!(),
+                HttpError::MismatchedBody(file_id) => {
+                    unreachable!("404 status code should not return mismatched body: {file_id:?}")
+                }
             },
         }
         mock1.assert_async().await;
@@ -227,6 +233,7 @@ mod tests {
             format!("{}/concurrent", server.url()).parse().unwrap(),
             Client::new(),
             None,
+            FileId::empty(),
         );
         let pusher = MemPusher::with_capacity(mock_data.len());
         #[allow(clippy::single_range_in_vec_init)]
@@ -280,6 +287,7 @@ mod tests {
             format!("{}/sequential", server.url()).parse().unwrap(),
             Client::new(),
             None,
+            FileId::empty(),
         );
         let pusher = MemPusher::with_capacity(mock_data.len());
         #[allow(clippy::single_range_in_vec_init)]

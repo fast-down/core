@@ -1,5 +1,6 @@
 use crate::http::{
-    GetRequestError, GetResponse, HttpClient, HttpError, HttpRequestBuilder, HttpResponse,
+    FileId, GetRequestError, GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder,
+    HttpResponse,
 };
 use bytes::Bytes;
 use fast_pull::{ProgressEntry, RandPuller, SeqPuller};
@@ -17,13 +18,20 @@ pub struct HttpPuller<Client: HttpClient> {
     pub(crate) client: Client,
     url: Url,
     resp: Arc<SpinMutex<Option<GetResponse<Client>>>>,
+    file_id: FileId,
 }
 impl<Client: HttpClient> HttpPuller<Client> {
-    pub fn new(url: Url, client: Client, resp: Option<GetResponse<Client>>) -> Self {
+    pub fn new(
+        url: Url,
+        client: Client,
+        resp: Option<GetResponse<Client>>,
+        file_id: FileId,
+    ) -> Self {
         Self {
             client,
             url,
             resp: Arc::new(SpinMutex::new(resp)),
+            file_id,
         }
     }
 }
@@ -54,6 +62,7 @@ impl<Client: HttpClient + 'static> RandPuller for HttpPuller<Client> {
             } else {
                 ResponseState::None
             },
+            file_id: self.file_id.clone(),
         }
     }
 }
@@ -63,6 +72,7 @@ struct RandRequestStream<Client: HttpClient + 'static> {
     start: u64,
     end: u64,
     state: ResponseState<Client>,
+    file_id: FileId,
 }
 impl<Client: HttpClient> Stream for RandRequestStream<Client> {
     type Item = Result<Bytes, HttpError<Client>>;
@@ -73,8 +83,16 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
                 return match resp.try_poll_unpin(cx) {
                     Poll::Ready(resp) => match resp {
                         Ok(resp) => {
-                            self.state = ResponseState::Ready(resp);
-                            self.poll_next(cx)
+                            let etag = resp.headers().get("etag").ok();
+                            let last_modified = resp.headers().get("last-modified").ok();
+                            let new_file_id = FileId::new(etag, last_modified);
+                            if new_file_id != self.file_id {
+                                self.state = ResponseState::None;
+                                Poll::Ready(Some(Err(HttpError::MismatchedBody(new_file_id))))
+                            } else {
+                                self.state = ResponseState::Ready(resp);
+                                self.poll_next(cx)
+                            }
                         }
                         Err(e) => {
                             self.state = ResponseState::None;
@@ -118,21 +136,21 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
 impl<Client: HttpClient + 'static> SeqPuller for HttpPuller<Client> {
     type Error = HttpError<Client>;
     fn pull(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
-        match self.resp.lock().take() {
-            Some(resp) => SeqRequestStream {
-                state: ResponseState::Ready(resp),
-            },
-            None => {
-                let req = self.client.get(self.url.clone(), None).send();
-                SeqRequestStream {
-                    state: ResponseState::Pending(Box::pin(req)),
+        SeqRequestStream {
+            state: match self.resp.lock().take() {
+                Some(resp) => ResponseState::Ready(resp),
+                None => {
+                    let req = self.client.get(self.url.clone(), None).send();
+                    ResponseState::Pending(Box::pin(req))
                 }
-            }
+            },
+            file_id: self.file_id.clone(),
         }
     }
 }
 struct SeqRequestStream<Client: HttpClient + 'static> {
     state: ResponseState<Client>,
+    file_id: FileId,
 }
 impl<Client: HttpClient> Stream for SeqRequestStream<Client> {
     type Item = Result<Bytes, HttpError<Client>>;
@@ -143,8 +161,16 @@ impl<Client: HttpClient> Stream for SeqRequestStream<Client> {
                 return match resp.try_poll_unpin(cx) {
                     Poll::Ready(resp) => match resp {
                         Ok(resp) => {
-                            self.state = ResponseState::Ready(resp);
-                            self.poll_next(cx)
+                            let etag = resp.headers().get("etag").ok();
+                            let last_modified = resp.headers().get("last-modified").ok();
+                            let new_file_id = FileId::new(etag, last_modified);
+                            if new_file_id != self.file_id {
+                                self.state = ResponseState::None;
+                                Poll::Ready(Some(Err(HttpError::MismatchedBody(new_file_id))))
+                            } else {
+                                self.state = ResponseState::Ready(resp);
+                                self.poll_next(cx)
+                            }
                         }
                         Err(e) => {
                             self.state = ResponseState::None;
