@@ -1,9 +1,11 @@
 use crate::http::{HttpClient, HttpHeaders, HttpRequestBuilder, HttpResponse};
 use fast_pull::ProgressEntry;
+use httpdate::parse_http_date;
 use reqwest::{
     Client, RequestBuilder, Response,
     header::{self, HeaderMap, HeaderName, InvalidHeaderName},
 };
+use std::time::{Duration, SystemTime};
 use url::Url;
 
 impl HttpClient for Client {
@@ -25,6 +27,23 @@ impl HttpRequestBuilder for RequestBuilder {
     type RequestError = reqwest::Error;
     async fn send(self) -> Result<Self::Response, Self::RequestError> {
         let res = self.send().await?;
+        let retry_after = res.headers().get(header::RETRY_AFTER);
+        if let Some(retry_after) = retry_after
+            && let Ok(retry_after) = retry_after.to_str()
+        {
+            let retry_after = match retry_after.parse() {
+                Ok(retry_after) => Some(Duration::from_secs(retry_after)),
+                Err(_) => match parse_http_date(retry_after) {
+                    Ok(target_time) => target_time.duration_since(SystemTime::now()).ok(),
+                    Err(_) => None,
+                },
+            };
+            if let Some(retry_after) = retry_after
+                && retry_after > Duration::ZERO
+            {
+                tokio::time::sleep(retry_after).await;
+            }
+        }
         res.error_for_status()
     }
 }
