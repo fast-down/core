@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "fast-down"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "bytes",
  "content_disposition",
@@ -176,6 +176,7 @@ dependencies = [
  "log",
  "mockito",
  "reqwest",
+ "spin",
  "thiserror 2.0.14",
  "tokio",
  "url",

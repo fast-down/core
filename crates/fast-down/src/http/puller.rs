@@ -4,8 +4,10 @@ use crate::http::{
 use bytes::Bytes;
 use fast_pull::{ProgressEntry, RandPuller, SeqPuller};
 use futures::{Stream, TryFutureExt, TryStream};
+use spin::mutex::SpinMutex;
 use std::{
     pin::{Pin, pin},
+    sync::Arc,
     task::{Context, Poll},
 };
 use url::Url;
@@ -14,10 +16,15 @@ use url::Url;
 pub struct HttpPuller<Client: HttpClient> {
     pub(crate) client: Client,
     url: Url,
+    resp: Arc<SpinMutex<Option<GetResponse<Client>>>>,
 }
 impl<Client: HttpClient> HttpPuller<Client> {
-    pub fn new(url: Url, client: Client) -> Self {
-        Self { client, url }
+    pub fn new(url: Url, client: Client, resp: Option<GetResponse<Client>>) -> Self {
+        Self {
+            client,
+            url,
+            resp: Arc::new(SpinMutex::new(resp)),
+        }
     }
 }
 
@@ -40,7 +47,13 @@ impl<Client: HttpClient + 'static> RandPuller for HttpPuller<Client> {
             url: self.url.clone(),
             start: range.start,
             end: range.end,
-            state: ResponseState::None,
+            state: if range.start == 0
+                && let Some(resp) = self.resp.lock().take()
+            {
+                ResponseState::Ready(resp)
+            } else {
+                ResponseState::None
+            },
         }
     }
 }
@@ -105,9 +118,16 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
 impl<Client: HttpClient + 'static> SeqPuller for HttpPuller<Client> {
     type Error = HttpError<Client>;
     fn pull(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
-        let req = self.client.get(self.url.clone(), None).send();
-        SeqRequestStream {
-            state: ResponseState::Pending(Box::pin(req)),
+        match self.resp.lock().take() {
+            Some(resp) => SeqRequestStream {
+                state: ResponseState::Ready(resp),
+            },
+            None => {
+                let req = self.client.get(self.url.clone(), None).send();
+                SeqRequestStream {
+                    state: ResponseState::Pending(Box::pin(req)),
+                }
+            }
         }
     }
 }

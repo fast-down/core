@@ -226,6 +226,7 @@ mod tests {
         let puller = HttpPuller::new(
             format!("{}/concurrent", server.url()).parse().unwrap(),
             Client::new(),
+            None,
         );
         let pusher = MemPusher::with_capacity(mock_data.len());
         #[allow(clippy::single_range_in_vec_init)]
@@ -278,6 +279,7 @@ mod tests {
         let puller = HttpPuller::new(
             format!("{}/sequential", server.url()).parse().unwrap(),
             Client::new(),
+            None,
         );
         let pusher = MemPusher::with_capacity(mock_data.len());
         #[allow(clippy::single_range_in_vec_init)]
