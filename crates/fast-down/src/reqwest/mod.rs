@@ -24,9 +24,9 @@ impl HttpClient for Client {
 
 impl HttpRequestBuilder for RequestBuilder {
     type Response = Response;
-    type RequestError = reqwest::Error;
+    type RequestError = ReqwestResponseError;
     async fn send(self) -> Result<Self::Response, Self::RequestError> {
-        let res = self.send().await?;
+        let res = self.send().await.map_err(ReqwestResponseError::Reqwest)?;
         let retry_after = res.headers().get(header::RETRY_AFTER);
         if let Some(retry_after) = retry_after
             && let Ok(retry_after) = retry_after.to_str()
@@ -44,7 +44,12 @@ impl HttpRequestBuilder for RequestBuilder {
                 tokio::time::sleep(retry_after).await;
             }
         }
-        res.error_for_status()
+        let status = res.status();
+        if status.is_success() {
+            Ok(res)
+        } else {
+            Err(ReqwestResponseError::StatusCode(status))
+        }
     }
 }
 
@@ -85,6 +90,14 @@ pub enum ReqwestGetHeaderError {
     ToStr(reqwest::header::ToStrError),
     #[error("Header not found")]
     NotFound,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum ReqwestResponseError {
+    #[error("Reqwest error {0:?}")]
+    Reqwest(reqwest::Error),
+    #[error("Status code {0:?}")]
+    StatusCode(reqwest::StatusCode),
 }
 
 #[cfg(test)]
@@ -184,7 +197,12 @@ mod tests {
         match client.prefetch(url).await {
             Ok(info) => unreachable!("404 status code should not success: {info:?}"),
             Err(err) => match err {
-                HttpError::Request(e) => assert_eq!(e.status(), Some(StatusCode::NOT_FOUND)),
+                HttpError::Request(e) => match e {
+                    ReqwestResponseError::Reqwest(error) => unreachable!("{error:?}"),
+                    ReqwestResponseError::StatusCode(status_code) => {
+                        assert_eq!(status_code, StatusCode::NOT_FOUND)
+                    }
+                },
                 HttpError::Chunk(_) => unreachable!(),
                 HttpError::GetHeader(_) => unreachable!(),
                 HttpError::Irrecoverable => unreachable!(),
