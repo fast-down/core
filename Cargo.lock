@@ -165,14 +165,13 @@ dependencies = [
 
 [[package]]
 name = "fast-down"
-version = "3.2.3"
+version = "3.2.4"
 dependencies = [
  "bytes",
  "content_disposition",
  "fast-pull",
  "futures",
  "httpdate",
- "kanal",
  "mockito",
  "reqwest",
  "spin",
