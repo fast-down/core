@@ -1,7 +1,7 @@
 [package]
 name = "fast-down"
 description = "Download everything fast"
-version = "3.2.4"
+version = "3.2.5"
 readme = "README.md"
 documentation = "https://docs.rs/fast-down"
 keywords = ["download", "fast", "parallel", "concurrency"]
@@ -27,12 +27,8 @@ spin.workspace = true
 
 [features]
 default = ["reqwest"]
-reqwest = [
-  "dep:reqwest",
-  "dep:content_disposition",
-  "dep:urlencoding",
-  "dep:httpdate",
-]
+http = ["dep:content_disposition", "dep:urlencoding"]
+reqwest = ["http", "dep:reqwest", "dep:httpdate"]
 
 [dev-dependencies]
 tokio = { version = "1.47.1", features = [

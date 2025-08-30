@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "fast-down"
-version = "3.2.4"
+version = "3.2.5"
 dependencies = [
  "bytes",
  "content_disposition",
