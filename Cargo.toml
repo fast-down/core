@@ -10,7 +10,7 @@ license = "MIT"
 authors = ["share121 <2854631158@qq.com>", "Cyan Changes <contact@cyans.me>"]
 
 [workspace.dependencies]
-fast-pull = { version = "3.2.1", path = "crates/fast-pull" }
+fast-pull = { version = "3.2.2", path = "crates/fast-pull" }
 fast-steal = { version = "6.0.10", path = "crates/fast-steal" }
 kanal = "0.1.1"
 bytes = { version = "1.10.1", default-features = false }

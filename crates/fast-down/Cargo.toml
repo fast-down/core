@@ -1,7 +1,7 @@
 [package]
 name = "fast-down"
 description = "Download everything fast"
-version = "3.2.5"
+version = "3.2.6"
 readme = "README.md"
 documentation = "https://docs.rs/fast-down"
 keywords = ["download", "fast", "parallel", "concurrency"]

@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "fast-down"
-version = "3.2.5"
+version = "3.2.6"
 dependencies = [
  "bytes",
  "content_disposition",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "fast-pull"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "bytes",
  "fast-steal",

@@ -25,7 +25,7 @@ pub async fn download_multi<R, W>(
     puller: R,
     mut pusher: W,
     options: DownloadOptions,
-) -> DownloadResult<TokioExecutor<R, W>, R::Error, W::Error>
+) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error>
 where
     R: RandPuller + 'static + Sync,
     W: RandPusher + 'static,
@@ -49,7 +49,7 @@ where
             options.retry_gap
         );
     });
-    let executor: Arc<TokioExecutor<R, W>> = Arc::new(TokioExecutor {
+    let executor: Arc<TokioExecutor<R, W::Error>> = Arc::new(TokioExecutor {
         tx,
         tx_push,
         puller,
@@ -77,22 +77,22 @@ impl Handle for TokioHandle {
         self.0.abort();
     }
 }
-pub struct TokioExecutor<R, W>
+pub struct TokioExecutor<R, WE>
 where
     R: RandPuller + 'static,
-    W: RandPusher + 'static,
+    WE: Send + 'static,
 {
-    tx: kanal::AsyncSender<Event<R::Error, W::Error>>,
+    tx: kanal::AsyncSender<Event<R::Error, WE>>,
     tx_push: kanal::AsyncSender<(WorkerId, ProgressEntry, Bytes)>,
     puller: R,
     retry_gap: Duration,
     id: Arc<AtomicUsize>,
     min_chunk_size: NonZeroU64,
 }
-impl<R, W> Executor for TokioExecutor<R, W>
+impl<R, WE> Executor for TokioExecutor<R, WE>
 where
     R: RandPuller + 'static + Sync,
-    W: RandPusher + 'static,
+    WE: Send + 'static,
 {
     type Handle = TokioHandle;
     fn execute(self: Arc<Self>, task: Arc<Task>, task_list: Arc<TaskList<Self>>) -> Self::Handle {
