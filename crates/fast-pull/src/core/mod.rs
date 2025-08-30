@@ -14,12 +14,21 @@ pub mod mock;
 pub mod multi;
 pub mod single;
 
-#[derive(Clone)]
 pub struct DownloadResult<E: Executor, PullError, PushError> {
     pub event_chain: AsyncReceiver<Event<PullError, PushError>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     abort_handles: Arc<[AbortHandle]>,
     task_list: Option<Weak<TaskList<E>>>,
+}
+impl<E: Executor, PullError, PushError> Clone for DownloadResult<E, PullError, PushError> {
+    fn clone(&self) -> Self {
+        Self {
+            event_chain: self.event_chain.clone(),
+            handle: self.handle.clone(),
+            abort_handles: self.abort_handles.clone(),
+            task_list: self.task_list.clone(),
+        }
+    }
 }
 
 impl<E: Executor, PullError, PushError> DownloadResult<E, PullError, PushError> {

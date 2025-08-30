@@ -18,6 +18,8 @@ impl Handle for EmptyHandle {
     type Output = ();
     fn abort(&mut self) -> Self::Output {}
 }
+
+#[derive(Debug, Clone)]
 pub struct EmptyExecutor;
 impl Executor for EmptyExecutor {
     type Handle = EmptyHandle;

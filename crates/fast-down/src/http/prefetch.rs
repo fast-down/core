@@ -4,7 +4,7 @@ use crate::{
     url_info::FileId,
 };
 use content_disposition;
-use std::future::Future;
+use std::{borrow::Borrow, future::Future};
 use url::Url;
 
 pub trait Prefetch<Client: HttpClient> {
@@ -15,10 +15,10 @@ pub trait Prefetch<Client: HttpClient> {
     ) -> impl Future<Output = Result<(UrlInfo, GetResponse<Client>), Self::Error>> + Send;
 }
 
-impl<Client: HttpClient> Prefetch<Client> for Client {
+impl<Client: HttpClient, BorrowClient: Borrow<Client> + Sync> Prefetch<Client> for BorrowClient {
     type Error = HttpError<Client>;
     async fn prefetch(&self, url: Url) -> Result<(UrlInfo, GetResponse<Client>), Self::Error> {
-        prefetch(self, url).await
+        prefetch(self.borrow(), url).await
     }
 }
 
