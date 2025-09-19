@@ -17,20 +17,20 @@ use url::Url;
 pub struct HttpPuller<Client: HttpClient> {
     pub(crate) client: Client,
     url: Url,
-    resp: Arc<SpinMutex<Option<GetResponse<Client>>>>,
+    resp: Option<Arc<SpinMutex<Option<GetResponse<Client>>>>>,
     file_id: FileId,
 }
 impl<Client: HttpClient> HttpPuller<Client> {
     pub fn new(
         url: Url,
         client: Client,
-        resp: Option<GetResponse<Client>>,
+        resp: Option<Arc<SpinMutex<Option<GetResponse<Client>>>>>,
         file_id: FileId,
     ) -> Self {
         Self {
             client,
             url,
-            resp: Arc::new(SpinMutex::new(resp)),
+            resp,
             file_id,
         }
     }
@@ -56,7 +56,8 @@ impl<Client: HttpClient + 'static> RandPuller for HttpPuller<Client> {
             start: range.start,
             end: range.end,
             state: if range.start == 0
-                && let Some(resp) = self.resp.lock().take()
+                && let Some(resp) = &self.resp
+                && let Some(resp) = resp.lock().take()
             {
                 ResponseState::Ready(resp)
             } else {
@@ -137,12 +138,13 @@ impl<Client: HttpClient + 'static> SeqPuller for HttpPuller<Client> {
     type Error = HttpError<Client>;
     fn pull(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
         SeqRequestStream {
-            state: match self.resp.lock().take() {
-                Some(resp) => ResponseState::Ready(resp),
-                None => {
-                    let req = self.client.get(self.url.clone(), None).send();
-                    ResponseState::Pending(Box::pin(req))
-                }
+            state: if let Some(resp) = &self.resp
+                && let Some(resp) = resp.lock().take()
+            {
+                ResponseState::Ready(resp)
+            } else {
+                let req = self.client.get(self.url.clone(), None).send();
+                ResponseState::Pending(Box::pin(req))
             },
             file_id: self.file_id.clone(),
         }
