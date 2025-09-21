@@ -1,5 +1,6 @@
 use crate::ProgressEntry;
 use bytes::Bytes;
+use core::time::Duration;
 use futures::TryStream;
 
 pub trait RandPuller: Send + Clone {
@@ -7,10 +8,12 @@ pub trait RandPuller: Send + Clone {
     fn pull(
         &mut self,
         range: &ProgressEntry,
-    ) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin;
+    ) -> impl TryStream<Ok = Bytes, Error = (Self::Error, Option<Duration>)> + Send + Unpin;
 }
 
 pub trait SeqPuller: Send {
     type Error: Send;
-    fn pull(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin;
+    fn pull(
+        &mut self,
+    ) -> impl TryStream<Ok = Bytes, Error = (Self::Error, Option<Duration>)> + Send + Unpin;
 }

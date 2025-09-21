@@ -25,30 +25,27 @@ impl HttpClient for Client {
 impl HttpRequestBuilder for RequestBuilder {
     type Response = Response;
     type RequestError = ReqwestResponseError;
-    async fn send(self) -> Result<Self::Response, Self::RequestError> {
-        let res = self.send().await.map_err(ReqwestResponseError::Reqwest)?;
-        let retry_after = res.headers().get(header::RETRY_AFTER);
-        if let Some(retry_after) = retry_after
-            && let Ok(retry_after) = retry_after.to_str()
-        {
-            let retry_after = match retry_after.parse() {
-                Ok(retry_after) => Some(Duration::from_secs(retry_after)),
-                Err(_) => match parse_http_date(retry_after) {
-                    Ok(target_time) => target_time.duration_since(SystemTime::now()).ok(),
-                    Err(_) => None,
-                },
-            };
-            if let Some(retry_after) = retry_after
-                && retry_after > Duration::ZERO
-            {
-                tokio::time::sleep(retry_after).await;
-            }
-        }
+    async fn send(self) -> Result<Self::Response, (Self::RequestError, Option<Duration>)> {
+        let res = self
+            .send()
+            .await
+            .map_err(|e| (ReqwestResponseError::Reqwest(e), None))?;
         let status = res.status();
         if status.is_success() {
             Ok(res)
         } else {
-            Err(ReqwestResponseError::StatusCode(status))
+            let retry_after = res
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|r| r.to_str().ok())
+                .and_then(|r| match r.parse() {
+                    Ok(r) => Some(Duration::from_secs(r)),
+                    Err(_) => match parse_http_date(r) {
+                        Ok(target_time) => target_time.duration_since(SystemTime::now()).ok(),
+                        Err(_) => None,
+                    },
+                });
+            Err((ReqwestResponseError::StatusCode(status), retry_after))
         }
     }
 }
@@ -196,7 +193,7 @@ mod tests {
         let url = Url::parse(&format!("{}/404", server.url())).unwrap();
         match client.prefetch(url).await {
             Ok(info) => unreachable!("404 status code should not success: {info:?}"),
-            Err(err) => match err {
+            Err((err, _)) => match err {
                 HttpError::Request(e) => match e {
                     ReqwestResponseError::Reqwest(error) => unreachable!("{error:?}"),
                     ReqwestResponseError::StatusCode(status_code) => {

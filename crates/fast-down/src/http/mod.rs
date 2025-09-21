@@ -6,7 +6,7 @@ pub use puller::*;
 use crate::url_info::FileId;
 use bytes::Bytes;
 use fast_pull::ProgressEntry;
-use std::{fmt::Debug, future::Future};
+use std::{fmt::Debug, future::Future, time::Duration};
 use url::Url;
 
 pub trait HttpClient: Clone + Send + Sync + Unpin {
@@ -16,7 +16,9 @@ pub trait HttpClient: Clone + Send + Sync + Unpin {
 pub trait HttpRequestBuilder {
     type Response: HttpResponse;
     type RequestError: Send + Debug;
-    fn send(self) -> impl Future<Output = Result<Self::Response, Self::RequestError>> + Send;
+    fn send(
+        self,
+    ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send;
 }
 pub trait HttpResponse: Send + Unpin {
     type Headers: HttpHeaders;
@@ -30,10 +32,9 @@ pub trait HttpHeaders {
     fn get(&self, header: &str) -> Result<&str, Self::GetHeaderError>;
 }
 
-pub type GetResponse<Client> =
-    <<Client as HttpClient>::RequestBuilder as HttpRequestBuilder>::Response;
-pub type GetRequestError<Client> =
-    <<Client as HttpClient>::RequestBuilder as HttpRequestBuilder>::RequestError;
+pub type GetRequestBuilder<Client> = <Client as HttpClient>::RequestBuilder;
+pub type GetResponse<Client> = <GetRequestBuilder<Client> as HttpRequestBuilder>::Response;
+pub type GetRequestError<Client> = <GetRequestBuilder<Client> as HttpRequestBuilder>::RequestError;
 pub type GetChunkError<Client> = <GetResponse<Client> as HttpResponse>::ChunkError;
 pub type GetHeader<Client> = <GetResponse<Client> as HttpResponse>::Headers;
 pub type GetHeaderError<Client> = <GetHeader<Client> as HttpHeaders>::GetHeaderError;

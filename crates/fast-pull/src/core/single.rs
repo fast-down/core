@@ -76,15 +76,20 @@ where
                     downloaded += len;
                 }
                 Ok(None) => break,
-                Err(e) => {
+                Err((e, retry_gap)) => {
                     tx.send(Event::PullError(ID, e)).await.unwrap();
-                    tokio::time::sleep(options.retry_gap).await;
+                    tokio::time::sleep(retry_gap.unwrap_or(options.retry_gap)).await
                 }
             }
         }
         tx.send(Event::Finished(ID)).await.unwrap();
     });
-    DownloadResult::new(event_chain, push_handle, &[handle.abort_handle()], None)
+    DownloadResult::new(
+        event_chain,
+        push_handle,
+        Some(&[handle.abort_handle()]),
+        None,
+    )
 }
 
 #[cfg(test)]

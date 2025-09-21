@@ -49,14 +49,14 @@ impl RandPusher for FilePusher {
     async fn flush(&mut self) -> Result<(), Self::Error> {
         while let Some((start, bytes)) = self.cache.front() {
             let len = bytes.len();
-            self.cache_size -= len;
             if *start != self.p {
                 self.buffer.seek(SeekFrom::Start(*start)).await?;
                 self.p = *start;
             }
             self.buffer.write_all(bytes).await?;
-            self.p += len as u64;
             self.cache.pop_front();
+            self.cache_size -= len;
+            self.p += len as u64;
         }
         self.buffer.flush().await?;
         Ok(())

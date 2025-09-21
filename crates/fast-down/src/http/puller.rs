@@ -10,6 +10,7 @@ use std::{
     pin::{Pin, pin},
     sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
 use url::Url;
 
@@ -36,8 +37,13 @@ impl<Client: HttpClient> HttpPuller<Client> {
     }
 }
 
-type ResponseFut<Client> =
-    Pin<Box<dyn Future<Output = Result<GetResponse<Client>, GetRequestError<Client>>> + Send>>;
+type ResponseFut<Client> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<GetResponse<Client>, (GetRequestError<Client>, Option<Duration>)>,
+            > + Send,
+    >,
+>;
 enum ResponseState<Client: HttpClient> {
     Pending(ResponseFut<Client>),
     Ready(GetResponse<Client>),
@@ -49,7 +55,7 @@ impl<Client: HttpClient + 'static> RandPuller for HttpPuller<Client> {
     fn pull(
         &mut self,
         range: &ProgressEntry,
-    ) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
+    ) -> impl TryStream<Ok = Bytes, Error = (Self::Error, Option<Duration>)> + Send + Unpin {
         RandRequestStream {
             client: self.client.clone(),
             url: self.url.clone(),
@@ -76,7 +82,7 @@ struct RandRequestStream<Client: HttpClient + 'static> {
     file_id: FileId,
 }
 impl<Client: HttpClient> Stream for RandRequestStream<Client> {
-    type Item = Result<Bytes, HttpError<Client>>;
+    type Item = Result<Bytes, (HttpError<Client>, Option<Duration>)>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let chunk_global;
         match &mut self.state {
@@ -89,15 +95,18 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
                             let new_file_id = FileId::new(etag, last_modified);
                             if new_file_id != self.file_id {
                                 self.state = ResponseState::None;
-                                Poll::Ready(Some(Err(HttpError::MismatchedBody(new_file_id))))
+                                Poll::Ready(Some(Err((
+                                    HttpError::MismatchedBody(new_file_id),
+                                    None,
+                                ))))
                             } else {
                                 self.state = ResponseState::Ready(resp);
                                 self.poll_next(cx)
                             }
                         }
-                        Err(e) => {
+                        Err((e, d)) => {
                             self.state = ResponseState::None;
-                            Poll::Ready(Some(Err(HttpError::Request(e))))
+                            Poll::Ready(Some(Err((HttpError::Request(e), d))))
                         }
                     },
                     Poll::Pending => Poll::Pending,
@@ -128,7 +137,7 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
             }
             Err(e) => {
                 self.state = ResponseState::None;
-                Poll::Ready(Some(Err(HttpError::Chunk(e))))
+                Poll::Ready(Some(Err((HttpError::Chunk(e), None))))
             }
         }
     }
@@ -136,7 +145,9 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
 
 impl<Client: HttpClient + 'static> SeqPuller for HttpPuller<Client> {
     type Error = HttpError<Client>;
-    fn pull(&mut self) -> impl TryStream<Ok = Bytes, Error = Self::Error> + Send + Unpin {
+    fn pull(
+        &mut self,
+    ) -> impl TryStream<Ok = Bytes, Error = (Self::Error, Option<Duration>)> + Send + Unpin {
         SeqRequestStream {
             state: if let Some(resp) = &self.resp
                 && let Some(resp) = resp.lock().take()
@@ -155,7 +166,7 @@ struct SeqRequestStream<Client: HttpClient + 'static> {
     file_id: FileId,
 }
 impl<Client: HttpClient> Stream for SeqRequestStream<Client> {
-    type Item = Result<Bytes, HttpError<Client>>;
+    type Item = Result<Bytes, (HttpError<Client>, Option<Duration>)>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let chunk_global;
         match &mut self.state {
@@ -168,21 +179,24 @@ impl<Client: HttpClient> Stream for SeqRequestStream<Client> {
                             let new_file_id = FileId::new(etag, last_modified);
                             if new_file_id != self.file_id {
                                 self.state = ResponseState::None;
-                                Poll::Ready(Some(Err(HttpError::MismatchedBody(new_file_id))))
+                                Poll::Ready(Some(Err((
+                                    HttpError::MismatchedBody(new_file_id),
+                                    None,
+                                ))))
                             } else {
                                 self.state = ResponseState::Ready(resp);
                                 self.poll_next(cx)
                             }
                         }
-                        Err(e) => {
+                        Err((e, d)) => {
                             self.state = ResponseState::None;
-                            Poll::Ready(Some(Err(HttpError::Request(e))))
+                            Poll::Ready(Some(Err((HttpError::Request(e), d))))
                         }
                     },
                     Poll::Pending => Poll::Pending,
                 };
             }
-            ResponseState::None => return Poll::Ready(Some(Err(HttpError::Irrecoverable))),
+            ResponseState::None => return Poll::Ready(Some(Err((HttpError::Irrecoverable, None)))),
             ResponseState::Ready(resp) => {
                 let mut chunk = pin!(resp.chunk());
                 match chunk.try_poll_unpin(cx) {
@@ -197,7 +211,7 @@ impl<Client: HttpClient> Stream for SeqRequestStream<Client> {
             Ok(chunk) => Poll::Ready(Some(Ok(chunk))),
             Err(e) => {
                 self.state = ResponseState::None;
-                Poll::Ready(Some(Err(HttpError::Chunk(e))))
+                Poll::Ready(Some(Err((HttpError::Chunk(e), None))))
             }
         }
     }

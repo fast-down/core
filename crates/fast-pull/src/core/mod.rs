@@ -2,7 +2,7 @@ extern crate alloc;
 use crate::Event;
 use alloc::sync::{Arc, Weak};
 use core::num::{NonZeroU64, NonZeroUsize};
-use fast_steal::{Executor, TaskList};
+use fast_steal::{Executor, Handle, TaskList};
 use kanal::AsyncReceiver;
 use tokio::{
     sync::Mutex,
@@ -17,7 +17,7 @@ pub mod single;
 pub struct DownloadResult<E: Executor, PullError, PushError> {
     pub event_chain: AsyncReceiver<Event<PullError, PushError>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
-    abort_handles: Arc<[AbortHandle]>,
+    abort_handles: Option<Arc<[AbortHandle]>>,
     task_list: Option<Weak<TaskList<E>>>,
 }
 impl<E: Executor, PullError, PushError> Clone for DownloadResult<E, PullError, PushError> {
@@ -35,12 +35,12 @@ impl<E: Executor, PullError, PushError> DownloadResult<E, PullError, PushError> 
     pub fn new(
         event_chain: AsyncReceiver<Event<PullError, PushError>>,
         handle: JoinHandle<()>,
-        abort_handles: &[AbortHandle],
+        abort_handles: Option<&[AbortHandle]>,
         task_list: Option<Weak<TaskList<E>>>,
     ) -> Self {
         Self {
             event_chain,
-            abort_handles: Arc::from(abort_handles),
+            abort_handles: abort_handles.map(Arc::from),
             handle: Arc::new(Mutex::new(Some(handle))),
             task_list,
         }
@@ -55,8 +55,19 @@ impl<E: Executor, PullError, PushError> DownloadResult<E, PullError, PushError> 
     }
 
     pub fn abort(&self) {
-        for abort_handle in self.abort_handles.iter() {
-            abort_handle.abort();
+        if let Some(handles) = &self.abort_handles {
+            for handle in handles.iter() {
+                handle.abort();
+            }
+        }
+        if let Some(task_list) = &self.task_list
+            && let Some(task_list) = task_list.upgrade()
+        {
+            task_list.handles(|iter| {
+                for mut handle in iter {
+                    handle.abort();
+                }
+            });
         }
     }
 

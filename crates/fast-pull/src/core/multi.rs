@@ -64,7 +64,7 @@ where
     DownloadResult::new(
         event_chain,
         push_handle,
-        &task_list.handles(|iter| iter.map(|h| h.0.clone()).collect::<Arc<[_]>>()),
+        None,
         Some(Arc::downgrade(&task_list)),
     )
 }
@@ -97,13 +97,13 @@ where
     type Handle = TokioHandle;
     fn execute(self: Arc<Self>, task: Arc<Task>, task_list: Arc<TaskList<Self>>) -> Self::Handle {
         let id = self.id.fetch_add(1, Ordering::SeqCst);
+        let steal_min_chunk_size = NonZero::new(2 * self.min_chunk_size.get()).unwrap();
         let mut puller = self.puller.clone();
         let handle = tokio::spawn(async move {
             'steal_task: loop {
                 let mut start = task.start();
                 if start >= task.end() {
-                    if task_list.steal(&task, NonZero::new(2 * self.min_chunk_size.get()).unwrap())
-                    {
+                    if task_list.steal(&task, steal_min_chunk_size) {
                         continue;
                     } else {
                         break;
@@ -132,9 +132,9 @@ where
                             self.tx_push.send((id, span, chunk)).await.unwrap();
                         }
                         Ok(None) => break,
-                        Err(e) => {
+                        Err((e, retry_gap)) => {
                             self.tx.send(Event::PullError(id, e)).await.unwrap();
-                            tokio::time::sleep(self.retry_gap).await;
+                            tokio::time::sleep(retry_gap.unwrap_or(self.retry_gap)).await;
                         }
                     }
                 }

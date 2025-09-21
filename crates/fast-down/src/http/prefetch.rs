@@ -4,20 +4,22 @@ use crate::{
     url_info::FileId,
 };
 use content_disposition;
-use std::{borrow::Borrow, future::Future};
+use std::{borrow::Borrow, future::Future, time::Duration};
 use url::Url;
+
+pub type PrefetchResult<Client, E> = Result<(UrlInfo, GetResponse<Client>), (E, Option<Duration>)>;
 
 pub trait Prefetch<Client: HttpClient> {
     type Error;
     fn prefetch(
         &self,
         url: Url,
-    ) -> impl Future<Output = Result<(UrlInfo, GetResponse<Client>), Self::Error>> + Send;
+    ) -> impl Future<Output = PrefetchResult<Client, Self::Error>> + Send;
 }
 
 impl<Client: HttpClient, BorrowClient: Borrow<Client> + Sync> Prefetch<Client> for BorrowClient {
     type Error = HttpError<Client>;
-    async fn prefetch(&self, url: Url) -> Result<(UrlInfo, GetResponse<Client>), Self::Error> {
+    async fn prefetch(&self, url: Url) -> PrefetchResult<Client, Self::Error> {
         prefetch(self.borrow(), url).await
     }
 }
@@ -36,18 +38,19 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| s.to_string())
         })
+        .or_else(|| url.domain().map(|s| s.to_string()))
         .unwrap_or_else(|| url.to_string())
 }
 
 async fn prefetch<Client: HttpClient>(
     client: &Client,
     url: Url,
-) -> Result<(UrlInfo, GetResponse<Client>), HttpError<Client>> {
+) -> PrefetchResult<Client, HttpError<Client>> {
     let resp = client
         .get(url, None)
         .send()
         .await
-        .map_err(HttpError::Request)?;
+        .map_err(|(e, d)| (HttpError::Request(e), d))?;
     let headers = resp.headers();
     let supports_range = headers
         .get("accept-ranges")
