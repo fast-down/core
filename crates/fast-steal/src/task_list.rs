@@ -9,12 +9,12 @@ use core::{
 use spin::mutex::SpinMutex;
 
 pub struct TaskList<E: Executor> {
-    queue: SpinMutex<TaskQueue<E>>,
+    queue: SpinMutex<TaskQueue<E::Handle>>,
     executor: Arc<E>,
 }
 
-struct TaskQueue<E: Executor> {
-    running: VecDeque<(Arc<Task>, E::Handle)>,
+struct TaskQueue<H: Handle> {
+    running: VecDeque<(Arc<Task>, H)>,
     waiting: VecDeque<Arc<Task>>,
 }
 

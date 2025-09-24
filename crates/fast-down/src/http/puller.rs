@@ -7,6 +7,7 @@ use fast_pull::{ProgressEntry, RandPuller, SeqPuller};
 use futures::{Stream, TryFutureExt, TryStream};
 use spin::mutex::SpinMutex;
 use std::{
+    fmt::Debug,
     pin::{Pin, pin},
     sync::Arc,
     task::{Context, Poll},
@@ -34,6 +35,16 @@ impl<Client: HttpClient> HttpPuller<Client> {
             resp,
             file_id,
         }
+    }
+}
+impl<Client: HttpClient> Debug for HttpPuller<Client> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpPuller")
+            .field("client", &"...")
+            .field("url", &self.url)
+            .field("resp", &"...")
+            .field("file_id", &self.file_id)
+            .finish()
     }
 }
 

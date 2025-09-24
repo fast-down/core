@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use url::Url;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UrlInfo {
     pub size: u64,
     pub name: String,

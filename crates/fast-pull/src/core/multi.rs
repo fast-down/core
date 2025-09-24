@@ -77,6 +77,7 @@ impl Handle for TokioHandle {
         self.0.abort();
     }
 }
+#[derive(Debug)]
 pub struct TokioExecutor<R, WE>
 where
     R: RandPuller + 'static,
