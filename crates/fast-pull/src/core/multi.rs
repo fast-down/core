@@ -112,7 +112,15 @@ where
                 }
                 self.tx.send(Event::Pulling(id)).await.unwrap();
                 let download_range = start..task.end();
-                let mut stream = puller.pull(&download_range);
+                let mut stream = loop {
+                    match puller.pull(&download_range).await {
+                        Ok(t) => break t,
+                        Err((e, retry_gap)) => {
+                            self.tx.send(Event::PullError(id, e)).await.unwrap();
+                            tokio::time::sleep(retry_gap.unwrap_or(self.retry_gap)).await;
+                        }
+                    }
+                };
                 loop {
                     match stream.try_next().await {
                         Ok(Some(mut chunk)) => {
@@ -204,6 +212,6 @@ mod tests {
         assert_eq!(push_ids, [true; 32]);
 
         result.join().await.unwrap();
-        assert_eq!(&**pusher.receive.lock(), mock_data);
+        assert_eq!(&**pusher.receive.lock().await, mock_data);
     }
 }

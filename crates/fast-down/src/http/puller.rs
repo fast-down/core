@@ -3,9 +3,8 @@ use crate::http::{
     HttpResponse,
 };
 use bytes::Bytes;
-use fast_pull::{ProgressEntry, RandPuller, SeqPuller};
-use futures::{Stream, TryFutureExt, TryStream};
-use spin::mutex::SpinMutex;
+use fast_pull::{ProgressEntry, PullResult, PullStream, RandPuller, SeqPuller};
+use futures::{Stream, TryFutureExt};
 use std::{
     fmt::Debug,
     pin::{Pin, pin},
@@ -13,20 +12,21 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
+use tokio::sync::Mutex;
 use url::Url;
 
 #[derive(Clone)]
 pub struct HttpPuller<Client: HttpClient> {
     pub(crate) client: Client,
     url: Url,
-    resp: Option<Arc<SpinMutex<Option<GetResponse<Client>>>>>,
+    resp: Option<Arc<Mutex<Option<GetResponse<Client>>>>>,
     file_id: FileId,
 }
 impl<Client: HttpClient> HttpPuller<Client> {
     pub fn new(
         url: Url,
         client: Client,
-        resp: Option<Arc<SpinMutex<Option<GetResponse<Client>>>>>,
+        resp: Option<Arc<Mutex<Option<GetResponse<Client>>>>>,
         file_id: FileId,
     ) -> Self {
         Self {
@@ -63,25 +63,25 @@ enum ResponseState<Client: HttpClient> {
 
 impl<Client: HttpClient + 'static> RandPuller for HttpPuller<Client> {
     type Error = HttpError<Client>;
-    fn pull(
+    async fn pull(
         &mut self,
         range: &ProgressEntry,
-    ) -> impl TryStream<Ok = Bytes, Error = (Self::Error, Option<Duration>)> + Send + Unpin {
-        RandRequestStream {
+    ) -> PullResult<Self::Error, impl PullStream<Self::Error>> {
+        Ok(RandRequestStream {
             client: self.client.clone(),
             url: self.url.clone(),
             start: range.start,
             end: range.end,
             state: if range.start == 0
                 && let Some(resp) = &self.resp
-                && let Some(resp) = resp.lock().take()
+                && let Some(resp) = resp.lock().await.take()
             {
                 ResponseState::Ready(resp)
             } else {
                 ResponseState::None
             },
             file_id: self.file_id.clone(),
-        }
+        })
     }
 }
 struct RandRequestStream<Client: HttpClient + 'static> {
@@ -156,12 +156,10 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
 
 impl<Client: HttpClient + 'static> SeqPuller for HttpPuller<Client> {
     type Error = HttpError<Client>;
-    fn pull(
-        &mut self,
-    ) -> impl TryStream<Ok = Bytes, Error = (Self::Error, Option<Duration>)> + Send + Unpin {
-        SeqRequestStream {
+    async fn pull(&mut self) -> PullResult<Self::Error, impl PullStream<Self::Error>> {
+        Ok(SeqRequestStream {
             state: if let Some(resp) = &self.resp
-                && let Some(resp) = resp.lock().take()
+                && let Some(resp) = resp.lock().await.take()
             {
                 ResponseState::Ready(resp)
             } else {
@@ -169,7 +167,7 @@ impl<Client: HttpClient + 'static> SeqPuller for HttpPuller<Client> {
                 ResponseState::Pending(Box::pin(req))
             },
             file_id: self.file_id.clone(),
-        }
+        })
     }
 }
 struct SeqRequestStream<Client: HttpClient + 'static> {

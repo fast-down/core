@@ -63,7 +63,15 @@ where
     let handle = tokio::spawn(async move {
         tx.send(Event::Pulling(ID)).await.unwrap();
         let mut downloaded: u64 = 0;
-        let mut stream = puller.pull();
+        let mut stream = loop {
+            match puller.pull().await {
+                Ok(t) => break t,
+                Err((e, retry_gap)) => {
+                    tx.send(Event::PullError(ID, e)).await.unwrap();
+                    tokio::time::sleep(retry_gap.unwrap_or(options.retry_gap)).await;
+                }
+            }
+        };
         loop {
             match stream.try_next().await {
                 Ok(Some(chunk)) => {
@@ -141,6 +149,6 @@ mod tests {
         assert_eq!(push_progress, download_chunks);
 
         result.join().await.unwrap();
-        assert_eq!(&**pusher.receive.lock(), mock_data);
+        assert_eq!(&**pusher.receive.lock().await, mock_data);
     }
 }

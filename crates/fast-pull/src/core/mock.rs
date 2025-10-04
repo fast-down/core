@@ -1,10 +1,8 @@
 extern crate alloc;
-use core::time::Duration;
-
-use crate::{ProgressEntry, RandPuller, SeqPuller};
+use crate::{ProgressEntry, PullResult, PullStream, RandPuller, SeqPuller};
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
-use futures::{TryStream, stream};
+use futures::stream;
 
 pub fn build_mock_data(size: usize) -> Vec<u8> {
     (0..size).map(|i| (i % 256) as u8).collect()
@@ -19,19 +17,21 @@ impl MockPuller {
 }
 impl RandPuller for MockPuller {
     type Error = ();
-    fn pull(
+    async fn pull(
         &mut self,
         range: &ProgressEntry,
-    ) -> impl TryStream<Ok = Bytes, Error = (Self::Error, Option<Duration>)> + Send + Unpin {
+    ) -> PullResult<Self::Error, impl PullStream<Self::Error>> {
         let data = &self.0[range.start as usize..range.end as usize];
-        stream::iter(data.iter().map(|e| Ok(Bytes::from_iter([*e]))))
+        Ok(stream::iter(
+            data.iter().map(|e| Ok(Bytes::from_iter([*e]))),
+        ))
     }
 }
 impl SeqPuller for MockPuller {
     type Error = ();
-    fn pull(
-        &mut self,
-    ) -> impl TryStream<Ok = Bytes, Error = (Self::Error, Option<Duration>)> + Send + Unpin {
-        stream::iter(self.0.iter().map(|e| Ok(Bytes::from_iter([*e]))))
+    async fn pull(&mut self) -> PullResult<Self::Error, impl PullStream<Self::Error>> {
+        Ok(stream::iter(
+            self.0.iter().map(|e| Ok(Bytes::from_iter([*e]))),
+        ))
     }
 }
