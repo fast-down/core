@@ -4,6 +4,7 @@ use url::Url;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UrlInfo {
     pub size: u64,
+    /// 服务器返回的原始文件名，必须清洗掉不合法字符才能安全使用
     pub name: String,
     pub supports_range: bool,
     pub fast_download: bool,
