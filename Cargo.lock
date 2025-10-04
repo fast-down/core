@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "fast-down"
-version = "3.3.0"
+version = "3.4.0"
 dependencies = [
  "bytes",
  "content_disposition",
@@ -174,7 +174,6 @@ dependencies = [
  "httpdate",
  "mockito",
  "reqwest",
- "spin",
  "thiserror 2.0.14",
  "tokio",
  "url",
@@ -183,14 +182,13 @@ dependencies = [
 
 [[package]]
 name = "fast-pull"
-version = "3.3.0"
+version = "3.4.0"
 dependencies = [
  "bytes",
  "fast-steal",
  "futures",
  "kanal",
  "mmap-io",
- "spin",
  "tempfile",
  "thiserror 2.0.14",
  "tokio",
@@ -198,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "fast-steal"
-version = "6.0.10"
+version = "6.1.0"
 dependencies = [
  "spin",
  "tokio",
