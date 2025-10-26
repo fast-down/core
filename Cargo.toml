@@ -17,3 +17,6 @@ bytes = { version = "1.10.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 thiserror = "2.0.12"
 url = "2.5.4"
+spin = { version = "0.10.0", features = [
+    "spin_mutex",
+], default-features = false }

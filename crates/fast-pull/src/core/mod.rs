@@ -4,10 +4,8 @@ use alloc::sync::{Arc, Weak};
 use core::num::{NonZeroU64, NonZeroUsize};
 use fast_steal::{Executor, Handle, TaskList};
 use kanal::AsyncReceiver;
-use tokio::{
-    sync::Mutex,
-    task::{AbortHandle, JoinError, JoinHandle},
-};
+use spin::mutex::SpinMutex;
+use tokio::task::{AbortHandle, JoinError, JoinHandle};
 
 mod macros;
 pub mod mock;
@@ -17,7 +15,7 @@ pub mod single;
 #[derive(Debug)]
 pub struct DownloadResult<E: Executor, PullError, PushError> {
     pub event_chain: AsyncReceiver<Event<PullError, PushError>>,
-    handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    handle: Arc<SpinMutex<Option<JoinHandle<()>>>>,
     abort_handles: Option<Arc<[AbortHandle]>>,
     task_list: Option<Weak<TaskList<E>>>,
 }
@@ -43,14 +41,14 @@ impl<E: Executor, PullError, PushError> DownloadResult<E, PullError, PushError> 
         Self {
             event_chain,
             abort_handles: abort_handles.map(Arc::from),
-            handle: Arc::new(Mutex::new(Some(handle))),
+            handle: Arc::new(SpinMutex::new(Some(handle))),
             task_list,
         }
     }
 
     /// 只有第一次调用有效
     pub async fn join(&self) -> Result<(), JoinError> {
-        if let Some(handle) = self.handle.lock().await.take() {
+        if let Some(handle) = self.handle.lock().take() {
             handle.await?
         }
         Ok(())

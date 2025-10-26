@@ -13,9 +13,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-spin = { version = "0.10.0", features = [
-  "spin_mutex",
-], default-features = false }
+spin.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1.47.1", features = [

@@ -1,5 +1,5 @@
 extern crate std;
-use crate::{ProgressEntry, RandPusher, SeqPusher, file::FilePusherError};
+use crate::{ProgressEntry, RandPusher, SeqPusher};
 use std::{boxed::Box, collections::VecDeque};
 use tokio::{
     fs::File,
@@ -15,7 +15,7 @@ pub struct FilePusher {
     buffer_size: usize,
 }
 impl FilePusher {
-    pub async fn new(file: File, size: u64, buffer_size: usize) -> Result<Self, FilePusherError> {
+    pub async fn new(file: File, size: u64, buffer_size: usize) -> tokio::io::Result<Self> {
         file.set_len(size).await?;
         Ok(Self {
             buffer: BufWriter::with_capacity(buffer_size, file),
@@ -27,16 +27,16 @@ impl FilePusher {
     }
 }
 impl SeqPusher for FilePusher {
-    type Error = FilePusherError;
+    type Error = tokio::io::Error;
     async fn push(&mut self, content: &[u8]) -> Result<(), Self::Error> {
-        Ok(self.buffer.write_all(content).await?)
+        self.buffer.write_all(content).await
     }
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        Ok(self.buffer.flush().await?)
+        self.buffer.flush().await
     }
 }
 impl RandPusher for FilePusher {
-    type Error = FilePusherError;
+    type Error = tokio::io::Error;
     async fn push(&mut self, range: ProgressEntry, bytes: &[u8]) -> Result<(), Self::Error> {
         let pos = self.cache.partition_point(|(i, _)| i < &range.start);
         self.cache_size += bytes.len();

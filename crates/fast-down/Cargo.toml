@@ -23,10 +23,11 @@ reqwest = { version = "0.12.22", default-features = false, optional = true }
 thiserror.workspace = true
 tokio = { version = "1.47.1", default-features = false }
 httpdate = { version = "1.0.3", optional = true }
+spin = { workspace = true, optional = true }
 
 [features]
 default = ["reqwest"]
-http = ["dep:content_disposition", "dep:urlencoding"]
+http = ["dep:content_disposition", "dep:urlencoding", "dep:spin"]
 reqwest = ["http", "dep:reqwest", "dep:httpdate"]
 
 [dev-dependencies]

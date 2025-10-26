@@ -5,6 +5,7 @@ use crate::http::{
 use bytes::Bytes;
 use fast_pull::{ProgressEntry, PullResult, PullStream, RandPuller, SeqPuller};
 use futures::{Stream, TryFutureExt};
+use spin::mutex::SpinMutex;
 use std::{
     fmt::Debug,
     pin::{Pin, pin},
@@ -12,21 +13,20 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::sync::Mutex;
 use url::Url;
 
 #[derive(Clone)]
 pub struct HttpPuller<Client: HttpClient> {
     pub(crate) client: Client,
     url: Url,
-    resp: Option<Arc<Mutex<Option<GetResponse<Client>>>>>,
+    resp: Option<Arc<SpinMutex<Option<GetResponse<Client>>>>>,
     file_id: FileId,
 }
 impl<Client: HttpClient> HttpPuller<Client> {
     pub fn new(
         url: Url,
         client: Client,
-        resp: Option<Arc<Mutex<Option<GetResponse<Client>>>>>,
+        resp: Option<Arc<SpinMutex<Option<GetResponse<Client>>>>>,
         file_id: FileId,
     ) -> Self {
         Self {
@@ -74,7 +74,7 @@ impl<Client: HttpClient + 'static> RandPuller for HttpPuller<Client> {
             end: range.end,
             state: if range.start == 0
                 && let Some(resp) = &self.resp
-                && let Some(resp) = resp.lock().await.take()
+                && let Some(resp) = resp.lock().take()
             {
                 ResponseState::Ready(resp)
             } else {
@@ -159,7 +159,7 @@ impl<Client: HttpClient + 'static> SeqPuller for HttpPuller<Client> {
     async fn pull(&mut self) -> PullResult<Self::Error, impl PullStream<Self::Error>> {
         Ok(SeqRequestStream {
             state: if let Some(resp) = &self.resp
-                && let Some(resp) = resp.lock().await.take()
+                && let Some(resp) = resp.lock().take()
             {
                 ResponseState::Ready(resp)
             } else {

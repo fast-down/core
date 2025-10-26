@@ -20,9 +20,9 @@ tokio = { version = "1.47.1", features = [
 ], default-features = false }
 kanal.workspace = true
 fast-steal.workspace = true
-thiserror.workspace = true
 bytes.workspace = true
 futures.workspace = true
+spin.workspace = true
 mmap-io = { version = "0.9.0", features = [
     "async",
     "hugepages",

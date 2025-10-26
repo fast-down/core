@@ -212,6 +212,6 @@ mod tests {
         assert_eq!(push_ids, [true; 32]);
 
         result.join().await.unwrap();
-        assert_eq!(&**pusher.receive.lock().await, mock_data);
+        assert_eq!(&**pusher.receive.lock(), mock_data);
     }
 }

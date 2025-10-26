@@ -1,8 +1,8 @@
 extern crate std;
-use crate::{ProgressEntry, RandPusher, Total, file::FilePusherError};
-use mmap_io::{MemoryMappedFile, MmapMode, flush::FlushPolicy};
+use crate::{ProgressEntry, RandPusher, Total};
+use mmap_io::{MemoryMappedFile, MmapIoError, MmapMode, flush::FlushPolicy};
 use std::path::Path;
-use tokio::fs::OpenOptions;
+use tokio::fs::{self, OpenOptions};
 
 #[derive(Debug)]
 pub struct MmapFilePusher {
@@ -15,13 +15,13 @@ impl MmapFilePusher {
         path: impl AsRef<Path>,
         size: u64,
         buffer_size: usize,
-    ) -> Result<Self, FilePusherError> {
+    ) -> Result<Self, MmapIoError> {
         let mmap_builder = MemoryMappedFile::builder(&path)
             .mode(MmapMode::ReadWrite)
             .huge_pages(true)
             .flush_policy(FlushPolicy::Manual);
         Ok(Self {
-            mmap: if path.as_ref().try_exists()? {
+            mmap: if fs::try_exists(&path).await? {
                 OpenOptions::new()
                     .write(true)
                     .open(path)
@@ -38,7 +38,7 @@ impl MmapFilePusher {
     }
 }
 impl RandPusher for MmapFilePusher {
-    type Error = FilePusherError;
+    type Error = MmapIoError;
     async fn push(&mut self, range: ProgressEntry, bytes: &[u8]) -> Result<(), Self::Error> {
         self.mmap
             .as_slice_mut(range.start, range.total())?
