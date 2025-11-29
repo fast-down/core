@@ -1,12 +1,12 @@
 extern crate alloc;
-use crate::Event;
+use crate::{Event, handle::SharedHandle};
 use alloc::sync::{Arc, Weak};
 use core::num::{NonZeroU64, NonZeroUsize};
 use fast_steal::{Executor, Handle, TaskList};
 use kanal::AsyncReceiver;
-use spin::mutex::SpinMutex;
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 
+pub mod handle;
 mod macros;
 pub mod mock;
 pub mod multi;
@@ -15,7 +15,7 @@ pub mod single;
 #[derive(Debug)]
 pub struct DownloadResult<E: Executor, PullError, PushError> {
     pub event_chain: AsyncReceiver<Event<PullError, PushError>>,
-    handle: Arc<SpinMutex<Option<JoinHandle<()>>>>,
+    handle: Arc<SharedHandle<()>>,
     abort_handles: Option<Arc<[AbortHandle]>>,
     task_list: Option<Weak<TaskList<E>>>,
 }
@@ -41,17 +41,13 @@ impl<E: Executor, PullError, PushError> DownloadResult<E, PullError, PushError> 
         Self {
             event_chain,
             abort_handles: abort_handles.map(Arc::from),
-            handle: Arc::new(SpinMutex::new(Some(handle))),
+            handle: Arc::new(SharedHandle::new(handle)),
             task_list,
         }
     }
 
-    /// 只有第一次调用有效
-    pub async fn join(&self) -> Result<(), JoinError> {
-        if let Some(handle) = self.handle.lock().take() {
-            handle.await?
-        }
-        Ok(())
+    pub async fn join(&self) -> Result<(), Arc<JoinError>> {
+        self.handle.join().await
     }
 
     pub fn abort(&self) {
