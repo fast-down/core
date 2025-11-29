@@ -37,7 +37,7 @@ impl<E: Executor> TaskList<E> {
         len - guard.running.len() - guard.waiting.len()
     }
 
-    pub fn add(self: Arc<Self>, task: Arc<Task>) {
+    pub fn add(&self, task: Arc<Task>) {
         let mut guard = self.queue.lock();
         guard.waiting.push_back(task);
     }
@@ -50,7 +50,7 @@ impl<E: Executor> TaskList<E> {
             task.set_start(new_task.start());
             return true;
         }
-        if let Some(steal_task) = guard.running.iter().map(|w| w.0.clone()).max()
+        if let Some(steal_task) = guard.running.iter().map(|w| &w.0).max()
             && steal_task.remain() >= min_chunk_size
         {
             let (start, end) = steal_task.split_two();
@@ -73,11 +73,11 @@ impl<E: Executor> TaskList<E> {
             let iter = guard.waiting.drain(..need);
             for task in iter {
                 let handle = self.executor.clone().execute(task.clone(), self.clone());
-                temp.push((task.clone(), handle));
+                temp.push((task, handle));
             }
             guard.running.extend(temp);
             while guard.running.len() < threads
-                && let Some(steal_task) = guard.running.iter().map(|w| w.0.clone()).max()
+                && let Some(steal_task) = guard.running.iter().map(|w| &w.0).max()
                 && steal_task.remain() >= min_chunk_size
             {
                 let (start, end) = steal_task.split_two();
@@ -86,12 +86,11 @@ impl<E: Executor> TaskList<E> {
                 guard.running.push_back((task, handle));
             }
         } else if len > threads {
-            let need_remove = len - threads;
-            let mut temp = Vec::with_capacity(need_remove);
-            let iter = guard.running.drain(..need_remove);
+            let mut temp = Vec::with_capacity(len - threads);
+            let iter = guard.running.drain(threads..);
             for (task, mut handle) in iter {
                 handle.abort();
-                temp.push(task.clone());
+                temp.push(task);
             }
             guard.waiting.extend(temp);
         }
@@ -99,10 +98,10 @@ impl<E: Executor> TaskList<E> {
 
     pub fn handles<F, R>(&self, f: F) -> R
     where
-        F: FnOnce(&mut dyn Iterator<Item = E::Handle>) -> R,
+        F: FnOnce(&mut dyn Iterator<Item = &mut E::Handle>) -> R,
     {
-        let guard = self.queue.lock();
-        let mut iter = guard.running.iter().map(|w| w.1.clone());
+        let mut guard = self.queue.lock();
+        let mut iter = guard.running.iter_mut().map(|w| &mut w.1);
         f(&mut iter)
     }
 }
@@ -184,7 +183,7 @@ mod tests {
         task_list
             .clone()
             .set_threads(NonZero::new(8).unwrap(), NonZero::new(2).unwrap());
-        let handles: Arc<[_]> = task_list.handles(|it| it.collect());
+        let handles: Arc<[_]> = task_list.handles(|it| it.map(|task| task.clone()).collect());
         drop(task_list);
         for handle in handles.iter() {
             handle.0.lock().await.take().unwrap().await.unwrap();

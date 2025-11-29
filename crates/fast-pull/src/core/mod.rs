@@ -64,7 +64,7 @@ impl<E: Executor, PullError, PushError> DownloadResult<E, PullError, PushError> 
             && let Some(task_list) = task_list.upgrade()
         {
             task_list.handles(|iter| {
-                for mut handle in iter {
+                for handle in iter {
                     handle.abort();
                 }
             });

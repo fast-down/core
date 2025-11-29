@@ -86,7 +86,7 @@
 //!     task_list
 //!         .clone()
 //!         .set_threads(NonZero::new(8).unwrap(), NonZero::new(2).unwrap());
-//!     let handles: Arc<[_]> = task_list.handles(|it| it.collect());
+//!     let handles: Arc<[_]> = task_list.handles(|it| it.map(|task| task.clone()).collect());
 //!     drop(task_list);
 //!     for handle in handles.iter() {
 //!         handle.0.lock().await.take().unwrap().await.unwrap();
