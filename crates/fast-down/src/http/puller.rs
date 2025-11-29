@@ -4,11 +4,12 @@ use crate::http::{
 };
 use bytes::Bytes;
 use fast_pull::{ProgressEntry, PullResult, PullStream, RandPuller, SeqPuller};
-use futures::{Stream, TryFutureExt};
+use futures::Stream;
 use spin::mutex::SpinMutex;
 use std::{
     fmt::Debug,
-    pin::{Pin, pin},
+    future::Future,
+    pin::Pin,
     sync::Arc,
     task::{Context, Poll},
     time::Duration,
@@ -55,10 +56,25 @@ type ResponseFut<Client> = Pin<
             > + Send,
     >,
 >;
+
+type ChunkStream<Client> = Pin<Box<dyn Stream<Item = Result<Bytes, HttpError<Client>>> + Send>>;
+
 enum ResponseState<Client: HttpClient> {
     Pending(ResponseFut<Client>),
-    Ready(GetResponse<Client>),
+    Streaming(ChunkStream<Client>),
     None,
+}
+
+fn into_chunk_stream<Client: HttpClient + 'static>(
+    resp: GetResponse<Client>,
+) -> ChunkStream<Client> {
+    Box::pin(futures::stream::try_unfold(resp, |mut r| async move {
+        match r.chunk().await {
+            Ok(Some(chunk)) => Ok(Some((chunk, r))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(HttpError::Chunk(e)),
+        }
+    }))
 }
 
 impl<Client: HttpClient + 'static> RandPuller for HttpPuller<Client> {
@@ -76,7 +92,7 @@ impl<Client: HttpClient + 'static> RandPuller for HttpPuller<Client> {
                 && let Some(resp) = &self.resp
                 && let Some(resp) = resp.lock().take()
             {
-                ResponseState::Ready(resp)
+                ResponseState::Streaming(into_chunk_stream(resp))
             } else {
                 ResponseState::None
             },
@@ -95,62 +111,47 @@ struct RandRequestStream<Client: HttpClient + 'static> {
 impl<Client: HttpClient> Stream for RandRequestStream<Client> {
     type Item = Result<Bytes, (HttpError<Client>, Option<Duration>)>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let chunk_global;
         match &mut self.state {
-            ResponseState::Pending(resp) => {
-                return match resp.try_poll_unpin(cx) {
-                    Poll::Ready(resp) => match resp {
-                        Ok(resp) => {
-                            let new_file_id = FileId::new(
-                                resp.headers().get("etag").ok(),
-                                resp.headers().get("last-modified").ok(),
-                            );
-                            if new_file_id != self.file_id {
-                                self.state = ResponseState::None;
-                                Poll::Ready(Some(Err((
-                                    HttpError::MismatchedBody(new_file_id),
-                                    None,
-                                ))))
-                            } else {
-                                self.state = ResponseState::Ready(resp);
-                                self.poll_next(cx)
-                            }
-                        }
-                        Err((e, d)) => {
-                            self.state = ResponseState::None;
-                            Poll::Ready(Some(Err((HttpError::Request(e), d))))
-                        }
-                    },
-                    Poll::Pending => Poll::Pending,
-                };
-            }
+            ResponseState::Pending(resp) => match resp.as_mut().poll(cx) {
+                Poll::Ready(Ok(resp)) => {
+                    let new_file_id = FileId::new(
+                        resp.headers().get("etag").ok(),
+                        resp.headers().get("last-modified").ok(),
+                    );
+                    if new_file_id != self.file_id {
+                        self.state = ResponseState::None;
+                        Poll::Ready(Some(Err((HttpError::MismatchedBody(new_file_id), None))))
+                    } else {
+                        self.state = ResponseState::Streaming(into_chunk_stream(resp));
+                        self.poll_next(cx)
+                    }
+                }
+                Poll::Ready(Err((e, d))) => {
+                    self.state = ResponseState::None;
+                    Poll::Ready(Some(Err((HttpError::Request(e), d))))
+                }
+                Poll::Pending => Poll::Pending,
+            },
             ResponseState::None => {
                 let resp = self
                     .client
                     .get(self.url.clone(), Some(self.start..self.end))
                     .send();
                 self.state = ResponseState::Pending(Box::pin(resp));
-                return self.poll_next(cx);
+                self.poll_next(cx)
             }
-            ResponseState::Ready(resp) => {
-                let mut chunk = pin!(resp.chunk());
-                match chunk.try_poll_unpin(cx) {
-                    Poll::Ready(Ok(Some(chunk))) => chunk_global = Ok(chunk),
-                    Poll::Ready(Ok(None)) => return Poll::Ready(None),
-                    Poll::Ready(Err(e)) => chunk_global = Err(e),
-                    Poll::Pending => return Poll::Pending,
-                };
-            }
-        };
-        match chunk_global {
-            Ok(chunk) => {
-                self.start += chunk.len() as u64;
-                Poll::Ready(Some(Ok(chunk)))
-            }
-            Err(e) => {
-                self.state = ResponseState::None;
-                Poll::Ready(Some(Err((HttpError::Chunk(e), None))))
-            }
+            ResponseState::Streaming(stream) => match stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    self.start += chunk.len() as u64;
+                    Poll::Ready(Some(Ok(chunk)))
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    self.state = ResponseState::None;
+                    Poll::Ready(Some(Err((e, None))))
+                }
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            },
         }
     }
 }
@@ -162,7 +163,7 @@ impl<Client: HttpClient + 'static> SeqPuller for HttpPuller<Client> {
             state: if let Some(resp) = &self.resp
                 && let Some(resp) = resp.lock().take()
             {
-                ResponseState::Ready(resp)
+                ResponseState::Streaming(into_chunk_stream(resp))
             } else {
                 let req = self.client.get(self.url.clone(), None).send();
                 ResponseState::Pending(Box::pin(req))
@@ -178,52 +179,37 @@ struct SeqRequestStream<Client: HttpClient + 'static> {
 impl<Client: HttpClient> Stream for SeqRequestStream<Client> {
     type Item = Result<Bytes, (HttpError<Client>, Option<Duration>)>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let chunk_global;
         match &mut self.state {
-            ResponseState::Pending(resp) => {
-                return match resp.try_poll_unpin(cx) {
-                    Poll::Ready(resp) => match resp {
-                        Ok(resp) => {
-                            let new_file_id = FileId::new(
-                                resp.headers().get("etag").ok(),
-                                resp.headers().get("last-modified").ok(),
-                            );
-                            if new_file_id != self.file_id {
-                                self.state = ResponseState::None;
-                                Poll::Ready(Some(Err((
-                                    HttpError::MismatchedBody(new_file_id),
-                                    None,
-                                ))))
-                            } else {
-                                self.state = ResponseState::Ready(resp);
-                                self.poll_next(cx)
-                            }
-                        }
-                        Err((e, d)) => {
-                            self.state = ResponseState::None;
-                            Poll::Ready(Some(Err((HttpError::Request(e), d))))
-                        }
-                    },
-                    Poll::Pending => Poll::Pending,
-                };
-            }
-            ResponseState::None => return Poll::Ready(Some(Err((HttpError::Irrecoverable, None)))),
-            ResponseState::Ready(resp) => {
-                let mut chunk = pin!(resp.chunk());
-                match chunk.try_poll_unpin(cx) {
-                    Poll::Ready(Ok(Some(chunk))) => chunk_global = Ok(chunk),
-                    Poll::Ready(Ok(None)) => return Poll::Ready(None),
-                    Poll::Ready(Err(e)) => chunk_global = Err(e),
-                    Poll::Pending => return Poll::Pending,
-                };
-            }
-        };
-        match chunk_global {
-            Ok(chunk) => Poll::Ready(Some(Ok(chunk))),
-            Err(e) => {
-                self.state = ResponseState::None;
-                Poll::Ready(Some(Err((HttpError::Chunk(e), None))))
-            }
+            ResponseState::Pending(resp) => match resp.as_mut().poll(cx) {
+                Poll::Ready(Ok(resp)) => {
+                    let new_file_id = FileId::new(
+                        resp.headers().get("etag").ok(),
+                        resp.headers().get("last-modified").ok(),
+                    );
+                    if new_file_id != self.file_id {
+                        self.state = ResponseState::None;
+                        Poll::Ready(Some(Err((HttpError::MismatchedBody(new_file_id), None))))
+                    } else {
+                        self.state = ResponseState::Streaming(into_chunk_stream(resp));
+                        self.poll_next(cx)
+                    }
+                }
+                Poll::Ready(Err((e, d))) => {
+                    self.state = ResponseState::None;
+                    Poll::Ready(Some(Err((HttpError::Request(e), d))))
+                }
+                Poll::Pending => Poll::Pending,
+            },
+            ResponseState::None => Poll::Ready(Some(Err((HttpError::Irrecoverable, None)))),
+            ResponseState::Streaming(stream) => match stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(chunk))),
+                Poll::Ready(Some(Err(e))) => {
+                    self.state = ResponseState::None;
+                    Poll::Ready(Some(Err((e, None))))
+                }
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            },
         }
     }
 }
