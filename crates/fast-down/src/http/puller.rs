@@ -66,7 +66,7 @@ impl<Client: HttpClient + 'static> RandPuller for HttpPuller<Client> {
     async fn pull(
         &mut self,
         range: &ProgressEntry,
-    ) -> PullResult<Self::Error, impl PullStream<Self::Error>> {
+    ) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
         Ok(RandRequestStream {
             client: self.client.clone(),
             url: self.url.clone(),
@@ -156,7 +156,7 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
 
 impl<Client: HttpClient + 'static> SeqPuller for HttpPuller<Client> {
     type Error = HttpError<Client>;
-    async fn pull(&mut self) -> PullResult<Self::Error, impl PullStream<Self::Error>> {
+    async fn pull(&mut self) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
         Ok(SeqRequestStream {
             state: if let Some(resp) = &self.resp
                 && let Some(resp) = resp.lock().take()

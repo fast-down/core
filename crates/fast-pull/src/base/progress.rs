@@ -7,6 +7,7 @@ pub trait Mergeable {
 }
 
 impl Mergeable for ProgressEntry {
+    #[inline(always)]
     fn can_merge(&self, b: &Self) -> bool {
         self.start == b.end || b.start == self.end
     }

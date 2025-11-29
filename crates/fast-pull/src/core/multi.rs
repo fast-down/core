@@ -41,7 +41,7 @@ where
                 id @ tx_clone => PushError,
                 options.retry_gap
             );
-            tx_clone.send(Event::PushProgress(id, spin)).await.unwrap();
+            let _ = tx_clone.send(Event::PushProgress(id, spin)).await;
         }
         poll_ok!(
             pusher.flush().await,
@@ -109,13 +109,13 @@ where
                         break;
                     }
                 }
-                self.tx.send(Event::Pulling(id)).await.unwrap();
+                let _ = self.tx.send(Event::Pulling(id)).await;
                 let download_range = start..task.end();
                 let mut stream = loop {
                     match puller.pull(&download_range).await {
                         Ok(t) => break t,
                         Err((e, retry_gap)) => {
-                            self.tx.send(Event::PullError(id, e)).await.unwrap();
+                            let _ = self.tx.send(Event::PullError(id, e)).await;
                             tokio::time::sleep(retry_gap.unwrap_or(self.retry_gap)).await;
                         }
                     }
@@ -133,22 +133,19 @@ where
                             }
                             let span = range_start..range_end;
                             chunk.truncate(span.total() as usize);
-                            self.tx
-                                .send(Event::PullProgress(id, span.clone()))
-                                .await
-                                .unwrap();
+                            let _ = self.tx.send(Event::PullProgress(id, span.clone())).await;
                             self.tx_push.send((id, span, chunk)).await.unwrap();
                         }
                         Ok(None) => break,
                         Err((e, retry_gap)) => {
-                            self.tx.send(Event::PullError(id, e)).await.unwrap();
+                            let _ = self.tx.send(Event::PullError(id, e)).await;
                             tokio::time::sleep(retry_gap.unwrap_or(self.retry_gap)).await;
                         }
                     }
                 }
             }
             task_list.remove(&task);
-            self.tx.send(Event::Finished(id)).await.unwrap();
+            let _ = self.tx.send(Event::Finished(id)).await;
         });
         TokioHandle(handle.abort_handle())
     }

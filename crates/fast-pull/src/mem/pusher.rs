@@ -34,10 +34,14 @@ impl RandPusher for MemPusher {
         content: &[u8],
     ) -> Result<(), Self::Error> {
         let mut guard = self.receive.lock();
-        if guard.len() < range.end as usize {
-            guard.resize(range.end as usize, 0);
+        if range.start as usize == guard.len() {
+            guard.extend_from_slice(content);
+        } else {
+            if guard.len() < range.end as usize {
+                guard.resize(range.end as usize, 0);
+            }
+            guard[range.start as usize..range.end as usize].copy_from_slice(content);
         }
-        guard[range.start as usize..range.end as usize].copy_from_slice(content);
         Ok(())
     }
 }
