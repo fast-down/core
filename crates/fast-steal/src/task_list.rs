@@ -51,7 +51,7 @@ impl<E: Executor> TaskList<E> {
             return true;
         }
         if let Some(steal_task) = guard.running.iter().map(|w| &w.0).max()
-            && steal_task.remain() >= min_chunk_size
+            && steal_task.remain() >= min_chunk_size * 2
         {
             let (start, end) = steal_task.split_two();
             task.set_end(end);
@@ -78,7 +78,7 @@ impl<E: Executor> TaskList<E> {
             guard.running.extend(temp);
             while guard.running.len() < threads
                 && let Some(steal_task) = guard.running.iter().map(|w| &w.0).max()
-                && steal_task.remain() >= min_chunk_size
+                && steal_task.remain() >= min_chunk_size * 2
             {
                 let (start, end) = steal_task.split_two();
                 let task = Arc::new(Task::new(start, end));
@@ -147,7 +147,7 @@ mod tests {
                         println!("task: {i} = {res}");
                         self.tx.send((i, res)).unwrap();
                     }
-                    if !task_list.steal(&task, NonZero::new(2).unwrap()) {
+                    if !task_list.steal(&task, NonZero::new(1).unwrap()) {
                         break;
                     }
                 }
@@ -182,8 +182,8 @@ mod tests {
         let task_list = Arc::new(TaskList::run(&pre_data[..], executor));
         task_list
             .clone()
-            .set_threads(NonZero::new(8).unwrap(), NonZero::new(2).unwrap());
-        let handles: Arc<[_]> = task_list.handles(|it| it.map(|task| task.clone()).collect());
+            .set_threads(NonZero::new(8).unwrap(), NonZero::new(1).unwrap());
+        let handles: Arc<[_]> = task_list.handles(|it| it.map(|h| h.clone()).collect());
         drop(task_list);
         for handle in handles.iter() {
             handle.0.lock().await.take().unwrap().await.unwrap();

@@ -49,7 +49,7 @@ impl Executor for TokioExecutor {
                     println!("task: {i} = {res}");
                     self.tx.send((i, res)).unwrap();
                 }
-                if !task_list.steal(&task, NonZero::new(2).unwrap()) {
+                if !task_list.steal(&task, NonZero::new(1).unwrap()) {
                     break;
                 }
             }
@@ -81,8 +81,8 @@ async fn main() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let executor = TokioExecutor { tx };
     let pre_data = [1..20, 41..48];
-    let task_list = TaskList::run(NonZero::new(8).unwrap(), NonZero::new(2).unwrap(), &pre_data[..], executor);
-    let handles: Arc<[_]> = task_list.handles(|it| it.collect());
+    let task_list = TaskList::run(NonZero::new(8).unwrap(), NonZero::new(1).unwrap(), &pre_data[..], executor);
+    let handles: Arc<[_]> = task_list.handles(|it| it.map(|h| h.clone()).collect());
     drop(task_list);
     for handle in handles.iter() {
         handle.0.lock().await.take().unwrap().await.unwrap();

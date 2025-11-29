@@ -50,7 +50,7 @@
 //!                     println!("task: {i} = {res}");
 //!                     self.tx.send((i, res)).unwrap();
 //!                 }
-//!                 if !task_list.steal(&task, NonZero::new(2).unwrap()) {
+//!                 if !task_list.steal(&task, NonZero::new(1).unwrap()) {
 //!                     break;
 //!                 }
 //!             }
@@ -85,8 +85,8 @@
 //!     let task_list = Arc::new(TaskList::run(&pre_data[..], executor));
 //!     task_list
 //!         .clone()
-//!         .set_threads(NonZero::new(8).unwrap(), NonZero::new(2).unwrap());
-//!     let handles: Arc<[_]> = task_list.handles(|it| it.map(|task| task.clone()).collect());
+//!         .set_threads(NonZero::new(8).unwrap(), NonZero::new(1).unwrap());
+//!     let handles: Arc<[_]> = task_list.handles(|it| it.map(|h| h.clone()).collect());
 //!     drop(task_list);
 //!     for handle in handles.iter() {
 //!         handle.0.lock().await.take().unwrap().await.unwrap();

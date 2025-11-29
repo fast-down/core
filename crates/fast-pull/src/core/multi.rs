@@ -4,7 +4,7 @@ use crate::{DownloadResult, Event, ProgressEntry, RandPuller, RandPusher, Total,
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
 use core::{
-    num::{NonZero, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU64, NonZeroUsize},
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
@@ -98,13 +98,12 @@ where
     type Handle = TokioHandle;
     fn execute(self: Arc<Self>, task: Arc<Task>, task_list: Arc<TaskList<Self>>) -> Self::Handle {
         let id = self.id.fetch_add(1, Ordering::SeqCst);
-        let steal_min_chunk_size = NonZero::new(2 * self.min_chunk_size.get()).unwrap();
         let mut puller = self.puller.clone();
         let handle = tokio::spawn(async move {
             'steal_task: loop {
                 let mut start = task.start();
                 if start >= task.end() {
-                    if task_list.steal(&task, steal_min_chunk_size) {
+                    if task_list.steal(&task, self.min_chunk_size) {
                         continue;
                     } else {
                         break;
@@ -165,6 +164,7 @@ mod tests {
         mock::{MockPuller, build_mock_data},
     };
     use alloc::vec;
+    use core::num::NonZero;
     use std::dbg;
 
     #[tokio::test]
