@@ -101,9 +101,10 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
                 return match resp.try_poll_unpin(cx) {
                     Poll::Ready(resp) => match resp {
                         Ok(resp) => {
-                            let etag = resp.headers().get("etag").ok();
-                            let last_modified = resp.headers().get("last-modified").ok();
-                            let new_file_id = FileId::new(etag, last_modified);
+                            let new_file_id = FileId::new(
+                                resp.headers().get("etag").ok(),
+                                resp.headers().get("last-modified").ok(),
+                            );
                             if new_file_id != self.file_id {
                                 self.state = ResponseState::None;
                                 Poll::Ready(Some(Err((
@@ -183,9 +184,10 @@ impl<Client: HttpClient> Stream for SeqRequestStream<Client> {
                 return match resp.try_poll_unpin(cx) {
                     Poll::Ready(resp) => match resp {
                         Ok(resp) => {
-                            let etag = resp.headers().get("etag").ok();
-                            let last_modified = resp.headers().get("last-modified").ok();
-                            let new_file_id = FileId::new(etag, last_modified);
+                            let new_file_id = FileId::new(
+                                resp.headers().get("etag").ok(),
+                                resp.headers().get("last-modified").ok(),
+                            );
                             if new_file_id != self.file_id {
                                 self.state = ResponseState::None;
                                 Poll::Ready(Some(Err((

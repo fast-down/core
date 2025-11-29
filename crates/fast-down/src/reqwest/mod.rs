@@ -62,7 +62,7 @@ impl HttpResponse for Response {
     fn chunk(
         &mut self,
     ) -> impl Future<Output = Result<Option<bytes::Bytes>, Self::ChunkError>> + Send {
-        Response::chunk(self)
+        self.chunk()
     }
 }
 
@@ -143,7 +143,7 @@ mod tests {
             format!("{}/%e4%bd%a0%e5%a5%bd.txt", server.url())
         );
         assert_eq!(url_info.size, 1024);
-        assert_eq!(url_info.name, "你好.txt");
+        assert_eq!(url_info.raw_name, "你好.txt");
         assert!(url_info.supports_range);
 
         mock_redirect.assert_async().await;
@@ -162,7 +162,7 @@ mod tests {
             .await;
         let url = Url::parse(&format!("{}/test1", server.url())).unwrap();
         let (url_info, _) = Client::new().prefetch(url).await.unwrap();
-        assert_eq!(url_info.name, "test.txt");
+        assert_eq!(url_info.raw_name, "test.txt");
         mock1.assert_async().await;
 
         // Test URL path source
@@ -176,7 +176,7 @@ mod tests {
         ))
         .unwrap();
         let (url_info, _) = Client::new().prefetch(url).await.unwrap();
-        assert_eq!(url_info.name, "好好好.pdf");
+        assert_eq!(url_info.raw_name, "好好好.pdf");
         mock2.assert_async().await;
     }
 

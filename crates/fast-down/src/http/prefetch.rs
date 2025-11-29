@@ -3,7 +3,6 @@ use crate::{
     http::{GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse},
     url_info::FileId,
 };
-use content_disposition;
 use std::{borrow::Borrow, future::Future, time::Duration};
 use url::Url;
 
@@ -65,7 +64,7 @@ async fn prefetch<Client: HttpClient>(
     Ok((
         UrlInfo {
             final_url: final_url.clone(),
-            name: get_filename(headers, final_url),
+            raw_name: get_filename(headers, final_url),
             size,
             supports_range,
             fast_download: size > 0 && supports_range,

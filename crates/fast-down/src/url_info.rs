@@ -4,12 +4,26 @@ use url::Url;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UrlInfo {
     pub size: u64,
-    /// 服务器返回的原始文件名，必须清洗掉不合法字符才能安全使用
-    pub name: String,
+    /// 服务器返回的原始文件名，必须清洗掉不合法字符才能安全使用，用 [`UrlInfo::filename()`] 方法处理好的文件名
+    pub raw_name: String,
     pub supports_range: bool,
     pub fast_download: bool,
     pub final_url: Url,
     pub file_id: FileId,
+}
+
+#[cfg(feature = "sanitize-filename")]
+impl UrlInfo {
+    pub fn filename(&self) -> String {
+        sanitize_filename::sanitize_with_options(
+            &self.raw_name,
+            sanitize_filename::Options {
+                windows: cfg!(windows),
+                truncate: true,
+                replacement: "_",
+            },
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
