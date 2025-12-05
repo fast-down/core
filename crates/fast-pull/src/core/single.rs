@@ -33,7 +33,7 @@ impl Executor for EmptyExecutor {
     }
 }
 
-pub async fn download_single<R, W>(
+pub fn download_single<R, W>(
     mut puller: R,
     mut pusher: W,
     options: DownloadOptions,
@@ -126,8 +126,7 @@ mod tests {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
             },
-        )
-        .await;
+        );
 
         let mut pull_progress: Vec<ProgressEntry> = Vec::new();
         let mut push_progress: Vec<ProgressEntry> = Vec::new();

@@ -21,7 +21,7 @@ pub struct DownloadOptions {
     pub min_chunk_size: NonZeroU64,
 }
 
-pub async fn download_multi<R, W>(
+pub fn download_multi<R, W>(
     puller: R,
     mut pusher: W,
     options: DownloadOptions,
@@ -181,8 +181,7 @@ mod tests {
                 download_chunks: download_chunks.clone(),
                 min_chunk_size: NonZero::new(1).unwrap(),
             },
-        )
-        .await;
+        );
 
         let mut pull_progress: Vec<ProgressEntry> = Vec::new();
         let mut push_progress: Vec<ProgressEntry> = Vec::new();

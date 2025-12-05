@@ -1,38 +1,37 @@
 [package]
 name = "fast-pull"
-description = "Pull everything fast"
-version = "3.5.0"
-readme = "README.md"
-documentation = "https://docs.rs/fast-pull"
-keywords = ["performance", "multiplex", "fast", "parallel", "concurrency"]
-categories = ["concurrency", "asynchronous", "no-std"]
-edition.workspace = true
+version = "3.5.1"
 authors.workspace = true
-license.workspace = true
-repository.workspace = true
+edition.workspace = true
+description = "Pull everything fast"
+documentation = "https://docs.rs/fast-pull"
+readme = "README.md"
 homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["concurrency", "fast", "multiplex", "parallel", "performance"]
+categories = ["asynchronous", "concurrency", "no-std"]
 
 [dependencies]
-tokio = { version = "1.47.1", features = [
-    "macros",
-    "io-util",
-    "time",
-], default-features = false }
-kanal.workspace = true
-fast-steal.workspace = true
 bytes.workspace = true
+fast-steal.workspace = true
 futures.workspace = true
-spin.workspace = true
+kanal.workspace = true
 mmap-io = { version = "0.9.0", features = [
-    "async",
-    "hugepages",
+  "async",
+  "hugepages",
 ], optional = true }
+spin.workspace = true
+tokio = { version = "1.47.1", default-features = false, features = [
+  "io-util",
+  "macros",
+  "time",
+] }
 
 [dev-dependencies]
 tempfile = "3.20.0"
 
 [features]
 default = ["file", "mem"]
-
 file = ["dep:mmap-io"]
 mem = []

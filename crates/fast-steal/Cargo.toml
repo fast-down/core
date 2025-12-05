@@ -1,23 +1,23 @@
 [package]
 name = "fast-steal"
-description = "特别快的多线程任务调度器，支持超细颗粒度的任务窃取"
 version = "6.2.0"
-readme = "README.md"
-documentation = "https://docs.rs/fast-steal"
-keywords = ["parallel", "thread", "concurrency", "performance", "no-std"]
-categories = ["concurrency", "no-std"]
-edition.workspace = true
 authors.workspace = true
-license.workspace = true
-repository.workspace = true
+edition.workspace = true
+description = "特别快的多线程任务调度器，支持超细颗粒度的任务窃取"
+documentation = "https://docs.rs/fast-steal"
+readme = "README.md"
 homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["concurrency", "no-std", "parallel", "performance", "thread"]
+categories = ["concurrency", "no-std"]
 
 [dependencies]
 spin.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1.47.1", features = [
+tokio = { version = "1.47.1", default-features = false, features = [
   "macros",
   "rt-multi-thread",
   "sync",
-], default-features = false }
+] }

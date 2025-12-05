@@ -263,8 +263,7 @@ mod tests {
                 download_chunks: download_chunks.clone(),
                 min_chunk_size: NonZero::new(1).unwrap(),
             },
-        )
-        .await;
+        );
 
         let mut pull_progress: Vec<ProgressEntry> = Vec::new();
         let mut push_progress: Vec<ProgressEntry> = Vec::new();
@@ -314,8 +313,7 @@ mod tests {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
             },
-        )
-        .await;
+        );
 
         let mut pull_progress: Vec<ProgressEntry> = Vec::new();
         let mut push_progress: Vec<ProgressEntry> = Vec::new();
