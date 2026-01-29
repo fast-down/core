@@ -6,7 +6,7 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  test:
     name: Tests
     runs-on: ubuntu-latest
     strategy:
@@ -32,10 +32,10 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
       - name: Test
-        run: cargo test --verbose
+        run: cargo test --all-features --verbose
 
-      - name: Build
-        run: cargo build --verbose
+      - name: Test (no-default-features)
+        run: cargo test --no-default-features --verbose
 
   clippy:
     name: Clippy
@@ -58,29 +58,13 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
       - name: Run Clippy
-        run: cargo clippy --verbose -- -Dwarnings
+        run: cargo clippy --all-features --verbose -- -Dwarnings
 
-  check-minimal:
-    name: Check minimal versions
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Run Clippy (minimal-versions)
+        run: cargo clippy --all-features -Z minimal-versions --verbose -- -Dwarnings
 
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: nightly
-
-      - name: Configure sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.9
-      - name: Set Rust Caching Env
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
-          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-
-      - name: Check minimal versions
-        run: cargo check -Z minimal-versions
+      - name: Run Clippy (no-default-features)
+        run: cargo clippy --no-default-features --verbose -- -Dwarnings
 
   format:
     name: Format
