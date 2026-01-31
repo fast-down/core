@@ -10,13 +10,11 @@ repository = "https://github.com/fast-down/core"
 license = "MIT"
 
 [workspace.dependencies]
-bytes = { version = "1.10.1", default-features = false }
+bytes = "1.11.0"
+crossfire = "3.0.3"
 fast-pull = { path = "crates/fast-pull", version = "3.5.0" }
 fast-steal = { path = "crates/fast-steal", version = "6.2.0" }
-futures = { version = "0.3.31", default-features = false }
-kanal = "0.1.1"
-spin = { version = "0.10.0", default-features = false, features = [
-  "spin_mutex",
-] }
-thiserror = "2.0.12"
-url = "2.5.4"
+futures = "0.3.31"
+parking_lot = "0.12.5"
+thiserror = "2.0.18"
+url = "2.5.8"

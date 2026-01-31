@@ -14,24 +14,21 @@ categories = ["asynchronous", "concurrency", "no-std"]
 
 [dependencies]
 bytes.workspace = true
+crossfire.workspace = true
 fast-steal.workspace = true
 futures.workspace = true
-kanal.workspace = true
-mmap-io = { version = "0.9.0", features = [
-  "async",
-  "hugepages",
-], optional = true }
-spin.workspace = true
-tokio = { version = "1.47.1", default-features = false, features = [
+mmap-io = { version = "0.9.4", features = ["async", "hugepages"], optional = true }
+parking_lot.workspace = true
+tokio = { version = "1.49.0", default-features = false, features = [
   "io-util",
   "macros",
   "time",
 ] }
 
 [dev-dependencies]
-tempfile = "3.20.0"
+tempfile = "3.24.0"
 
 [features]
 default = ["file", "mem"]
-file = ["dep:mmap-io"]
+file = ["dep:mmap-io", "tokio/fs"]
 mem = []

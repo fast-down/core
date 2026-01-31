@@ -8,7 +8,7 @@ macro_rules! poll_ok {
             match $expr {
                 Ok(value) => break value,
                 Err(err) => {
-                    let _ = $tx.send($crate::Event::$err(err)).await;
+                    let _ = $tx.send($crate::Event::$err(err));
                 }
             }
             ::tokio::time::sleep($retry_gap).await;
@@ -23,7 +23,7 @@ macro_rules! poll_ok {
             match $expr {
                 Ok(value) => break value,
                 Err(err) => {
-                    let _ = $tx.send($crate::Event::$err($id, err)).await;
+                    let _ = $tx.send($crate::Event::$err($id, err));
                 }
             }
             ::tokio::time::sleep($retry_gap).await;

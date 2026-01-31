@@ -1,65 +1,176 @@
-use core::{
-    ops::Range,
-    sync::atomic::{AtomicU64, Ordering},
-};
+extern crate alloc;
+use alloc::sync::Arc;
+use core::{fmt, ops::Range, sync::atomic::Ordering};
+use portable_atomic::AtomicU128;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Task {
-    start: AtomicU64,
-    end: AtomicU64,
+    state: Arc<AtomicU128>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeError;
+
+impl fmt::Display for RangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Range invariant violated: start > end or overflow")
+    }
 }
 
 impl Task {
-    pub fn new(start: u64, end: u64) -> Self {
+    #[inline(always)]
+    fn pack(range: Range<u64>) -> u128 {
+        ((range.start as u128) << 64) | (range.end as u128)
+    }
+    #[inline(always)]
+    fn unpack(state: u128) -> Range<u64> {
+        (state >> 64) as u64..state as u64
+    }
+
+    pub fn new(range: Range<u64>) -> Self {
+        assert!(range.start <= range.end);
         Self {
-            start: AtomicU64::new(start),
-            end: AtomicU64::new(end),
+            state: Arc::new(AtomicU128::new(Self::pack(range))),
         }
     }
-
+    pub fn get(&self) -> Range<u64> {
+        let state = self.state.load(Ordering::Acquire);
+        Self::unpack(state)
+    }
+    pub fn set(&self, range: Range<u64>) {
+        assert!(range.start <= range.end);
+        self.state.store(Self::pack(range), Ordering::Release);
+    }
     pub fn start(&self) -> u64 {
-        self.start.load(Ordering::Acquire)
+        (self.state.load(Ordering::Acquire) >> 64) as u64
     }
-    pub fn set_start(&self, start: u64) {
-        self.start.store(start, Ordering::Release);
+    /// 当 start > end 时返回 RangeError
+    pub fn set_start(&self, start: u64) -> Result<(), RangeError> {
+        let mut old_state = self.state.load(Ordering::Acquire);
+        loop {
+            let mut range = Self::unpack(old_state);
+            range.start = start;
+            if range.start > range.end {
+                break Err(RangeError);
+            }
+            let new_state = Self::pack(range);
+            if old_state == new_state {
+                return Ok(());
+            }
+            match self.state.compare_exchange_weak(
+                old_state,
+                new_state,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break Ok(()),
+                Err(x) => old_state = x,
+            }
+        }
     }
-    pub fn fetch_add_start(&self, value: u64) -> u64 {
-        self.start.fetch_add(value, Ordering::AcqRel)
-    }
-    pub fn fetch_sub_start(&self, value: u64) -> u64 {
-        self.start.fetch_sub(value, Ordering::AcqRel)
+    /// 1. 当 start + value 溢出时返回 RangeError
+    /// 2. 当 start + value > end 时返回 RangeError
+    pub fn fetch_add_start(&self, value: u64) -> Result<u64, RangeError> {
+        let mut old_state = self.state.load(Ordering::Acquire);
+        loop {
+            let mut range = Self::unpack(old_state);
+            let old_start = range.start;
+            range.start = range.start.checked_add(value).ok_or(RangeError)?;
+            if range.start > range.end {
+                break Err(RangeError);
+            }
+            let new_state = Self::pack(range);
+            match self.state.compare_exchange_weak(
+                old_state,
+                new_state,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break Ok(old_start),
+                Err(x) => old_state = x,
+            }
+        }
     }
     pub fn end(&self) -> u64 {
-        self.end.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) as u64
     }
-    pub fn set_end(&self, end: u64) {
-        self.end.store(end, Ordering::Release);
+    /// 当 end < start 时返回 RangeError
+    pub fn set_end(&self, end: u64) -> Result<(), RangeError> {
+        let mut old_state = self.state.load(Ordering::Acquire);
+        loop {
+            let mut range = Self::unpack(old_state);
+            range.end = end;
+            if range.start > range.end {
+                break Err(RangeError);
+            }
+            let new_state = Self::pack(range);
+            if old_state == new_state {
+                return Ok(());
+            }
+            match self.state.compare_exchange_weak(
+                old_state,
+                new_state,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break Ok(()),
+                Err(x) => old_state = x,
+            }
+        }
     }
-    pub fn fetch_add_end(&self, value: u64) -> u64 {
-        self.end.fetch_add(value, Ordering::AcqRel)
+    /// 当 end + value 溢出时返回 RangeError
+    pub fn fetch_add_end(&self, value: u64) -> Result<u64, RangeError> {
+        let mut old_state = self.state.load(Ordering::Acquire);
+        loop {
+            let mut range = Self::unpack(old_state);
+            let old_end = range.end;
+            range.end = range.end.checked_add(value).ok_or(RangeError)?;
+            let new_state = Self::pack(range);
+            match self.state.compare_exchange_weak(
+                old_state,
+                new_state,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break Ok(old_end),
+                Err(x) => old_state = x,
+            }
+        }
     }
-    pub fn fetch_sub_end(&self, value: u64) -> u64 {
-        self.end.fetch_sub(value, Ordering::AcqRel)
-    }
-
     pub fn remain(&self) -> u64 {
-        let start = self.start();
-        let end = self.end();
-        end.saturating_sub(start)
+        let range = self.get();
+        range.end.saturating_sub(range.start)
     }
-
-    pub fn split_two(&self) -> (u64, u64) {
-        let start = self.start();
-        let end = self.end();
-        let mid = (start + end) / 2;
-        self.set_end(mid);
-        (mid, end)
+    /// 1. 当 start > end 时返回 RangeError
+    /// 2. 当 remain < 2 时返回 None 并且不会修改自己
+    pub fn split_two(&self) -> Result<Option<Range<u64>>, RangeError> {
+        let mut old_state = self.state.load(Ordering::Acquire);
+        loop {
+            let range = Self::unpack(old_state);
+            if range.start > range.end {
+                return Err(RangeError);
+            }
+            let mid = range.start + (range.end - range.start) / 2;
+            if mid == range.start {
+                return Ok(None);
+            }
+            let new_state = Self::pack(range.start..mid);
+            match self.state.compare_exchange_weak(
+                old_state,
+                new_state,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(Some(mid..range.end)),
+                Err(x) => old_state = x,
+            }
+        }
     }
 }
 
 impl PartialEq for Task {
     fn eq(&self, other: &Self) -> bool {
-        self.start() == other.start() && self.end() == other.end()
+        Arc::ptr_eq(&self.state, &other.state)
     }
 }
 impl Eq for Task {}
@@ -74,82 +185,60 @@ impl PartialOrd for Task {
     }
 }
 
-impl From<&(u64, u64)> for Task {
-    fn from(value: &(u64, u64)) -> Self {
-        Self::new(value.0, value.1)
-    }
-}
-
-impl From<&Range<u64>> for Task {
-    fn from(value: &Range<u64>) -> Self {
-        Self::new(value.start, value.end)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_new_task() {
-        let task = Task::new(10, 20);
+        let task = Task::new(10..20);
         assert_eq!(task.start(), 10);
         assert_eq!(task.end(), 20);
         assert_eq!(task.remain(), 10);
     }
 
     #[test]
-    fn test_from_tuple() {
-        let task: Task = (&(5, 15)).into();
-        assert_eq!(task.start(), 5);
-        assert_eq!(task.end(), 15);
-    }
-
-    #[test]
-    fn test_from_range() {
-        let range = 3..8;
-        let task: Task = (&range).into();
-        assert_eq!(task.start(), range.start);
-        assert_eq!(task.end(), range.end);
-    }
-
-    #[test]
     fn test_setters() {
-        let task = Task::new(0, 0);
-        task.set_start(7);
-        task.set_end(14);
+        let task = Task::new(0..0);
+        task.set_end(14).unwrap();
+        task.set_start(7).unwrap();
         assert_eq!(task.start(), 7);
         assert_eq!(task.end(), 14);
     }
 
     #[test]
     fn test_remain() {
-        let task = Task::new(10, 25);
+        let task = Task::new(10..25);
         assert_eq!(task.remain(), 15);
-
-        task.set_start(20);
+        task.set_start(20).unwrap();
         assert_eq!(task.remain(), 5);
     }
 
     #[test]
-    fn test_partial_eq() {
-        let task1 = Task::new(1, 10);
-        let task2 = Task::new(1, 10);
-        let task3 = Task::new(2, 10);
-        let task4 = Task::new(1, 11);
-
-        assert_eq!(task1, task2);
-        assert_ne!(task1, task3);
-        assert_ne!(task1, task4);
+    fn test_split_two() {
+        let task = Task::new(1..6); // 1, 2, 3, 4, 5
+        let range = task.split_two().unwrap().unwrap();
+        assert_eq!(task.start(), 1);
+        assert_eq!(task.end(), 3);
+        assert_eq!(range.start, 3);
+        assert_eq!(range.end, 6);
     }
 
     #[test]
-    fn test_split_two() {
-        let task = Task::new(1, 6); // 1, 2, 3, 4, 5
-        let (mid, end) = task.split_two();
+    fn test_split_empty() {
+        let task = Task::new(1..1);
+        let range = task.split_two().unwrap();
         assert_eq!(task.start(), 1);
-        assert_eq!(task.end(), 3);
-        assert_eq!(mid, 3);
-        assert_eq!(end, 6);
+        assert_eq!(task.end(), 1);
+        assert_eq!(range, None);
+    }
+
+    #[test]
+    fn test_split_one() {
+        let task = Task::new(1..2);
+        let range = task.split_two().unwrap();
+        assert_eq!(task.start(), 1);
+        assert_eq!(task.end(), 2);
+        assert_eq!(range, None);
     }
 }

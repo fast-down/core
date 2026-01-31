@@ -39,13 +39,13 @@
 //!
 //! impl Executor for TokioExecutor {
 //!     type Handle = TokioHandle;
-//!     fn execute(self: Arc<Self>, task: Arc<Task>, task_list: Arc<TaskList<Self>>) -> Self::Handle {
+//!     fn execute(self: Arc<Self>, task: Task, task_list: Arc<TaskList<Self>>) -> Self::Handle {
 //!         println!("execute");
 //!         let handle = tokio::spawn(async move {
 //!             loop {
 //!                 while task.start() < task.end() {
 //!                     let i = task.start();
-//!                     task.fetch_add_start(1);
+//!                     task.fetch_add_start(1).unwrap();
 //!                     let res = fib(i);
 //!                     println!("task: {i} = {res}");
 //!                     self.tx.send((i, res)).unwrap();

@@ -38,13 +38,13 @@ impl Handle for TokioHandle {
 
 impl Executor for TokioExecutor {
     type Handle = TokioHandle;
-    fn execute(self: Arc<Self>, task: Arc<Task>, task_list: Arc<TaskList<Self>>) -> Self::Handle {
+    fn execute(self: Arc<Self>, task: Task, task_list: Arc<TaskList<Self>>) -> Self::Handle {
         println!("execute");
         let handle = tokio::spawn(async move {
             loop {
                 while task.start() < task.end() {
                     let i = task.start();
-                    task.fetch_add_start(1);
+                    task.fetch_add_start(1).unwrap();
                     let res = fib(i);
                     println!("task: {i} = {res}");
                     self.tx.send((i, res)).unwrap();
@@ -79,9 +79,12 @@ fn fib_fast(n: u64) -> u64 {
 #[tokio::main]
 async fn main() {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let executor = TokioExecutor { tx };
+    let executor = Arc::new(TokioExecutor { tx });
     let pre_data = [1..20, 41..48];
-    let task_list = TaskList::run(NonZero::new(8).unwrap(), NonZero::new(1).unwrap(), &pre_data[..], executor);
+    let task_list = Arc::new(TaskList::run(&pre_data[..], executor));
+    task_list
+        .clone()
+        .set_threads(NonZero::new(8).unwrap(), NonZero::new(1).unwrap());
     let handles: Arc<[_]> = task_list.handles(|it| it.map(|h| h.clone()).collect());
     drop(task_list);
     for handle in handles.iter() {

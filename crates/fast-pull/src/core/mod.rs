@@ -2,8 +2,8 @@ extern crate alloc;
 use crate::{Event, handle::SharedHandle};
 use alloc::sync::{Arc, Weak};
 use core::num::{NonZeroU64, NonZeroUsize};
+use crossfire::{MAsyncRx, mpmc};
 use fast_steal::{Executor, Handle, TaskList};
-use kanal::AsyncReceiver;
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 
 pub mod handle;
@@ -13,14 +13,24 @@ pub mod multi;
 pub mod single;
 
 #[derive(Debug)]
-pub struct DownloadResult<E: Executor, PullError, PushError> {
-    pub event_chain: AsyncReceiver<Event<PullError, PushError>>,
+pub struct DownloadResult<E, PullError, PushError>
+where
+    E: Executor,
+    PullError: Send + Unpin + 'static,
+    PushError: Send + Unpin + 'static,
+{
+    pub event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
     handle: Arc<SharedHandle<()>>,
     abort_handles: Option<Arc<[AbortHandle]>>,
     task_list: Option<Weak<TaskList<E>>>,
 }
 
-impl<E: Executor, PullError, PushError> Clone for DownloadResult<E, PullError, PushError> {
+impl<E, PullError, PushError> Clone for DownloadResult<E, PullError, PushError>
+where
+    E: Executor,
+    PullError: Send + Unpin + 'static,
+    PushError: Send + Unpin + 'static,
+{
     fn clone(&self) -> Self {
         Self {
             event_chain: self.event_chain.clone(),
@@ -31,9 +41,14 @@ impl<E: Executor, PullError, PushError> Clone for DownloadResult<E, PullError, P
     }
 }
 
-impl<E: Executor, PullError, PushError> DownloadResult<E, PullError, PushError> {
+impl<E, PullError, PushError> DownloadResult<E, PullError, PushError>
+where
+    E: Executor,
+    PullError: Send + Unpin + 'static,
+    PushError: Send + Unpin + 'static,
+{
     pub fn new(
-        event_chain: AsyncReceiver<Event<PullError, PushError>>,
+        event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
         handle: JoinHandle<()>,
         abort_handles: Option<&[AbortHandle]>,
         task_list: Option<Weak<TaskList<E>>>,

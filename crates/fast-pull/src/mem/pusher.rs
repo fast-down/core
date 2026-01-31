@@ -1,21 +1,21 @@
 extern crate alloc;
 use crate::{RandPusher, SeqPusher};
 use alloc::{sync::Arc, vec::Vec};
-use spin::mutex::SpinMutex;
+use parking_lot::Mutex;
 
 #[derive(Debug, Default, Clone)]
 pub struct MemPusher {
-    pub receive: Arc<SpinMutex<Vec<u8>>>,
+    pub receive: Arc<Mutex<Vec<u8>>>,
 }
 impl MemPusher {
     pub fn new() -> Self {
         Self {
-            receive: Arc::new(SpinMutex::new(Vec::new())),
+            receive: Arc::new(Mutex::new(Vec::new())),
         }
     }
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            receive: Arc::new(SpinMutex::new(Vec::with_capacity(capacity))),
+            receive: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
         }
     }
 }

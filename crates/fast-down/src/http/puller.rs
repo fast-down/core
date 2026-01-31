@@ -5,7 +5,7 @@ use crate::http::{
 use bytes::Bytes;
 use fast_pull::{ProgressEntry, PullResult, PullStream, RandPuller, SeqPuller};
 use futures::Stream;
-use spin::mutex::SpinMutex;
+use parking_lot::Mutex;
 use std::{
     fmt::Debug,
     future::Future,
@@ -20,14 +20,14 @@ use url::Url;
 pub struct HttpPuller<Client: HttpClient> {
     pub(crate) client: Client,
     url: Url,
-    resp: Option<Arc<SpinMutex<Option<GetResponse<Client>>>>>,
+    resp: Option<Arc<Mutex<Option<GetResponse<Client>>>>>,
     file_id: FileId,
 }
 impl<Client: HttpClient> HttpPuller<Client> {
     pub fn new(
         url: Url,
         client: Client,
-        resp: Option<Arc<SpinMutex<Option<GetResponse<Client>>>>>,
+        resp: Option<Arc<Mutex<Option<GetResponse<Client>>>>>,
         file_id: FileId,
     ) -> Self {
         Self {
@@ -77,7 +77,7 @@ fn into_chunk_stream<Client: HttpClient + 'static>(
     }))
 }
 
-impl<Client: HttpClient + 'static> RandPuller for HttpPuller<Client> {
+impl<Client: HttpClient + Unpin + 'static> RandPuller for HttpPuller<Client> {
     type Error = HttpError<Client>;
     async fn pull(
         &mut self,
@@ -222,7 +222,7 @@ mod tests {
     use bytes::Bytes;
     use fast_pull::{ProgressEntry, RandPuller};
     use futures::{Future, TryStreamExt, task::Context};
-    use spin::mutex::SpinMutex;
+    use parking_lot::Mutex;
     use std::{pin::Pin, sync::Arc, task::Poll, time::Duration};
     use url::Url;
 
@@ -304,8 +304,7 @@ mod tests {
         let url = Url::parse("http://localhost").unwrap();
         let client = MockClient;
         let file_id = FileId::new(None, None);
-        let mut puller =
-            HttpPuller::new(url, client, Some(Arc::new(SpinMutex::new(None))), file_id);
+        let mut puller = HttpPuller::new(url, client, Some(Arc::new(Mutex::new(None))), file_id);
         let range = 0..7;
         let mut stream = puller.pull(&range).await.expect("Failed to create stream");
         println!("--- 开始测试 HttpPuller ---");

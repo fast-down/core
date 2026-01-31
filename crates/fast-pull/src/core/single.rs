@@ -4,6 +4,7 @@ use crate::{DownloadResult, Event, ProgressEntry, SeqPuller, SeqPusher};
 use alloc::sync::Arc;
 use bytes::Bytes;
 use core::time::Duration;
+use crossfire::{mpmc, spsc};
 use fast_steal::{Executor, Handle};
 use futures::TryStreamExt;
 
@@ -26,7 +27,7 @@ impl Executor for EmptyExecutor {
     type Handle = EmptyHandle;
     fn execute(
         self: Arc<Self>,
-        _: Arc<fast_steal::Task>,
+        _: fast_steal::Task,
         _: Arc<fast_steal::TaskList<Self>>,
     ) -> Self::Handle {
         EmptyHandle
@@ -42,8 +43,8 @@ where
     R: SeqPuller + 'static,
     W: SeqPusher + 'static,
 {
-    let (tx, event_chain) = kanal::unbounded_async();
-    let (tx_push, rx_push) = kanal::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);
+    let (tx, event_chain) = mpmc::unbounded_async();
+    let (tx_push, rx_push) = spsc::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     const ID: usize = 0;
     let push_handle = tokio::spawn(async move {
@@ -53,7 +54,7 @@ where
                 ID @ tx_clone => PushError,
                 options.retry_gap
             );
-            let _ = tx_clone.send(Event::PushProgress(ID, spin)).await;
+            let _ = tx_clone.send(Event::PushProgress(ID, spin));
         }
         poll_ok!(
             pusher.flush().await,
@@ -62,13 +63,13 @@ where
         );
     });
     let handle = tokio::spawn(async move {
-        let _ = tx.send(Event::Pulling(ID)).await;
+        let _ = tx.send(Event::Pulling(ID));
         let mut downloaded: u64 = 0;
         let mut stream = loop {
             match puller.pull().await {
                 Ok(t) => break t,
                 Err((e, retry_gap)) => {
-                    let _ = tx.send(Event::PullError(ID, e)).await;
+                    let _ = tx.send(Event::PullError(ID, e));
                     tokio::time::sleep(retry_gap.unwrap_or(options.retry_gap)).await;
                 }
             }
@@ -78,18 +79,18 @@ where
                 Ok(Some(chunk)) => {
                     let len = chunk.len() as u64;
                     let span = downloaded..(downloaded + len);
-                    let _ = tx.send(Event::PullProgress(ID, span.clone())).await;
+                    let _ = tx.send(Event::PullProgress(ID, span.clone()));
                     tx_push.send((span, chunk)).await.unwrap();
                     downloaded += len;
                 }
                 Ok(None) => break,
                 Err((e, retry_gap)) => {
-                    let _ = tx.send(Event::PullError(ID, e)).await;
+                    let _ = tx.send(Event::PullError(ID, e));
                     tokio::time::sleep(retry_gap.unwrap_or(options.retry_gap)).await
                 }
             }
         }
-        let _ = tx.send(Event::Finished(ID)).await;
+        let _ = tx.send(Event::Finished(ID));
     });
     DownloadResult::new(
         event_chain,

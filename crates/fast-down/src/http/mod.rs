@@ -15,20 +15,20 @@ pub trait HttpClient: Clone + Send + Sync + Unpin {
 }
 pub trait HttpRequestBuilder {
     type Response: HttpResponse;
-    type RequestError: Send + Debug;
+    type RequestError: Send + Debug + Unpin;
     fn send(
         self,
     ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send;
 }
 pub trait HttpResponse: Send + Unpin {
     type Headers: HttpHeaders;
-    type ChunkError: Send + Debug;
+    type ChunkError: Send + Debug + Unpin;
     fn headers(&self) -> &Self::Headers;
     fn url(&self) -> &Url;
     fn chunk(&mut self) -> impl Future<Output = Result<Option<Bytes>, Self::ChunkError>> + Send;
 }
 pub trait HttpHeaders {
-    type GetHeaderError: Send + Debug;
+    type GetHeaderError: Send + Debug + Unpin;
     fn get(&self, header: &str) -> Result<&str, Self::GetHeaderError>;
 }
 

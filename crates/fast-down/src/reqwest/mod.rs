@@ -117,6 +117,7 @@ mod tests {
     #[tokio::test]
     async fn test_redirect_and_content_range() {
         let mut server = mockito::Server::new_async().await;
+        let client = Client::builder().no_proxy().build().unwrap();
 
         let mock_redirect = server
             .mock("GET", "/redirect")
@@ -134,7 +135,6 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Client::new();
         let url = Url::parse(&format!("{}/redirect", server.url())).unwrap();
         let (url_info, _) = client.prefetch(url).await.expect("Request should succeed");
 
@@ -153,6 +153,7 @@ mod tests {
     #[tokio::test]
     async fn test_filename_sources() {
         let mut server = mockito::Server::new_async().await;
+        let client = Client::builder().no_proxy().build().unwrap();
 
         // Test with Content-Disposition header
         let mock1 = server
@@ -161,7 +162,7 @@ mod tests {
             .create_async()
             .await;
         let url = Url::parse(&format!("{}/test1", server.url())).unwrap();
-        let (url_info, _) = Client::new().prefetch(url).await.unwrap();
+        let (url_info, _) = client.prefetch(url).await.unwrap();
         assert_eq!(url_info.raw_name, "test.txt");
         mock1.assert_async().await;
 
@@ -175,7 +176,7 @@ mod tests {
             server.url()
         ))
         .unwrap();
-        let (url_info, _) = Client::new().prefetch(url).await.unwrap();
+        let (url_info, _) = client.prefetch(url).await.unwrap();
         assert_eq!(url_info.raw_name, "好好好.pdf");
         mock2.assert_async().await;
     }
@@ -183,13 +184,13 @@ mod tests {
     #[tokio::test]
     async fn test_error_handling() {
         let mut server = mockito::Server::new_async().await;
+        let client = Client::builder().no_proxy().build().unwrap();
         let mock1 = server
             .mock("GET", "/404")
             .with_status(404)
             .create_async()
             .await;
 
-        let client = Client::new();
         let url = Url::parse(&format!("{}/404", server.url())).unwrap();
         match client.prefetch(url).await {
             Ok(info) => unreachable!("404 status code should not success: {info:?}"),
@@ -215,6 +216,7 @@ mod tests {
     async fn test_concurrent_download() {
         let mock_data = build_mock_data(300 * 1024 * 1024);
         let mut server = mockito::Server::new_async().await;
+        let client = Client::builder().no_proxy().build().unwrap();
         let mock_body_clone = mock_data.clone();
         let _mock = server
             .mock("GET", "/concurrent")
@@ -246,7 +248,7 @@ mod tests {
             .await;
         let puller = HttpPuller::new(
             format!("{}/concurrent", server.url()).parse().unwrap(),
-            Client::new(),
+            client,
             None,
             FileId::empty(),
         );
@@ -291,6 +293,7 @@ mod tests {
     async fn test_sequential_download() {
         let mock_data = build_mock_data(300 * 1024 * 1024);
         let mut server = mockito::Server::new_async().await;
+        let client = Client::builder().no_proxy().build().unwrap();
         let _mock = server
             .mock("GET", "/sequential")
             .with_status(200)
@@ -299,7 +302,7 @@ mod tests {
             .await;
         let puller = HttpPuller::new(
             format!("{}/sequential", server.url()).parse().unwrap(),
-            Client::new(),
+            client,
             None,
             FileId::empty(),
         );
