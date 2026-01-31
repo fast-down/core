@@ -8,6 +8,9 @@ allow = [
   "MIT",
   "BSD-3-Clause",
   "Unicode-3.0",
+  "ISC",
+  "OpenSSL",
+  "CDLA-Permissive-2.0"
 ]
 confidence-threshold = 1.0
 
