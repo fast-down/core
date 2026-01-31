@@ -109,21 +109,18 @@ mod tests {
     use crate::{Executor, Handle, Task, TaskList};
     use core::num::NonZero;
     use std::{collections::HashMap, dbg, println, sync::Arc};
-    use tokio::{
-        sync::{Mutex, mpsc},
-        task::{AbortHandle, JoinHandle},
-    };
+    use tokio::{sync::mpsc, task::AbortHandle};
 
     pub struct TokioExecutor {
         tx: mpsc::UnboundedSender<(u64, u64)>,
     }
     #[derive(Clone)]
-    pub struct TokioHandle(Arc<Mutex<Option<JoinHandle<()>>>>, AbortHandle);
+    pub struct TokioHandle(AbortHandle);
 
     impl Handle for TokioHandle {
         type Output = ();
         fn abort(&mut self) -> Self::Output {
-            self.1.abort();
+            self.0.abort();
         }
     }
 
@@ -147,7 +144,7 @@ mod tests {
                 assert_eq!(task_list.remove(&task), 1);
             });
             let abort_handle = handle.abort_handle();
-            TokioHandle(Arc::new(Mutex::new(Some(handle))), abort_handle)
+            TokioHandle(abort_handle)
         }
     }
 
@@ -173,14 +170,7 @@ mod tests {
         let executor = Arc::new(TokioExecutor { tx });
         let pre_data = [1..20, 41..48];
         let task_list = Arc::new(TaskList::run(&pre_data[..], executor));
-        task_list
-            .clone()
-            .set_threads(NonZero::new(8).unwrap(), NonZero::new(1).unwrap());
-        let handles: Arc<[_]> = task_list.handles(|it| it.map(|h| h.clone()).collect());
-        drop(task_list);
-        for handle in handles.iter() {
-            handle.0.lock().await.take().unwrap().await.unwrap();
-        }
+        task_list.set_threads(NonZero::new(8).unwrap(), NonZero::new(1).unwrap());
         let mut data = HashMap::new();
         while let Some((i, res)) = rx.recv().await {
             println!("main: {i} = {res}");

@@ -39,15 +39,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
-name = "aria2-gid"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fead9c1911c9aa14db42821cad08d41d64211ff57299fb52e98bfe5a6dee6db"
-dependencies = [
- "rand",
-]
-
-[[package]]
 name = "assert-json-diff"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -338,15 +329,12 @@ dependencies = [
 name = "fast-down"
 version = "3.5.1"
 dependencies = [
- "aria2-gid",
  "bytes",
  "content_disposition",
  "crossfire",
  "fast-pull",
  "futures",
  "httpdate",
- "inherit-config",
- "inherit-config-derive",
  "mockito",
  "parking_lot",
  "reqwest",
@@ -784,24 +772,6 @@ checksum = "7714e70437a7dc3ac8eb7e6f8df75fd8eb422675fc7678aff7364301092b1017"
 dependencies = [
  "equivalent",
  "hashbrown",
-]
-
-[[package]]
-name = "inherit-config"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c41c664532a43a39a0e8033ae92c4f2b0f7d72bae9796de801bf26227e43921"
-
-[[package]]
-name = "inherit-config-derive"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43d202523b008c1aaf7b5ece32af1c707d77babdc1c261abe4cc0aee32a3a665"
-dependencies = [
- "inherit-config",
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
