@@ -47,7 +47,7 @@ tokio = { version = "1.49.0", default-features = false, features = [
 ] }
 
 [features]
-default = ["reqwest", "sanitize-filename"]
+default = ["downloader", "reqwest", "sanitize-filename"]
 downloader = [
   "dep:aria2-gid",
   "dep:crossfire",

@@ -2,8 +2,8 @@ use crate::{
     FileId, ProgressEntry, PullResult, PullStream, RandPuller, SeqPuller,
     http::{HttpError, HttpPuller},
 };
+use parking_lot::Mutex;
 use reqwest::{Client, ClientBuilder, Proxy, Response, header::HeaderMap};
-use spin::mutex::SpinMutex;
 use std::sync::Arc;
 use url::Url;
 
@@ -39,7 +39,7 @@ pub struct FastDownPuller {
     accept_invalid_certs: bool,
     accept_invalid_hostnames: bool,
     file_id: FileId,
-    resp: Option<Arc<SpinMutex<Option<Response>>>>,
+    resp: Option<Arc<Mutex<Option<Response>>>>,
 }
 
 pub struct FastDownPullerOptions<'a> {
@@ -50,7 +50,7 @@ pub struct FastDownPullerOptions<'a> {
     pub accept_invalid_certs: bool,
     pub accept_invalid_hostnames: bool,
     pub file_id: FileId,
-    pub resp: Option<Arc<SpinMutex<Option<Response>>>>,
+    pub resp: Option<Arc<Mutex<Option<Response>>>>,
 }
 
 impl FastDownPuller {

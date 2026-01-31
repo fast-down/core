@@ -7,23 +7,23 @@ pub mod unique_path;
 
 use crate::downloader::{config::DownloadConfig, entry::DownloadEntry};
 use aria2_gid::Gid;
-use spin::mutex::SpinMutex;
+use parking_lot::Mutex;
 use std::sync::Arc;
 
 pub struct Downloader {
-    list: Arc<SpinMutex<Vec<DownloadEntry>>>,
-    parallelism: Arc<SpinMutex<usize>>,
-    pub config: Arc<SpinMutex<DownloadConfig>>,
+    list: Arc<Mutex<Vec<DownloadEntry>>>,
+    parallelism: Arc<Mutex<usize>>,
+    pub config: Arc<Mutex<DownloadConfig>>,
 }
 
 impl Downloader {
-    pub fn new(config: Arc<SpinMutex<DownloadConfig>>) -> Self {
+    pub fn new(config: Arc<Mutex<DownloadConfig>>) -> Self {
         Self::with_capacity(config, 0)
     }
-    pub fn with_capacity(config: Arc<SpinMutex<DownloadConfig>>, capacity: usize) -> Self {
+    pub fn with_capacity(config: Arc<Mutex<DownloadConfig>>, capacity: usize) -> Self {
         Self {
-            list: Arc::new(SpinMutex::new(Vec::with_capacity(capacity))),
-            parallelism: Arc::new(SpinMutex::new(0)),
+            list: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
+            parallelism: Arc::new(Mutex::new(0)),
             config,
         }
     }

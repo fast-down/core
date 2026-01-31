@@ -8,9 +8,8 @@ use crate::{
 };
 use aria2_gid::Gid;
 use inherit_config::InheritAble;
-use kanal::{AsyncReceiver, AsyncSender};
+use parking_lot::Mutex;
 use reqwest::Client;
-use spin::mutex::SpinMutex;
 use std::{fmt::Debug, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{fs::OpenOptions, task::JoinHandle};
 use url::Url;
@@ -29,7 +28,7 @@ pub enum DownloadEvent {
 pub struct DownloadEntryInner {
     pub url: Url,
     pub config: DownloadConfig,
-    pub global_config: Arc<SpinMutex<DownloadConfig>>,
+    pub global_config: Arc<Mutex<DownloadConfig>>,
     pub info: Option<Arc<UrlInfo>>,
     pub path: Option<PathBuf>,
     pub event_chain: AsyncReceiver<DownloadEvent>,
@@ -63,20 +62,16 @@ impl DownloadEntryInner {
 #[derive(Debug, Clone)]
 pub struct DownloadEntry {
     pub gid: Gid,
-    pub inner: Arc<SpinMutex<DownloadEntryInner>>,
-    pub push_progress: Arc<SpinMutex<Vec<ProgressEntry>>>,
+    pub inner: Arc<Mutex<DownloadEntryInner>>,
+    pub push_progress: Arc<Mutex<Vec<ProgressEntry>>>,
     pub add_options: AddOptions,
 }
 impl DownloadEntry {
-    pub fn new(
-        gid: Gid,
-        option: AddOptions,
-        global_config: Arc<SpinMutex<DownloadConfig>>,
-    ) -> Self {
+    pub fn new(gid: Gid, option: AddOptions, global_config: Arc<Mutex<DownloadConfig>>) -> Self {
         let (tx, event_chain) = kanal::unbounded_async();
         Self {
             gid,
-            inner: Arc::new(SpinMutex::new(DownloadEntryInner {
+            inner: Arc::new(Mutex::new(DownloadEntryInner {
                 url: option.url.clone(),
                 config: option.config.clone(),
                 global_config,
@@ -87,7 +82,7 @@ impl DownloadEntry {
                 download_result: None,
                 handle: None,
             })),
-            push_progress: Arc::new(SpinMutex::new(Vec::new())),
+            push_progress: Arc::new(Mutex::new(Vec::new())),
             add_options: option,
         }
     }
@@ -150,7 +145,7 @@ impl DownloadEntry {
                     accept_invalid_certs: config.accept_invalid_certs.unwrap(),
                     accept_invalid_hostnames: config.accept_invalid_hostnames.unwrap(),
                     file_id: info.file_id.clone(),
-                    resp: Some(Arc::new(SpinMutex::new(Some(resp)))),
+                    resp: Some(Arc::new(Mutex::new(Some(resp)))),
                 }),
                 tx,
                 DownloadEvent::CreatePullerError
