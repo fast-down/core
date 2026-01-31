@@ -1,11 +1,10 @@
 extern crate alloc;
 use super::macros::poll_ok;
 use crate::{DownloadResult, Event, ProgressEntry, SeqPuller, SeqPusher};
-use alloc::sync::Arc;
 use bytes::Bytes;
 use core::time::Duration;
 use crossfire::{mpmc, spsc};
-use fast_steal::{Executor, Handle};
+use fast_steal::{Executor, Handle, TaskQueue};
 use futures::TryStreamExt;
 
 #[derive(Debug, Clone)]
@@ -20,40 +19,36 @@ impl Handle for EmptyHandle {
     type Output = ();
     fn abort(&mut self) -> Self::Output {}
 }
-
 #[derive(Debug, Clone)]
 pub struct EmptyExecutor;
 impl Executor for EmptyExecutor {
     type Handle = EmptyHandle;
-    fn execute(
-        self: Arc<Self>,
-        _: fast_steal::Task,
-        _: Arc<fast_steal::TaskList<Self>>,
-    ) -> Self::Handle {
+    fn execute(&self, _: fast_steal::Task, _: TaskQueue<Self::Handle>) -> Self::Handle {
         EmptyHandle
     }
 }
 
-pub fn download_single<R, W>(
+pub fn download_single<R: SeqPuller, W: SeqPusher>(
     mut puller: R,
     mut pusher: W,
     options: DownloadOptions,
-) -> DownloadResult<EmptyExecutor, R::Error, W::Error>
-where
-    R: SeqPuller + 'static,
-    W: SeqPusher + 'static,
-{
+) -> DownloadResult<EmptyExecutor, R::Error, W::Error> {
     let (tx, event_chain) = mpmc::unbounded_async();
     let (tx_push, rx_push) = spsc::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     const ID: usize = 0;
     let push_handle = tokio::spawn(async move {
-        while let Ok((spin, data)) = rx_push.recv().await {
-            poll_ok!(
-                pusher.push(&data).await,
-                ID @ tx_clone => PushError,
-                options.retry_gap
-            );
+        while let Ok((spin, mut data)) = rx_push.recv().await {
+            loop {
+                match pusher.push(data).await {
+                    Ok(_) => break,
+                    Err((err, bytes)) => {
+                        data = bytes;
+                        let _ = tx_clone.send(Event::PushError(ID, err));
+                    }
+                }
+                tokio::time::sleep(options.retry_gap).await;
+            }
             let _ = tx_clone.send(Event::PushProgress(ID, spin));
         }
         poll_ok!(

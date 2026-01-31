@@ -1,52 +1,68 @@
 extern crate alloc;
-use crate::{Executor, Task, executor::Handle};
-use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
+use crate::{Executor, Handle, Task};
+use alloc::{
+    collections::vec_deque::VecDeque,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
 use parking_lot::Mutex;
 
-pub struct TaskList<E: Executor> {
-    queue: Mutex<TaskQueue<E::Handle>>,
-    executor: Arc<E>,
+#[derive(Debug)]
+pub struct TaskQueue<H: Handle> {
+    inner: Arc<Mutex<TaskQueueInner<H>>>,
 }
-
-struct TaskQueue<H: Handle> {
+impl<H: Handle> Clone for TaskQueue<H> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+#[derive(Debug)]
+struct TaskQueueInner<H: Handle> {
     running: VecDeque<(Task, H)>,
     waiting: VecDeque<Task>,
 }
-
-impl<E: Executor> TaskList<E> {
-    pub fn run(tasks: &[Range<u64>], executor: Arc<E>) -> Self {
+impl<H: Handle> TaskQueue<H> {
+    pub fn new(tasks: &[Range<u64>]) -> Self {
         Self {
-            queue: Mutex::new(TaskQueue {
+            inner: Arc::new(Mutex::new(TaskQueueInner {
                 running: VecDeque::with_capacity(tasks.len()),
                 waiting: tasks.iter().cloned().map(Task::new).collect(),
-            }),
-            executor,
+            })),
         }
     }
-
-    pub fn remove(&self, task: &Task) -> usize {
-        let mut guard = self.queue.lock();
+    /// 仅供 Worker 线程在任务完成后调用
+    pub fn finish_work(&self, task: &Task) -> usize {
+        let mut guard = self.inner.lock();
+        let len = guard.running.len();
+        guard.running.retain(|(t, _)| t != task);
+        len - guard.running.len()
+    }
+    /// 用于从外部取消任务
+    pub fn cancel(&self, task: &Task) -> usize {
+        let mut guard = self.inner.lock();
         let len = guard.running.len() + guard.waiting.len();
         guard.running.retain(|(t, _)| t != task);
         guard.waiting.retain(|t| t != task);
         len - guard.running.len() - guard.waiting.len()
     }
-
     pub fn add(&self, task: Task) {
-        let mut guard = self.queue.lock();
+        let mut guard = self.inner.lock();
         guard.waiting.push_back(task);
     }
-
     pub fn steal(&self, task: &Task, min_chunk_size: NonZeroU64) -> bool {
         let min_chunk_size = min_chunk_size.get();
-        let mut guard = self.queue.lock();
-        if let Some(new_task) = guard.waiting.pop_front() {
-            task.set(new_task.get());
-            return true;
+        let mut guard = self.inner.lock();
+        while let Some(new_task) = guard.waiting.pop_front() {
+            if let Some(range) = new_task.take() {
+                task.set(range);
+                return true;
+            }
         }
         if let Some(steal_task) = guard.running.iter().map(|w| &w.0).max()
             && steal_task.remain() >= min_chunk_size * 2
@@ -58,18 +74,47 @@ impl<E: Executor> TaskList<E> {
             false
         }
     }
+}
 
-    pub fn set_threads(self: Arc<Self>, threads: NonZeroUsize, min_chunk_size: NonZeroU64) {
+#[derive(Debug)]
+pub struct TaskList<E: Executor> {
+    queue: TaskQueue<E::Handle>,
+    executor: Weak<E>,
+}
+impl<E: Executor> Clone for TaskList<E> {
+    fn clone(&self) -> Self {
+        Self {
+            queue: self.queue.clone(),
+            executor: self.executor.clone(),
+        }
+    }
+}
+
+impl<E: Executor> TaskList<E> {
+    pub fn new(tasks: &[Range<u64>], executor: Weak<E>) -> Self {
+        Self {
+            queue: TaskQueue::new(tasks),
+            executor,
+        }
+    }
+    pub fn add(&self, task: Task) {
+        self.queue.add(task)
+    }
+    pub fn cancel(&self, task: &Task) -> usize {
+        self.queue.cancel(task)
+    }
+    pub fn set_threads(&self, threads: NonZeroUsize, min_chunk_size: NonZeroU64) -> Option<()> {
         let threads = threads.get();
         let min_chunk_size = min_chunk_size.get();
-        let mut guard = self.queue.lock();
+        let mut guard = self.queue.inner.lock();
         let len = guard.running.len();
         if len < threads {
+            let executor = self.executor.upgrade()?;
             let need = (threads - len).min(guard.waiting.len());
             let mut temp = Vec::with_capacity(need);
             let iter = guard.waiting.drain(..need);
             for task in iter {
-                let handle = self.executor.clone().execute(task.clone(), self.clone());
+                let handle = executor.execute(task.clone(), self.queue.clone());
                 temp.push((task, handle));
             }
             guard.running.extend(temp);
@@ -79,7 +124,7 @@ impl<E: Executor> TaskList<E> {
                 && let Ok(Some(range)) = steal_task.split_two()
             {
                 let task = Task::new(range);
-                let handle = self.executor.clone().execute(task.clone(), self.clone());
+                let handle = executor.execute(task.clone(), self.queue.clone());
                 guard.running.push_back((task, handle));
             }
         } else if len > threads {
@@ -91,13 +136,13 @@ impl<E: Executor> TaskList<E> {
             }
             guard.waiting.extend(temp);
         }
+        Some(())
     }
-
     pub fn handles<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut dyn Iterator<Item = &mut E::Handle>) -> R,
     {
-        let mut guard = self.queue.lock();
+        let mut guard = self.queue.inner.lock();
         let mut iter = guard.running.iter_mut().map(|w| &mut w.1);
         f(&mut iter)
     }
@@ -106,7 +151,7 @@ impl<E: Executor> TaskList<E> {
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use crate::{Executor, Handle, Task, TaskList};
+    use crate::{Executor, Handle, Task, TaskList, TaskQueue};
     use core::num::NonZero;
     use std::{collections::HashMap, dbg, println, sync::Arc};
     use tokio::{sync::mpsc, task::AbortHandle};
@@ -126,8 +171,9 @@ mod tests {
 
     impl Executor for TokioExecutor {
         type Handle = TokioHandle;
-        fn execute(self: Arc<Self>, task: Task, task_list: Arc<TaskList<Self>>) -> Self::Handle {
+        fn execute(&self, task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
             println!("execute");
+            let tx = self.tx.clone();
             let handle = tokio::spawn(async move {
                 loop {
                     while task.start() < task.end() {
@@ -135,13 +181,13 @@ mod tests {
                         task.fetch_add_start(1).unwrap();
                         let res = fib(i);
                         println!("task: {i} = {res}");
-                        self.tx.send((i, res)).unwrap();
+                        tx.send((i, res)).unwrap();
                     }
-                    if !task_list.steal(&task, NonZero::new(1).unwrap()) {
+                    if !task_queue.steal(&task, NonZero::new(1).unwrap()) {
                         break;
                     }
                 }
-                assert_eq!(task_list.remove(&task), 1);
+                assert_eq!(task_queue.finish_work(&task), 1);
             });
             let abort_handle = handle.abort_handle();
             TokioHandle(abort_handle)
@@ -169,8 +215,9 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let executor = Arc::new(TokioExecutor { tx });
         let pre_data = [1..20, 41..48];
-        let task_list = Arc::new(TaskList::run(&pre_data[..], executor));
+        let task_list = TaskList::new(&pre_data[..], Arc::downgrade(&executor));
         task_list.set_threads(NonZero::new(8).unwrap(), NonZero::new(1).unwrap());
+        drop(executor);
         let mut data = HashMap::new();
         while let Some((i, res)) = rx.recv().await {
             println!("main: {i} = {res}");

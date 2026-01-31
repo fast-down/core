@@ -16,7 +16,7 @@
 4. 测试完全覆盖，保证库的稳定性和可靠性
 
 ```rust
-use fast_steal::{Executor, Handle, Task, TaskList};
+use fast_steal::{Executor, Handle, Task, TaskList, TaskQueue};
 use std::{collections::HashMap, sync::Arc, num::NonZero};
 use tokio::{
     sync::mpsc,
@@ -38,8 +38,9 @@ impl Handle for TokioHandle {
 
 impl Executor for TokioExecutor {
     type Handle = TokioHandle;
-    fn execute(self: Arc<Self>, task: Task, task_list: Arc<TaskList<Self>>) -> Self::Handle {
+    fn execute(&self, task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
         println!("execute");
+        let tx = self.tx.clone();
         let handle = tokio::spawn(async move {
             loop {
                 while task.start() < task.end() {
@@ -47,13 +48,13 @@ impl Executor for TokioExecutor {
                     task.fetch_add_start(1).unwrap();
                     let res = fib(i);
                     println!("task: {i} = {res}");
-                    self.tx.send((i, res)).unwrap();
+                    tx.send((i, res)).unwrap();
                 }
-                if !task_list.steal(&task, NonZero::new(1).unwrap()) {
+                if !task_queue.steal(&task, NonZero::new(1).unwrap()) {
                     break;
                 }
             }
-            assert_eq!(task_list.remove(&task), 1);
+            assert_eq!(task_queue.finish_work(&task), 1);
         });
         let abort_handle = handle.abort_handle();
         TokioHandle(abort_handle)
@@ -81,8 +82,9 @@ async fn main() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let executor = Arc::new(TokioExecutor { tx });
     let pre_data = [1..20, 41..48];
-    let task_list = Arc::new(TaskList::run(&pre_data[..], executor));
+    let task_list = TaskList::new(&pre_data[..], Arc::downgrade(&executor));
     task_list.set_threads(NonZero::new(8).unwrap(), NonZero::new(1).unwrap());
+    drop(executor);
     let mut data = HashMap::new();
     while let Some((i, res)) = rx.recv().await {
         println!("main: {i} = {res}");

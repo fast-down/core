@@ -166,6 +166,26 @@ impl Task {
             }
         }
     }
+
+    pub fn take(&self) -> Option<Range<u64>> {
+        let mut old_state = self.state.load(Ordering::Acquire);
+        loop {
+            let range = Self::unpack(old_state);
+            if range.start == range.end {
+                return None;
+            }
+            let new_state = Self::pack(range.start..range.start);
+            match self.state.compare_exchange_weak(
+                old_state,
+                new_state,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(range),
+                Err(x) => old_state = x,
+            }
+        }
+    }
 }
 
 impl PartialEq for Task {

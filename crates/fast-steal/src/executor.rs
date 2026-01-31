@@ -1,10 +1,8 @@
-extern crate alloc;
-use crate::{Task, TaskList};
-use alloc::sync::Arc;
+use crate::{Task, TaskQueue};
 
-pub trait Executor: Sized {
+pub trait Executor {
     type Handle: Handle;
-    fn execute(self: Arc<Self>, task: Task, task_list: Arc<TaskList<Self>>) -> Self::Handle;
+    fn execute(&self, task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle;
 }
 
 pub trait Handle {

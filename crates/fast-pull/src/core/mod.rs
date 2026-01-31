@@ -1,6 +1,6 @@
 extern crate alloc;
 use crate::{Event, handle::SharedHandle};
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use core::num::{NonZeroU64, NonZeroUsize};
 use crossfire::{MAsyncRx, mpmc};
 use fast_steal::{Executor, Handle, TaskList};
@@ -12,7 +12,6 @@ pub mod mock;
 pub mod multi;
 pub mod single;
 
-#[derive(Debug)]
 pub struct DownloadResult<E, PullError, PushError>
 where
     E: Executor,
@@ -22,7 +21,7 @@ where
     pub event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
     handle: Arc<SharedHandle<()>>,
     abort_handles: Option<Arc<[AbortHandle]>>,
-    task_list: Option<Weak<TaskList<E>>>,
+    task_list: Option<TaskList<E>>,
 }
 
 impl<E, PullError, PushError> Clone for DownloadResult<E, PullError, PushError>
@@ -51,7 +50,7 @@ where
         event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
         handle: JoinHandle<()>,
         abort_handles: Option<&[AbortHandle]>,
-        task_list: Option<Weak<TaskList<E>>>,
+        task_list: Option<TaskList<E>>,
     ) -> Self {
         Self {
             event_chain,
@@ -71,9 +70,7 @@ where
                 handle.abort();
             }
         }
-        if let Some(task_list) = &self.task_list
-            && let Some(task_list) = task_list.upgrade()
-        {
+        if let Some(task_list) = &self.task_list {
             task_list.handles(|iter| {
                 for handle in iter {
                     handle.abort();
@@ -83,9 +80,7 @@ where
     }
 
     pub fn set_threads(&self, threads: NonZeroUsize, min_chunk_size: NonZeroU64) {
-        if let Some(task_list) = &self.task_list
-            && let Some(task_list) = task_list.upgrade()
-        {
+        if let Some(task_list) = &self.task_list {
             task_list.set_threads(threads, min_chunk_size);
         }
     }

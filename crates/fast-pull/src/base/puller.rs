@@ -13,7 +13,7 @@ impl<E, T> PullStream<E> for T where
 }
 pub type PullResult<T, E> = Result<T, (E, Option<Duration>)>;
 
-pub trait RandPuller: Send + Clone {
+pub trait RandPuller: Send + Sync + Clone + 'static {
     type Error: Send + Unpin + 'static;
     fn pull(
         &mut self,
@@ -21,7 +21,7 @@ pub trait RandPuller: Send + Clone {
     ) -> impl Future<Output = PullResult<impl PullStream<Self::Error>, Self::Error>> + Send;
 }
 
-pub trait SeqPuller: Send {
+pub trait SeqPuller: Send + 'static {
     type Error: Send + Unpin + 'static;
     fn pull(
         &mut self,

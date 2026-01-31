@@ -1,5 +1,6 @@
 extern crate std;
 use crate::{ProgressEntry, RandPusher, Total};
+use bytes::Bytes;
 use mmap_io::{MemoryMappedFile, MmapIoError, MmapMode, flush::FlushPolicy};
 use std::path::Path;
 use tokio::fs::{self, OpenOptions};
@@ -7,15 +8,9 @@ use tokio::fs::{self, OpenOptions};
 #[derive(Debug)]
 pub struct MmapFilePusher {
     mmap: MemoryMappedFile,
-    downloaded: usize,
-    buffer_size: usize,
 }
 impl MmapFilePusher {
-    pub async fn new(
-        path: impl AsRef<Path>,
-        size: u64,
-        buffer_size: usize,
-    ) -> Result<Self, MmapIoError> {
+    pub async fn new(path: impl AsRef<Path>, size: u64) -> Result<Self, MmapIoError> {
         let mmap_builder = MemoryMappedFile::builder(&path)
             .mode(MmapMode::ReadWrite)
             .huge_pages(true)
@@ -32,23 +27,21 @@ impl MmapFilePusher {
             } else {
                 mmap_builder.size(size).create()
             }?,
-            downloaded: 0,
-            buffer_size,
         })
     }
 }
 impl RandPusher for MmapFilePusher {
     type Error = MmapIoError;
-    async fn push(&mut self, range: ProgressEntry, bytes: &[u8]) -> Result<(), Self::Error> {
-        self.mmap
-            .as_slice_mut(range.start, range.total())?
-            .as_mut()
-            .copy_from_slice(bytes);
-        self.downloaded += bytes.len();
-        if self.downloaded >= self.buffer_size {
-            self.mmap.flush_async().await?;
-            self.downloaded = 0;
-        }
+    async fn push(
+        &mut self,
+        range: ProgressEntry,
+        bytes: Bytes,
+    ) -> Result<(), (Self::Error, Bytes)> {
+        let mut slice = match self.mmap.as_slice_mut(range.start, range.total()) {
+            Ok(s) => s,
+            Err(e) => return Err((e, bytes)),
+        };
+        slice.as_mut().copy_from_slice(&bytes);
         Ok(())
     }
     async fn flush(&mut self) -> Result<(), Self::Error> {
@@ -71,14 +64,12 @@ mod tests {
         let file_path = temp_file.path();
 
         // 初始化 RandFilePusher，假设文件大小为 10 字节
-        let mut pusher = MmapFilePusher::new(file_path, 10, 8 * 1024 * 1024)
-            .await
-            .unwrap();
+        let mut pusher = MmapFilePusher::new(file_path, 10).await.unwrap();
 
         // 写入数据
         let data = b"234";
         let range = 2..5;
-        pusher.push(range, &data[..]).await.unwrap();
+        pusher.push(range, data[..].into()).await.unwrap();
         pusher.flush().await.unwrap();
 
         // 验证文件内容

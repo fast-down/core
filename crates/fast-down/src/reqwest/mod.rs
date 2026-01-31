@@ -59,10 +59,8 @@ impl HttpResponse for Response {
     fn url(&self) -> &Url {
         self.url()
     }
-    fn chunk(
-        &mut self,
-    ) -> impl Future<Output = Result<Option<bytes::Bytes>, Self::ChunkError>> + Send {
-        self.chunk()
+    async fn chunk(&mut self) -> Result<Option<bytes::Bytes>, Self::ChunkError> {
+        self.chunk().await
     }
 }
 
@@ -250,7 +248,7 @@ mod tests {
             format!("{}/concurrent", server.url()).parse().unwrap(),
             client,
             None,
-            FileId::empty(),
+            FileId::default(),
         );
         let pusher = MemPusher::with_capacity(mock_data.len());
         #[allow(clippy::single_range_in_vec_init)]
@@ -304,7 +302,7 @@ mod tests {
             format!("{}/sequential", server.url()).parse().unwrap(),
             client,
             None,
-            FileId::empty(),
+            FileId::default(),
         );
         let pusher = MemPusher::with_capacity(mock_data.len());
         #[allow(clippy::single_range_in_vec_init)]

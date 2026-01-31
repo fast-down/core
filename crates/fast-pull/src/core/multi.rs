@@ -9,7 +9,7 @@ use core::{
     time::Duration,
 };
 use crossfire::{MAsyncTx, MTx, mpmc, mpsc};
-use fast_steal::{Executor, Handle, Task, TaskList};
+use fast_steal::{Executor, Handle, Task, TaskList, TaskQueue};
 use futures::TryStreamExt;
 use tokio::task::AbortHandle;
 
@@ -22,26 +22,27 @@ pub struct DownloadOptions {
     pub min_chunk_size: NonZeroU64,
 }
 
-pub fn download_multi<R, W>(
+pub fn download_multi<R: RandPuller, W: RandPusher>(
     puller: R,
     mut pusher: W,
     options: DownloadOptions,
-) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error>
-where
-    R: RandPuller + 'static + Sync,
-    W: RandPusher + 'static,
-{
+) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     let (tx, event_chain) = mpmc::unbounded_async();
     let (tx_push, rx_push) =
         mpsc::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     let push_handle = tokio::spawn(async move {
-        while let Ok((id, spin, data)) = rx_push.recv().await {
-            poll_ok!(
-                pusher.push(spin.clone(), &data).await,
-                id @ tx_clone => PushError,
-                options.retry_gap
-            );
+        while let Ok((id, spin, mut data)) = rx_push.recv().await {
+            loop {
+                match pusher.push(spin.clone(), data).await {
+                    Ok(_) => break,
+                    Err((err, bytes)) => {
+                        data = bytes;
+                        let _ = tx_clone.send(Event::PushError(id, err));
+                    }
+                }
+                tokio::time::sleep(options.retry_gap).await;
+            }
             let _ = tx_clone.send(Event::PushProgress(id, spin));
         }
         poll_ok!(
@@ -55,19 +56,12 @@ where
         tx_push,
         puller,
         retry_gap: options.retry_gap,
-        id: Arc::new(AtomicUsize::new(0)),
+        id: AtomicUsize::new(0),
         min_chunk_size: options.min_chunk_size,
     });
-    let task_list = Arc::new(TaskList::run(&options.download_chunks[..], executor));
-    task_list
-        .clone()
-        .set_threads(options.concurrent, options.min_chunk_size);
-    DownloadResult::new(
-        event_chain,
-        push_handle,
-        None,
-        Some(Arc::downgrade(&task_list)),
-    )
+    let task_list = TaskList::new(&options.download_chunks[..], Arc::downgrade(&executor));
+    task_list.set_threads(options.concurrent, options.min_chunk_size);
+    DownloadResult::new(event_chain, push_handle, None, Some(task_list))
 }
 
 #[derive(Clone)]
@@ -81,43 +75,47 @@ impl Handle for TokioHandle {
 #[derive(Debug)]
 pub struct TokioExecutor<R, WE>
 where
-    R: RandPuller + 'static,
+    R: RandPuller,
     WE: Send + Unpin + 'static,
 {
     tx: MTx<mpmc::List<Event<R::Error, WE>>>,
     tx_push: MAsyncTx<mpsc::Array<(WorkerId, ProgressEntry, Bytes)>>,
     puller: R,
     retry_gap: Duration,
-    id: Arc<AtomicUsize>,
+    id: AtomicUsize,
     min_chunk_size: NonZeroU64,
 }
 impl<R, WE> Executor for TokioExecutor<R, WE>
 where
-    R: RandPuller + 'static + Sync,
+    R: RandPuller,
     WE: Send + Unpin + 'static,
 {
     type Handle = TokioHandle;
-    fn execute(self: Arc<Self>, task: Task, task_list: Arc<TaskList<Self>>) -> Self::Handle {
+    fn execute(&self, task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
         let id = self.id.fetch_add(1, Ordering::SeqCst);
         let mut puller = self.puller.clone();
+        let min_chunk_size = self.min_chunk_size;
+        let cfg_retry_gap = self.retry_gap;
+        let tx = self.tx.clone();
+        let tx_push = self.tx_push.clone();
         let handle = tokio::spawn(async move {
-            'steal_task: loop {
+            loop {
                 let mut start = task.start();
                 if start >= task.end() {
-                    if task_list.steal(&task, self.min_chunk_size) {
+                    if task_queue.steal(&task, min_chunk_size) {
                         continue;
                     } else {
                         break;
                     }
                 }
-                let _ = self.tx.send(Event::Pulling(id));
+                let _ = tx.send(Event::Pulling(id));
                 let download_range = start..task.end();
                 let mut stream = loop {
                     match puller.pull(&download_range).await {
                         Ok(t) => break t,
                         Err((e, retry_gap)) => {
-                            let _ = self.tx.send(Event::PullError(id, e));
-                            tokio::time::sleep(retry_gap.unwrap_or(self.retry_gap)).await;
+                            let _ = tx.send(Event::PullError(id, e));
+                            tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)).await;
                         }
                     }
                 };
@@ -126,29 +124,29 @@ where
                         Ok(Some(mut chunk)) => {
                             let len = chunk.len() as u64;
                             if task.fetch_add_start(len).is_err() {
-                                continue 'steal_task;
+                                break;
                             }
                             let range_start = start;
                             start += len;
                             let range_end = start.min(task.end());
                             if range_start >= range_end {
-                                continue 'steal_task;
+                                break;
                             }
                             let span = range_start..range_end;
                             chunk.truncate(span.total() as usize);
-                            let _ = self.tx.send(Event::PullProgress(id, span.clone()));
-                            self.tx_push.send((id, span, chunk)).await.unwrap();
+                            let _ = tx.send(Event::PullProgress(id, span.clone()));
+                            tx_push.send((id, span, chunk)).await.unwrap();
                         }
                         Ok(None) => break,
                         Err((e, retry_gap)) => {
-                            let _ = self.tx.send(Event::PullError(id, e));
-                            tokio::time::sleep(retry_gap.unwrap_or(self.retry_gap)).await;
+                            let _ = tx.send(Event::PullError(id, e));
+                            tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)).await;
                         }
                     }
                 }
             }
-            task_list.remove(&task);
-            let _ = self.tx.send(Event::Finished(id));
+            task_queue.finish_work(&task);
+            let _ = tx.send(Event::Finished(id));
         });
         TokioHandle(handle.abort_handle())
     }

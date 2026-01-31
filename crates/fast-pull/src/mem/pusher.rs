@@ -1,6 +1,7 @@
 extern crate alloc;
 use crate::{RandPusher, SeqPusher};
 use alloc::{sync::Arc, vec::Vec};
+use bytes::Bytes;
 use parking_lot::Mutex;
 
 #[derive(Debug, Default, Clone)]
@@ -21,8 +22,8 @@ impl MemPusher {
 }
 impl SeqPusher for MemPusher {
     type Error = ();
-    async fn push(&mut self, content: &[u8]) -> Result<(), Self::Error> {
-        self.receive.lock().extend_from_slice(content);
+    async fn push(&mut self, content: Bytes) -> Result<(), (Self::Error, Bytes)> {
+        self.receive.lock().extend_from_slice(&content);
         Ok(())
     }
 }
@@ -31,16 +32,16 @@ impl RandPusher for MemPusher {
     async fn push(
         &mut self,
         range: crate::ProgressEntry,
-        content: &[u8],
-    ) -> Result<(), Self::Error> {
+        content: Bytes,
+    ) -> Result<(), (Self::Error, Bytes)> {
         let mut guard = self.receive.lock();
         if range.start as usize == guard.len() {
-            guard.extend_from_slice(content);
+            guard.extend_from_slice(&content);
         } else {
             if guard.len() < range.end as usize {
                 guard.resize(range.end as usize, 0);
             }
-            guard[range.start as usize..range.end as usize].copy_from_slice(content);
+            guard[range.start as usize..range.end as usize].copy_from_slice(&content);
         }
         Ok(())
     }

@@ -7,6 +7,7 @@ pub trait Total {
 }
 
 impl Total for ProgressEntry {
+    #[inline(always)]
     fn total(&self) -> u64 {
         self.end.saturating_sub(self.start)
     }

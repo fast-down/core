@@ -26,7 +26,7 @@ impl UrlInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FileId {
     pub etag: Option<Arc<str>>,
     pub last_modified: Option<Arc<str>>,
@@ -37,12 +37,6 @@ impl FileId {
         Self {
             etag: etag.map(Arc::from),
             last_modified: last_modified.map(Arc::from),
-        }
-    }
-    pub fn empty() -> Self {
-        Self {
-            etag: None,
-            last_modified: None,
         }
     }
 }

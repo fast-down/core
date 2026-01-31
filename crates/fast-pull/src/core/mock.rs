@@ -23,7 +23,8 @@ impl RandPuller for MockPuller {
     ) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
         let data = &self.0[range.start as usize..range.end as usize];
         Ok(stream::iter(
-            data.iter().map(|e| Ok(Bytes::from_iter([*e]))),
+            data.chunks(2)
+                .map(|c| Ok(Bytes::from_iter(c.iter().cloned()))),
         ))
     }
 }
@@ -31,7 +32,9 @@ impl SeqPuller for MockPuller {
     type Error = ();
     async fn pull(&mut self) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
         Ok(stream::iter(
-            self.0.iter().map(|e| Ok(Bytes::from_iter([*e]))),
+            self.0
+                .chunks(2)
+                .map(|c| Ok(Bytes::from_iter(c.iter().cloned()))),
         ))
     }
 }

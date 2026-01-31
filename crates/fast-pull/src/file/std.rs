@@ -1,6 +1,7 @@
 extern crate std;
 use crate::{ProgressEntry, RandPusher, SeqPusher};
-use std::{boxed::Box, collections::VecDeque};
+use bytes::Bytes;
+use std::collections::BTreeMap;
 use tokio::{
     fs::File,
     io::{AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom},
@@ -9,7 +10,7 @@ use tokio::{
 #[derive(Debug)]
 pub struct FilePusher {
     buffer: BufWriter<File>,
-    cache: VecDeque<(u64, Box<[u8]>)>,
+    cache: BTreeMap<u64, Bytes>,
     p: u64,
     cache_size: usize,
     buffer_size: usize,
@@ -19,7 +20,7 @@ impl FilePusher {
         file.set_len(size).await?;
         Ok(Self {
             buffer: BufWriter::with_capacity(buffer_size, file),
-            cache: VecDeque::new(),
+            cache: BTreeMap::new(),
             p: 0,
             cache_size: 0,
             buffer_size,
@@ -28,8 +29,11 @@ impl FilePusher {
 }
 impl SeqPusher for FilePusher {
     type Error = tokio::io::Error;
-    async fn push(&mut self, content: &[u8]) -> Result<(), Self::Error> {
-        self.buffer.write_all(content).await
+    async fn push(&mut self, content: Bytes) -> Result<(), (Self::Error, Bytes)> {
+        self.buffer
+            .write_all(&content)
+            .await
+            .map_err(|e| (e, content))
     }
     async fn flush(&mut self) -> Result<(), Self::Error> {
         self.buffer.flush().await
@@ -37,24 +41,35 @@ impl SeqPusher for FilePusher {
 }
 impl RandPusher for FilePusher {
     type Error = tokio::io::Error;
-    async fn push(&mut self, range: ProgressEntry, bytes: &[u8]) -> Result<(), Self::Error> {
-        let pos = self.cache.partition_point(|(i, _)| i < &range.start);
+    async fn push(
+        &mut self,
+        range: ProgressEntry,
+        bytes: Bytes,
+    ) -> Result<(), (Self::Error, Bytes)> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
         self.cache_size += bytes.len();
-        self.cache.insert(pos, (range.start, bytes.into()));
+        self.cache.insert(range.start, bytes);
         if self.cache_size >= self.buffer_size {
-            RandPusher::flush(self).await?;
+            RandPusher::flush(self).await.map_err(|e| {
+                let bytes = self.cache.remove(&range.start);
+                (e, bytes.unwrap_or_default())
+            })?;
         }
         Ok(())
     }
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        while let Some((start, bytes)) = self.cache.front() {
+        while let Some(entry) = self.cache.first_entry() {
+            let start = *entry.key();
+            let bytes = entry.get();
             let len = bytes.len();
-            if *start != self.p {
-                self.buffer.seek(SeekFrom::Start(*start)).await?;
-                self.p = *start;
+            if start != self.p {
+                self.buffer.seek(SeekFrom::Start(start)).await?;
+                self.p = start;
             }
             self.buffer.write_all(bytes).await?;
-            self.cache.pop_front();
+            entry.remove_entry();
             self.cache_size -= len;
             self.p += len as u64;
         }
@@ -84,8 +99,12 @@ mod tests {
         // 写入数据
         let data1 = b"Hello, ";
         let data2 = b"world!";
-        SeqPusher::push(&mut pusher, &data1[..]).await.unwrap();
-        SeqPusher::push(&mut pusher, &data2[..]).await.unwrap();
+        SeqPusher::push(&mut pusher, data1[..].into())
+            .await
+            .unwrap();
+        SeqPusher::push(&mut pusher, data2[..].into())
+            .await
+            .unwrap();
         SeqPusher::flush(&mut pusher).await.unwrap();
 
         // 验证文件内容
@@ -113,7 +132,7 @@ mod tests {
         // 写入数据
         let data = b"234";
         let range = 2..5;
-        RandPusher::push(&mut pusher, range, &data[..])
+        RandPusher::push(&mut pusher, range, data[..].into())
             .await
             .unwrap();
         RandPusher::flush(&mut pusher).await.unwrap();

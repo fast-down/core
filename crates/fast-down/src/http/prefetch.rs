@@ -6,19 +6,19 @@ use crate::{
 use std::{borrow::Borrow, future::Future, time::Duration};
 use url::Url;
 
-pub type PrefetchResult<Client, E> = Result<(UrlInfo, GetResponse<Client>), (E, Option<Duration>)>;
+pub type PrefetchResult<Client> =
+    Result<(UrlInfo, GetResponse<Client>), (HttpError<Client>, Option<Duration>)>;
 
 pub trait Prefetch<Client: HttpClient> {
-    type Error;
-    fn prefetch(
-        &self,
-        url: Url,
-    ) -> impl Future<Output = PrefetchResult<Client, Self::Error>> + Send;
+    fn prefetch(&self, url: Url) -> impl Future<Output = PrefetchResult<Client>> + Send;
 }
 
-impl<Client: HttpClient, BorrowClient: Borrow<Client> + Sync> Prefetch<Client> for BorrowClient {
-    type Error = HttpError<Client>;
-    async fn prefetch(&self, url: Url) -> PrefetchResult<Client, Self::Error> {
+impl<Client, BorrowClient> Prefetch<Client> for BorrowClient
+where
+    Client: HttpClient,
+    BorrowClient: Borrow<Client> + Sync,
+{
+    async fn prefetch(&self, url: Url) -> PrefetchResult<Client> {
         prefetch(self.borrow(), url).await
     }
 }
@@ -41,10 +41,7 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
         .unwrap_or_else(|| url.to_string())
 }
 
-async fn prefetch<Client: HttpClient>(
-    client: &Client,
-    url: Url,
-) -> PrefetchResult<Client, HttpError<Client>> {
+async fn prefetch<Client: HttpClient>(client: &Client, url: Url) -> PrefetchResult<Client> {
     let resp = client
         .get(url, None)
         .send()

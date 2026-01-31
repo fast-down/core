@@ -9,7 +9,7 @@ use fast_pull::ProgressEntry;
 use std::{fmt::Debug, future::Future, time::Duration};
 use url::Url;
 
-pub trait HttpClient: Clone + Send + Sync + Unpin {
+pub trait HttpClient: Clone + Send + Sync + Unpin + 'static {
     type RequestBuilder: HttpRequestBuilder;
     fn get(&self, url: Url, range: Option<ProgressEntry>) -> Self::RequestBuilder;
 }
