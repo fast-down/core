@@ -14,7 +14,7 @@ categories = ["concurrency", "no-std"]
 
 [dependencies]
 parking_lot.workspace = true
-portable-atomic = "1.13.0"
+portable-atomic = "1.13.1"
 
 [dev-dependencies]
 tokio = { version = "1.49.0", default-features = false, features = [
