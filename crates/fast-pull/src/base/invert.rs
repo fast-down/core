@@ -1,16 +1,17 @@
 use crate::ProgressEntry;
-use core::slice::Iter;
 
-pub struct InvertIter<'a> {
-    iter: Iter<'a, ProgressEntry>,
+pub struct InvertIter<'a, I: Iterator<Item = &'a ProgressEntry>> {
+    iter: I,
     prev_end: u64,
     total_size: u64,
     window: u64,
 }
 
-impl<'a> Iterator for InvertIter<'a> {
+impl<'a, I> Iterator for InvertIter<'a, I>
+where
+    I: Iterator<Item = &'a ProgressEntry>,
+{
     type Item = ProgressEntry;
-
     fn next(&mut self) -> Option<Self::Item> {
         let mut gap_start = self.prev_end;
         for range in self.iter.by_ref() {
@@ -34,7 +35,10 @@ impl<'a> Iterator for InvertIter<'a> {
 }
 
 /// window: 当一个 ProgressEntry 的长度小于 window 时，会被合并到空洞内，以减少碎片化进度。
-pub fn invert(progress: Iter<ProgressEntry>, total_size: u64, window: u64) -> InvertIter {
+pub fn invert<'a, I>(progress: I, total_size: u64, window: u64) -> InvertIter<'a, I>
+where
+    I: Iterator<Item = &'a ProgressEntry>,
+{
     InvertIter {
         iter: progress,
         prev_end: 0,

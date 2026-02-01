@@ -58,13 +58,13 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
       - name: Run Clippy
-        run: cargo clippy --all-features --verbose -- -Dwarnings
+        run: cargo clippy --all-features --all-targets --verbose -- -Dwarnings
 
       - name: Run Clippy (minimal-versions)
-        run: cargo clippy --all-features -Z minimal-versions --verbose -- -Dwarnings
+        run: cargo clippy --all-features --all-targets -Z minimal-versions --verbose -- -Dwarnings
 
       - name: Run Clippy (no-default-features)
-        run: cargo clippy --no-default-features --verbose -- -Dwarnings
+        run: cargo clippy --no-default-features --all-targets --verbose -- -Dwarnings
 
   format:
     name: Format
