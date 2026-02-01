@@ -53,8 +53,8 @@ where
     ) -> Self {
         Self {
             event_chain,
-            abort_handles: abort_handles.map(Arc::from),
             handle: Arc::new(SharedHandle::new(handle)),
+            abort_handles: abort_handles.map(Arc::from),
             task_queue,
         }
     }

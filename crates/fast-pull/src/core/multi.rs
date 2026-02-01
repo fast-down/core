@@ -143,7 +143,11 @@ where
                             let span = range_start..range_end;
                             chunk.truncate(span.total() as usize);
                             let _ = tx.send(Event::PullProgress(id, span.clone()));
-                            tx_push.send((id, span, chunk)).await.unwrap();
+                            let tx_push = tx_push.clone();
+                            let _ = tokio::spawn(async move {
+                                tx_push.send((id, span, chunk)).await.unwrap();
+                            })
+                            .await;
                         }
                         Ok(None) => break,
                         Err((e, retry_gap)) => {
