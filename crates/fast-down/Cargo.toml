@@ -13,15 +13,13 @@ keywords = ["concurrency", "download", "fast", "parallel"]
 categories = ["asynchronous", "concurrency", "network-programming", "no-std"]
 
 [dependencies]
-# aria2-gid = { version = "0.1.0", optional = true }
 bytes.workspace = true
 content_disposition = { version = "0.4.0", optional = true }
-crossfire = { workspace = true, optional = true }
 fast-pull.workspace = true
 futures.workspace = true
 httpdate = { version = "1.0.3", optional = true }
-# inherit-config = { version = "0.1.1", optional = true }
-# inherit-config-derive = { version = "0.1.1", optional = true }
+inherit-config = { version = "0.1.1", optional = true }
+inherit-config-derive = { version = "0.1.1", optional = true }
 parking_lot = { workspace = true, optional = true }
 reqwest = { version = "0.13.1", default-features = false, features = [
   "default-tls",
@@ -47,14 +45,11 @@ tokio = { version = "1.49.0", default-features = false, features = [
 ] }
 
 [features]
-default = ["reqwest", "sanitize-filename"]
-# downloader = [
-#   "dep:aria2-gid",
-#   "dep:crossfire",
-#   "dep:inherit-config",
-#   "dep:inherit-config-derive",
-#   "reqwest"
-# ]
+utils = [
+  "dep:inherit-config",
+  "dep:inherit-config-derive",
+  "reqwest",
+]
 http = ["dep:content_disposition", "dep:parking_lot", "dep:urlencoding"]
 reqwest = ["dep:httpdate", "dep:reqwest", "http"]
 sanitize-filename = ["dep:sanitize-filename"]

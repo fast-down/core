@@ -1,7 +1,7 @@
 extern crate alloc;
 use super::macros::poll_ok;
 use crate::{DownloadResult, Event, ProgressEntry, RandPuller, RandPusher, Total, WorkerId};
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 use bytes::Bytes;
 use core::{
     sync::atomic::{AtomicUsize, Ordering},
@@ -13,18 +13,18 @@ use futures::TryStreamExt;
 use tokio::task::AbortHandle;
 
 #[derive(Debug, Clone)]
-pub struct DownloadOptions {
-    pub download_chunks: Vec<ProgressEntry>,
+pub struct DownloadOptions<'a, I: Iterator<Item = &'a ProgressEntry>> {
+    pub download_chunks: I,
     pub concurrent: usize,
     pub retry_gap: Duration,
     pub push_queue_cap: usize,
     pub min_chunk_size: u64,
 }
 
-pub fn download_multi<R: RandPuller, W: RandPusher>(
+pub fn download_multi<'a, R: RandPuller, W: RandPusher, I: Iterator<Item = &'a ProgressEntry>>(
     puller: R,
     mut pusher: W,
-    options: DownloadOptions,
+    options: DownloadOptions<'a, I>,
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     let (tx, event_chain) = mpmc::unbounded_async();
     let (tx_push, rx_push) =
@@ -58,7 +58,7 @@ pub fn download_multi<R: RandPuller, W: RandPusher>(
         id: AtomicUsize::new(0),
         min_chunk_size: options.min_chunk_size,
     });
-    let task_queue = TaskQueue::new(&options.download_chunks[..]);
+    let task_queue = TaskQueue::new(options.download_chunks);
     task_queue.set_threads(
         options.concurrent,
         options.min_chunk_size,
@@ -165,12 +165,13 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::{
-        MergeProgress, ProgressEntry,
+        Merge, ProgressEntry,
         mem::MemPusher,
         mock::{MockPuller, build_mock_data},
     };
     use alloc::vec;
     use std::dbg;
+    use vec::Vec;
 
     #[tokio::test]
     async fn test_concurrent_download() {
@@ -186,7 +187,7 @@ mod tests {
                 concurrent: 32,
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
-                download_chunks: download_chunks.clone(),
+                download_chunks: download_chunks.iter(),
                 min_chunk_size: 1,
             },
         );

@@ -100,7 +100,7 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::{
-        MergeProgress,
+        Merge,
         mem::MemPusher,
         mock::{MockPuller, build_mock_data},
     };

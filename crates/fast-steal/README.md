@@ -82,7 +82,7 @@ async fn main() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let executor = TokioExecutor { tx };
     let pre_data = [1..20, 41..48];
-    let task_queue = TaskQueue::new(&pre_data[..]);
+    let task_queue = TaskQueue::new(pre_data.iter());
     task_queue.set_threads(8, 1, Some(&executor));
     drop(executor);
     let mut data = HashMap::new();

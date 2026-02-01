@@ -1,43 +1,21 @@
+extern crate alloc;
 use core::ops::Range;
 
 pub type ProgressEntry = Range<u64>;
 
-pub trait Mergeable {
-    fn can_merge(&self, other: &Self) -> bool;
+pub trait Total {
+    fn total(&self) -> u64;
 }
 
-impl Mergeable for ProgressEntry {
+impl Total for ProgressEntry {
     #[inline(always)]
-    fn can_merge(&self, b: &Self) -> bool {
-        self.start == b.end || b.start == self.end
+    fn total(&self) -> u64 {
+        self.end.saturating_sub(self.start)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_can_merge_adjacent() {
-        let a = 0..5;
-        let b = 5..10;
-        assert!(a.can_merge(&b));
-        assert!(b.can_merge(&a));
-    }
-
-    #[test]
-    fn test_cannot_merge_non_adjacent_non_overlapping() {
-        let a = 0..5;
-        let b = 7..10;
-        assert!(!a.can_merge(&b));
-        assert!(!b.can_merge(&a));
-    }
-
-    #[test]
-    fn test_cannot_merge_disjoint() {
-        let a = 0..5;
-        let b = 6..15;
-        assert!(!a.can_merge(&b));
-        assert!(!b.can_merge(&a));
+impl Total for alloc::vec::Vec<ProgressEntry> {
+    fn total(&self) -> u64 {
+        self.iter().map(|r| r.total()).sum()
     }
 }

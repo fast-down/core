@@ -1,13 +1,13 @@
 mod event;
-mod merge_progress;
+mod invert;
+mod merge;
 mod progress;
 mod puller;
 mod pusher;
-mod total;
 
 pub use event::*;
-pub use merge_progress::*;
+pub use invert::*;
+pub use merge::*;
 pub use progress::*;
 pub use puller::*;
 pub use pusher::*;
-pub use total::*;

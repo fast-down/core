@@ -1,16 +1,12 @@
+use crate::utils::build_client;
 use inherit_config_derive::Config;
-use reqwest::header::HeaderMap;
-use std::{
-    num::{NonZero, NonZeroU64, NonZeroUsize},
-    path::Path,
-    sync::Arc,
-    time::Duration,
-};
+use reqwest::{Client, header::HeaderMap};
+use std::{path::Path, sync::Arc, time::Duration};
 
 #[derive(Debug, Clone, Config)]
 pub struct DownloadConfig {
-    #[config(default = Some(NonZero::new(32).unwrap()))]
-    pub threads: Option<NonZeroUsize>,
+    #[config(default = Some(32))]
+    pub threads: Option<usize>,
 
     #[config(default = Some(Arc::from("")))]
     pub proxy: Option<Arc<str>>,
@@ -39,6 +35,15 @@ pub struct DownloadConfig {
     #[config(default = Some(Duration::from_millis(500)))]
     pub retry_gap: Option<Duration>,
 
-    #[config(default = Some(NonZero::new(1024 * 1024).unwrap()))]
-    pub min_chunk_size: Option<NonZeroU64>,
+    #[config(default = Some(1024 * 1024))]
+    pub min_chunk_size: Option<u64>,
+}
+
+pub fn get_client(config: &DownloadConfig) -> Result<Client, reqwest::Error> {
+    build_client(
+        config.headers.as_ref().unwrap(),
+        config.proxy.as_ref().unwrap(),
+        config.accept_invalid_certs.unwrap(),
+        config.accept_invalid_hostnames.unwrap(),
+    )
 }

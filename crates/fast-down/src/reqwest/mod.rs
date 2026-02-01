@@ -103,7 +103,7 @@ mod tests {
         url_info::FileId,
     };
     use fast_pull::{
-        Event, MergeProgress,
+        Event, Merge,
         mem::MemPusher,
         mock::build_mock_data,
         multi::{self, download_multi},
@@ -260,7 +260,7 @@ mod tests {
                 concurrent: 32,
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
-                download_chunks: download_chunks.clone(),
+                download_chunks: download_chunks.iter(),
                 min_chunk_size: 1,
             },
         );

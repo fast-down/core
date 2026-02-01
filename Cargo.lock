@@ -331,10 +331,11 @@ version = "3.5.1"
 dependencies = [
  "bytes",
  "content_disposition",
- "crossfire",
  "fast-pull",
  "futures",
  "httpdate",
+ "inherit-config",
+ "inherit-config-derive",
  "mockito",
  "parking_lot",
  "reqwest",
@@ -775,6 +776,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "inherit-config"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c41c664532a43a39a0e8033ae92c4f2b0f7d72bae9796de801bf26227e43921"
+
+[[package]]
+name = "inherit-config-derive"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43d202523b008c1aaf7b5ece32af1c707d77babdc1c261abe4cc0aee32a3a665"
+dependencies = [
+ "inherit-config",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1099,7 +1118,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1307,7 +1326,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1922,7 +1941,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -187,6 +187,11 @@ impl Task {
         }
     }
 }
+impl From<&Range<u64>> for Task {
+    fn from(value: &Range<u64>) -> Self {
+        Self::new(value.clone())
+    }
+}
 
 impl PartialEq for Task {
     fn eq(&self, other: &Self) -> bool {
