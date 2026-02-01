@@ -16,12 +16,7 @@ pub fn build_client(
     let mut client = ClientBuilder::new()
         .default_headers(headers.clone())
         .danger_accept_invalid_certs(accept_invalid_certs)
-        .danger_accept_invalid_hostnames(accept_invalid_hostnames)
-        .http2_adaptive_window(true)
-        .brotli(true)
-        .gzip(true)
-        .deflate(true)
-        .zstd(true);
+        .danger_accept_invalid_hostnames(accept_invalid_hostnames);
     if !proxy.is_empty() {
         client = client.proxy(Proxy::all(proxy)?);
     }
