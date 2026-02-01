@@ -4,22 +4,21 @@ use crate::{DownloadResult, Event, ProgressEntry, RandPuller, RandPusher, Total,
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
 use core::{
-    num::{NonZeroU64, NonZeroUsize},
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 use crossfire::{MAsyncTx, MTx, mpmc, mpsc};
-use fast_steal::{Executor, Handle, Task, TaskList, TaskQueue};
+use fast_steal::{Executor, Handle, Task, TaskQueue};
 use futures::TryStreamExt;
 use tokio::task::AbortHandle;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub download_chunks: Vec<ProgressEntry>,
-    pub concurrent: NonZeroUsize,
+    pub concurrent: usize,
     pub retry_gap: Duration,
     pub push_queue_cap: usize,
-    pub min_chunk_size: NonZeroU64,
+    pub min_chunk_size: u64,
 }
 
 pub fn download_multi<R: RandPuller, W: RandPusher>(
@@ -59,9 +58,18 @@ pub fn download_multi<R: RandPuller, W: RandPusher>(
         id: AtomicUsize::new(0),
         min_chunk_size: options.min_chunk_size,
     });
-    let task_list = TaskList::new(&options.download_chunks[..], Arc::downgrade(&executor));
-    task_list.set_threads(options.concurrent, options.min_chunk_size);
-    DownloadResult::new(event_chain, push_handle, None, Some(task_list))
+    let task_queue = TaskQueue::new(&options.download_chunks[..]);
+    task_queue.set_threads(
+        options.concurrent,
+        options.min_chunk_size,
+        Some(executor.as_ref()),
+    );
+    DownloadResult::new(
+        event_chain,
+        push_handle,
+        None,
+        Some((Arc::downgrade(&executor), task_queue)),
+    )
 }
 
 #[derive(Clone)]
@@ -83,7 +91,7 @@ where
     puller: R,
     retry_gap: Duration,
     id: AtomicUsize,
-    min_chunk_size: NonZeroU64,
+    min_chunk_size: u64,
 }
 impl<R, WE> Executor for TokioExecutor<R, WE>
 where
@@ -162,7 +170,6 @@ mod tests {
         mock::{MockPuller, build_mock_data},
     };
     use alloc::vec;
-    use core::num::NonZero;
     use std::dbg;
 
     #[tokio::test]
@@ -176,11 +183,11 @@ mod tests {
             puller,
             pusher.clone(),
             DownloadOptions {
-                concurrent: NonZero::new(32).unwrap(),
+                concurrent: 32,
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.clone(),
-                min_chunk_size: NonZero::new(1).unwrap(),
+                min_chunk_size: 1,
             },
         );
 

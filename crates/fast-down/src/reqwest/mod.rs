@@ -110,7 +110,7 @@ mod tests {
         single::{self, download_single},
     };
     use reqwest::{Client, StatusCode};
-    use std::{num::NonZero, time::Duration};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_redirect_and_content_range() {
@@ -257,11 +257,11 @@ mod tests {
             puller,
             pusher.clone(),
             multi::DownloadOptions {
-                concurrent: NonZero::new(32).unwrap(),
+                concurrent: 32,
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.clone(),
-                min_chunk_size: NonZero::new(1).unwrap(),
+                min_chunk_size: 1,
             },
         );
 

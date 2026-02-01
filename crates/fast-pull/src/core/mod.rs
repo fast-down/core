@@ -1,9 +1,8 @@
 extern crate alloc;
 use crate::{Event, handle::SharedHandle};
-use alloc::sync::Arc;
-use core::num::{NonZeroU64, NonZeroUsize};
+use alloc::sync::{Arc, Weak};
 use crossfire::{MAsyncRx, mpmc};
-use fast_steal::{Executor, Handle, TaskList};
+use fast_steal::{Executor, Handle, TaskQueue};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 
 pub mod handle;
@@ -21,7 +20,7 @@ where
     pub event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
     handle: Arc<SharedHandle<()>>,
     abort_handles: Option<Arc<[AbortHandle]>>,
-    task_list: Option<TaskList<E>>,
+    task_queue: Option<(Weak<E>, TaskQueue<E::Handle>)>,
 }
 
 impl<E, PullError, PushError> Clone for DownloadResult<E, PullError, PushError>
@@ -35,7 +34,7 @@ where
             event_chain: self.event_chain.clone(),
             handle: self.handle.clone(),
             abort_handles: self.abort_handles.clone(),
-            task_list: self.task_list.clone(),
+            task_queue: self.task_queue.clone(),
         }
     }
 }
@@ -50,13 +49,13 @@ where
         event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
         handle: JoinHandle<()>,
         abort_handles: Option<&[AbortHandle]>,
-        task_list: Option<TaskList<E>>,
+        task_queue: Option<(Weak<E>, TaskQueue<E::Handle>)>,
     ) -> Self {
         Self {
             event_chain,
             abort_handles: abort_handles.map(Arc::from),
             handle: Arc::new(SharedHandle::new(handle)),
-            task_list,
+            task_queue,
         }
     }
 
@@ -70,8 +69,8 @@ where
                 handle.abort();
             }
         }
-        if let Some(task_list) = &self.task_list {
-            task_list.handles(|iter| {
+        if let Some((_, task_queue)) = &self.task_queue {
+            task_queue.handles(|iter| {
                 for handle in iter {
                     handle.abort();
                 }
@@ -79,9 +78,14 @@ where
         }
     }
 
-    pub fn set_threads(&self, threads: NonZeroUsize, min_chunk_size: NonZeroU64) {
-        if let Some(task_list) = &self.task_list {
-            task_list.set_threads(threads, min_chunk_size);
+    pub fn set_threads(&self, threads: usize, min_chunk_size: u64) {
+        if let Some((executor, task_queue)) = &self.task_queue {
+            let executor = executor.upgrade();
+            task_queue.set_threads(
+                threads,
+                min_chunk_size,
+                executor.as_ref().map(|e| e.as_ref()),
+            );
         }
     }
 }

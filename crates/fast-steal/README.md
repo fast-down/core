@@ -16,8 +16,8 @@
 4. 测试完全覆盖，保证库的稳定性和可靠性
 
 ```rust
-use fast_steal::{Executor, Handle, Task, TaskList, TaskQueue};
-use std::{collections::HashMap, sync::Arc, num::NonZero};
+use fast_steal::{Executor, Handle, Task, TaskQueue};
+use std::{collections::HashMap};
 use tokio::{
     sync::mpsc,
     task::AbortHandle,
@@ -50,7 +50,7 @@ impl Executor for TokioExecutor {
                     println!("task: {i} = {res}");
                     tx.send((i, res)).unwrap();
                 }
-                if !task_queue.steal(&task, NonZero::new(1).unwrap()) {
+                if !task_queue.steal(&task, 1) {
                     break;
                 }
             }
@@ -80,10 +80,10 @@ fn fib_fast(n: u64) -> u64 {
 #[tokio::main]
 async fn main() {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let executor = Arc::new(TokioExecutor { tx });
+    let executor = TokioExecutor { tx };
     let pre_data = [1..20, 41..48];
-    let task_list = TaskList::new(&pre_data[..], Arc::downgrade(&executor));
-    task_list.set_threads(NonZero::new(8).unwrap(), NonZero::new(1).unwrap());
+    let task_queue = TaskQueue::new(&pre_data[..]);
+    task_queue.set_threads(8, 1, Some(&executor));
     drop(executor);
     let mut data = HashMap::new();
     while let Some((i, res)) = rx.recv().await {
