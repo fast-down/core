@@ -1,7 +1,8 @@
 use crate::{
-    FileId, ProgressEntry, PullResult, PullStream, RandPuller, SeqPuller,
+    FileId, ProgressEntry, PullResult, PullStream,
     http::{HttpError, HttpPuller},
 };
+use fast_pull::Puller;
 use parking_lot::Mutex;
 use reqwest::{Client, ClientBuilder, Proxy, Response, header::HeaderMap};
 use std::sync::Arc;
@@ -106,19 +107,12 @@ impl Clone for FastDownPuller {
     }
 }
 
-impl RandPuller for FastDownPuller {
+impl Puller for FastDownPuller {
     type Error = HttpError<Client>;
     async fn pull(
         &mut self,
-        range: &ProgressEntry,
+        range: Option<&ProgressEntry>,
     ) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
-        RandPuller::pull(&mut self.inner, range).await
-    }
-}
-
-impl SeqPuller for FastDownPuller {
-    type Error = HttpError<Client>;
-    async fn pull(&mut self) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
-        SeqPuller::pull(&mut self.inner).await
+        Puller::pull(&mut self.inner, range).await
     }
 }

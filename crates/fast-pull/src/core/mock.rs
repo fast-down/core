@@ -1,5 +1,5 @@
 extern crate alloc;
-use crate::{ProgressEntry, PullResult, PullStream, RandPuller, SeqPuller};
+use crate::{ProgressEntry, PullResult, PullStream, Puller};
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
 use futures::stream;
@@ -15,25 +15,18 @@ impl MockPuller {
         Self(Arc::from(data))
     }
 }
-impl RandPuller for MockPuller {
+impl Puller for MockPuller {
     type Error = ();
     async fn pull(
         &mut self,
-        range: &ProgressEntry,
+        range: Option<&ProgressEntry>,
     ) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
-        let data = &self.0[range.start as usize..range.end as usize];
+        let data = match range {
+            Some(r) => &self.0[r.start as usize..r.end as usize],
+            None => &self.0,
+        };
         Ok(stream::iter(
             data.chunks(2)
-                .map(|c| Ok(Bytes::from_iter(c.iter().cloned()))),
-        ))
-    }
-}
-impl SeqPuller for MockPuller {
-    type Error = ();
-    async fn pull(&mut self) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
-        Ok(stream::iter(
-            self.0
-                .chunks(2)
                 .map(|c| Ok(Bytes::from_iter(c.iter().cloned()))),
         ))
     }

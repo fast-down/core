@@ -3,12 +3,13 @@ use crate::http::{
     HttpResponse,
 };
 use bytes::Bytes;
-use fast_pull::{ProgressEntry, PullResult, PullStream, RandPuller, SeqPuller};
+use fast_pull::{ProgressEntry, PullResult, PullStream, Puller};
 use futures::Stream;
 use parking_lot::Mutex;
 use std::{
     fmt::Debug,
     future::Future,
+    ops::Range,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -75,24 +76,37 @@ fn into_chunk_stream<Client: HttpClient>(resp: GetResponse<Client>) -> ChunkStre
     }))
 }
 
-impl<Client: HttpClient> RandPuller for HttpPuller<Client> {
+impl<Client: HttpClient> Puller for HttpPuller<Client> {
     type Error = HttpError<Client>;
     async fn pull(
         &mut self,
-        range: &ProgressEntry,
+        range: Option<&ProgressEntry>,
     ) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
         Ok(RandRequestStream {
             client: self.client.clone(),
             url: self.url.clone(),
-            start: range.start,
-            end: range.end,
-            state: if range.start == 0
-                && let Some(resp) = &self.resp
-                && let Some(resp) = resp.lock().take()
-            {
-                ResponseState::Streaming(into_chunk_stream(resp))
-            } else {
-                ResponseState::None
+            range: range.cloned(),
+            state: match range {
+                Some(range) => {
+                    if range.start == 0
+                        && let Some(resp) = &self.resp
+                        && let Some(resp) = resp.lock().take()
+                    {
+                        ResponseState::Streaming(into_chunk_stream(resp))
+                    } else {
+                        ResponseState::None
+                    }
+                }
+                None => {
+                    if let Some(resp) = &self.resp
+                        && let Some(resp) = resp.lock().take()
+                    {
+                        ResponseState::Streaming(into_chunk_stream(resp))
+                    } else {
+                        let req = self.client.get(self.url.clone(), None).send();
+                        ResponseState::Pending(Box::pin(req))
+                    }
+                }
             },
             file_id: self.file_id.clone(),
         })
@@ -101,8 +115,7 @@ impl<Client: HttpClient> RandPuller for HttpPuller<Client> {
 struct RandRequestStream<Client: HttpClient> {
     client: Client,
     url: Url,
-    start: u64,
-    end: u64,
+    range: Option<Range<u64>>,
     state: ResponseState<Client>,
     file_id: FileId,
 }
@@ -132,80 +145,24 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
                     Poll::Pending => Poll::Pending,
                 },
                 ResponseState::None => {
-                    let resp = self
-                        .client
-                        .get(self.url.clone(), Some(self.start..self.end))
-                        .send();
-                    self.state = ResponseState::Pending(Box::pin(resp));
-                    continue;
+                    if let Some(range) = &self.range {
+                        let resp = self
+                            .client
+                            .get(self.url.clone(), Some(range.start..range.end))
+                            .send();
+                        self.state = ResponseState::Pending(Box::pin(resp));
+                        continue;
+                    } else {
+                        break Poll::Ready(Some(Err((HttpError::Irrecoverable, None))));
+                    }
                 }
                 ResponseState::Streaming(stream) => match stream.as_mut().poll_next(cx) {
                     Poll::Ready(Some(Ok(chunk))) => {
-                        self.start += chunk.len() as u64;
+                        if let Some(range) = &mut self.range {
+                            range.start += chunk.len() as u64;
+                        }
                         Poll::Ready(Some(Ok(chunk)))
                     }
-                    Poll::Ready(Some(Err(e))) => {
-                        self.state = ResponseState::None;
-                        Poll::Ready(Some(Err((e, None))))
-                    }
-                    Poll::Ready(None) => Poll::Ready(None),
-                    Poll::Pending => Poll::Pending,
-                },
-            };
-        }
-    }
-}
-
-impl<Client: HttpClient> SeqPuller for HttpPuller<Client> {
-    type Error = HttpError<Client>;
-    async fn pull(&mut self) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
-        Ok(SeqRequestStream {
-            state: if let Some(resp) = &self.resp
-                && let Some(resp) = resp.lock().take()
-            {
-                ResponseState::Streaming(into_chunk_stream(resp))
-            } else {
-                let req = self.client.get(self.url.clone(), None).send();
-                ResponseState::Pending(Box::pin(req))
-            },
-            file_id: self.file_id.clone(),
-        })
-    }
-}
-struct SeqRequestStream<Client: HttpClient> {
-    state: ResponseState<Client>,
-    file_id: FileId,
-}
-impl<Client: HttpClient> Stream for SeqRequestStream<Client> {
-    type Item = Result<Bytes, (HttpError<Client>, Option<Duration>)>;
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            break match &mut self.state {
-                ResponseState::Pending(resp) => match resp.as_mut().poll(cx) {
-                    Poll::Ready(Ok(resp)) => {
-                        let new_file_id = FileId::new(
-                            resp.headers().get("etag").ok(),
-                            resp.headers().get("last-modified").ok(),
-                        );
-                        if new_file_id != self.file_id {
-                            self.state = ResponseState::None;
-                            Poll::Ready(Some(Err((HttpError::MismatchedBody(new_file_id), None))))
-                        } else {
-                            self.state = ResponseState::Streaming(into_chunk_stream(resp));
-                            continue;
-                        }
-                    }
-                    Poll::Ready(Err((e, d))) => {
-                        self.state = ResponseState::None;
-                        Poll::Ready(Some(Err((HttpError::Request(e), d))))
-                    }
-                    Poll::Pending => Poll::Pending,
-                },
-                ResponseState::None => {
-                    break Poll::Ready(Some(Err((HttpError::Irrecoverable, None))));
-                }
-                ResponseState::Streaming(stream) => match stream.as_mut().poll_next(cx) {
-                    Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(chunk))),
                     Poll::Ready(Some(Err(e))) => {
                         self.state = ResponseState::None;
                         Poll::Ready(Some(Err((e, None))))
@@ -303,7 +260,7 @@ mod tests {
         let file_id = FileId::new(None, None);
         let mut puller = HttpPuller::new(url, client, None, file_id);
         let range = 0..7;
-        let mut stream = RandPuller::pull(&mut puller, &range)
+        let mut stream = Puller::pull(&mut puller, Some(&range))
             .await
             .expect("Failed to create stream");
         println!("--- 开始测试 HttpPuller ---");

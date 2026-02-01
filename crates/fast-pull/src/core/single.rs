@@ -1,10 +1,9 @@
 extern crate alloc;
 use super::macros::poll_ok;
-use crate::{DownloadResult, Event, ProgressEntry, SeqPuller, SeqPusher};
+use crate::{DownloadResult, Event, ProgressEntry, Puller, SeqPusher, multi::TokioExecutor};
 use bytes::Bytes;
 use core::time::Duration;
 use crossfire::{mpmc, spsc};
-use fast_steal::{Executor, Handle, TaskQueue};
 use futures::TryStreamExt;
 
 #[derive(Debug, Clone)]
@@ -13,26 +12,11 @@ pub struct DownloadOptions {
     pub push_queue_cap: usize,
 }
 
-#[derive(Clone)]
-pub struct EmptyHandle;
-impl Handle for EmptyHandle {
-    type Output = ();
-    fn abort(&mut self) -> Self::Output {}
-}
-#[derive(Debug, Clone)]
-pub struct EmptyExecutor;
-impl Executor for EmptyExecutor {
-    type Handle = EmptyHandle;
-    fn execute(&self, _: fast_steal::Task, _: TaskQueue<Self::Handle>) -> Self::Handle {
-        EmptyHandle
-    }
-}
-
-pub fn download_single<R: SeqPuller, W: SeqPusher>(
+pub fn download_single<R: Puller, W: SeqPusher>(
     mut puller: R,
     mut pusher: W,
     options: DownloadOptions,
-) -> DownloadResult<EmptyExecutor, R::Error, W::Error> {
+) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     let (tx, event_chain) = mpmc::unbounded_async();
     let (tx_push, rx_push) = spsc::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
@@ -61,7 +45,7 @@ pub fn download_single<R: SeqPuller, W: SeqPusher>(
         let _ = tx.send(Event::Pulling(ID));
         let mut downloaded: u64 = 0;
         let mut stream = loop {
-            match puller.pull().await {
+            match puller.pull(None).await {
                 Ok(t) => break t,
                 Err((e, retry_gap)) => {
                     let _ = tx.send(Event::PullError(ID, e));

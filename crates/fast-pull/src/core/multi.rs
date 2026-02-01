@@ -1,6 +1,6 @@
 extern crate alloc;
 use super::macros::poll_ok;
-use crate::{DownloadResult, Event, ProgressEntry, RandPuller, RandPusher, Total, WorkerId};
+use crate::{DownloadResult, Event, ProgressEntry, Puller, RandPusher, Total, WorkerId};
 use alloc::sync::Arc;
 use bytes::Bytes;
 use core::{
@@ -21,7 +21,7 @@ pub struct DownloadOptions<'a, I: Iterator<Item = &'a ProgressEntry>> {
     pub min_chunk_size: u64,
 }
 
-pub fn download_multi<'a, R: RandPuller, W: RandPusher, I: Iterator<Item = &'a ProgressEntry>>(
+pub fn download_multi<'a, R: Puller, W: RandPusher, I: Iterator<Item = &'a ProgressEntry>>(
     puller: R,
     mut pusher: W,
     options: DownloadOptions<'a, I>,
@@ -83,7 +83,7 @@ impl Handle for TokioHandle {
 #[derive(Debug)]
 pub struct TokioExecutor<R, WE>
 where
-    R: RandPuller,
+    R: Puller,
     WE: Send + Unpin + 'static,
 {
     tx: MTx<mpmc::List<Event<R::Error, WE>>>,
@@ -95,7 +95,7 @@ where
 }
 impl<R, WE> Executor for TokioExecutor<R, WE>
 where
-    R: RandPuller,
+    R: Puller,
     WE: Send + Unpin + 'static,
 {
     type Handle = TokioHandle;
@@ -119,7 +119,7 @@ where
                 let _ = tx.send(Event::Pulling(id));
                 let download_range = start..task.end();
                 let mut stream = loop {
-                    match puller.pull(&download_range).await {
+                    match puller.pull(Some(&download_range)).await {
                         Ok(t) => break t,
                         Err((e, retry_gap)) => {
                             let _ = tx.send(Event::PullError(id, e));
