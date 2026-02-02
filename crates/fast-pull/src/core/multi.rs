@@ -1,7 +1,5 @@
-extern crate alloc;
-use super::macros::poll_ok;
-use crate::{DownloadResult, Event, ProgressEntry, Puller, RandPusher, Total, WorkerId};
-use alloc::sync::Arc;
+extern crate std;
+use crate::{DownloadResult, Event, ProgressEntry, Puller, Pusher, Total, WorkerId};
 use bytes::Bytes;
 use core::{
     sync::atomic::{AtomicUsize, Ordering},
@@ -10,6 +8,7 @@ use core::{
 use crossfire::{MAsyncTx, MTx, mpmc, mpsc};
 use fast_steal::{Executor, Handle, Task, TaskQueue};
 use futures::TryStreamExt;
+use std::sync::Arc;
 use tokio::task::AbortHandle;
 
 #[derive(Debug, Clone)]
@@ -21,7 +20,7 @@ pub struct DownloadOptions<'a, I: Iterator<Item = &'a ProgressEntry>> {
     pub min_chunk_size: u64,
 }
 
-pub fn download_multi<'a, R: Puller, W: RandPusher, I: Iterator<Item = &'a ProgressEntry>>(
+pub fn download_multi<'a, R: Puller, W: Pusher, I: Iterator<Item = &'a ProgressEntry>>(
     puller: R,
     mut pusher: W,
     options: DownloadOptions<'a, I>,
@@ -30,25 +29,30 @@ pub fn download_multi<'a, R: Puller, W: RandPusher, I: Iterator<Item = &'a Progr
     let (tx_push, rx_push) =
         mpsc::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
-    let push_handle = tokio::spawn(async move {
-        while let Ok((id, spin, mut data)) = rx_push.recv().await {
+    let rx_push = rx_push.into_blocking();
+    let push_handle = tokio::task::spawn_blocking(move || {
+        while let Ok((id, spin, mut data)) = rx_push.recv() {
             loop {
-                match pusher.push(spin.clone(), data).await {
+                match pusher.push(&spin, data) {
                     Ok(_) => break,
                     Err((err, bytes)) => {
                         data = bytes;
                         let _ = tx_clone.send(Event::PushError(id, err));
                     }
                 }
-                tokio::time::sleep(options.retry_gap).await;
+                std::thread::sleep(options.retry_gap);
             }
             let _ = tx_clone.send(Event::PushProgress(id, spin));
         }
-        poll_ok!(
-            pusher.flush().await,
-            tx_clone => FlushError,
-            options.retry_gap
-        );
+        loop {
+            match pusher.flush() {
+                Ok(_) => break,
+                Err(err) => {
+                    let _ = tx_clone.send(Event::FlushError(err));
+                }
+            }
+            std::thread::sleep(options.retry_gap);
+        }
     });
     let executor: Arc<TokioExecutor<R, W::Error>> = Arc::new(TokioExecutor {
         tx,
@@ -166,16 +170,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
+    use vec::Vec;
+
     use super::*;
     use crate::{
         Merge, ProgressEntry,
         mem::MemPusher,
         mock::{MockPuller, build_mock_data},
     };
-    use alloc::vec;
-    use std::dbg;
-    use vec::Vec;
+    use std::{dbg, vec};
 
     #[tokio::test]
     async fn test_concurrent_download() {

@@ -1,5 +1,5 @@
 extern crate std;
-use crate::{ProgressEntry, RandPusher, Total};
+use crate::{ProgressEntry, Pusher};
 use bytes::Bytes;
 use mmap_io::{MemoryMappedFile, MmapIoError, MmapMode, flush::FlushPolicy};
 use std::path::Path;
@@ -30,23 +30,15 @@ impl MmapFilePusher {
         })
     }
 }
-impl RandPusher for MmapFilePusher {
+impl Pusher for MmapFilePusher {
     type Error = MmapIoError;
-    async fn push(
-        &mut self,
-        range: ProgressEntry,
-        bytes: Bytes,
-    ) -> Result<(), (Self::Error, Bytes)> {
-        let mut slice = match self.mmap.as_slice_mut(range.start, range.total()) {
-            Ok(s) => s,
-            Err(e) => return Err((e, bytes)),
-        };
-        slice.as_mut().copy_from_slice(&bytes);
-        Ok(())
+    fn push(&mut self, range: &ProgressEntry, bytes: Bytes) -> Result<(), (Self::Error, Bytes)> {
+        self.mmap
+            .update_region(range.start, &bytes)
+            .map_err(|e| (e, bytes))
     }
-    async fn flush(&mut self) -> Result<(), Self::Error> {
-        self.mmap.flush_async().await?;
-        Ok(())
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.mmap.flush()
     }
 }
 
@@ -69,8 +61,8 @@ mod tests {
         // 写入数据
         let data = b"234";
         let range = 2..5;
-        pusher.push(range, data[..].into()).await.unwrap();
-        pusher.flush().await.unwrap();
+        pusher.push(&range, data[..].into()).unwrap();
+        pusher.flush().unwrap();
 
         // 验证文件内容
         let mut file_content = Vec::new();

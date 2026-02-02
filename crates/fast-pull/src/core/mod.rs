@@ -6,7 +6,6 @@ use fast_steal::{Executor, Handle, TaskQueue};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 
 pub mod handle;
-mod macros;
 pub mod mock;
 pub mod multi;
 pub mod single;

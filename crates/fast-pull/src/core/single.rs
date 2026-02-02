@@ -1,6 +1,5 @@
-extern crate alloc;
-use super::macros::poll_ok;
-use crate::{DownloadResult, Event, ProgressEntry, Puller, SeqPusher, multi::TokioExecutor};
+extern crate std;
+use crate::{DownloadResult, Event, ProgressEntry, Puller, Pusher, multi::TokioExecutor};
 use bytes::Bytes;
 use core::time::Duration;
 use crossfire::{mpmc, spsc};
@@ -12,7 +11,7 @@ pub struct DownloadOptions {
     pub push_queue_cap: usize,
 }
 
-pub fn download_single<R: Puller, W: SeqPusher>(
+pub fn download_single<R: Puller, W: Pusher>(
     mut puller: R,
     mut pusher: W,
     options: DownloadOptions,
@@ -21,25 +20,30 @@ pub fn download_single<R: Puller, W: SeqPusher>(
     let (tx_push, rx_push) = spsc::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     const ID: usize = 0;
-    let push_handle = tokio::spawn(async move {
-        while let Ok((spin, mut data)) = rx_push.recv().await {
+    let rx_push = rx_push.into_blocking();
+    let push_handle = tokio::task::spawn_blocking(move || {
+        while let Ok((spin, mut data)) = rx_push.recv() {
             loop {
-                match pusher.push(data).await {
+                match pusher.push(&spin, data) {
                     Ok(_) => break,
                     Err((err, bytes)) => {
                         data = bytes;
                         let _ = tx_clone.send(Event::PushError(ID, err));
                     }
                 }
-                tokio::time::sleep(options.retry_gap).await;
+                std::thread::sleep(options.retry_gap);
             }
             let _ = tx_clone.send(Event::PushProgress(ID, spin));
         }
-        poll_ok!(
-            pusher.flush().await,
-            tx_clone => FlushError,
-            options.retry_gap
-        );
+        loop {
+            match pusher.flush() {
+                Ok(_) => break,
+                Err(err) => {
+                    let _ = tx_clone.send(Event::FlushError(err));
+                }
+            }
+            std::thread::sleep(options.retry_gap);
+        }
     });
     let handle = tokio::spawn(async move {
         let _ = tx.send(Event::Pulling(ID));
@@ -88,8 +92,7 @@ mod tests {
         mem::MemPusher,
         mock::{MockPuller, build_mock_data},
     };
-    use alloc::vec;
-    use std::dbg;
+    use std::{dbg, vec};
     use vec::Vec;
 
     #[tokio::test]
