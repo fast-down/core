@@ -1,5 +1,5 @@
 extern crate std;
-use crate::{DownloadResult, Event, Puller, Pusher, multi::TokioExecutor};
+use crate::{DownloadResult, Event, Puller, PullerError, Pusher, multi::TokioExecutor};
 use core::time::Duration;
 use crossfire::{mpmc, spsc};
 use futures::TryStreamExt;
@@ -45,30 +45,36 @@ pub fn download_single<R: Puller, W: Pusher>(
         }
     });
     let handle = tokio::spawn(async move {
-        let _ = tx.send(Event::Pulling(ID));
-        let mut downloaded: u64 = 0;
-        let mut stream = loop {
-            match puller.pull(None).await {
-                Ok(t) => break t,
-                Err((e, retry_gap)) => {
-                    let _ = tx.send(Event::PullError(ID, e));
-                    tokio::time::sleep(retry_gap.unwrap_or(options.retry_gap)).await;
+        'redownload: loop {
+            let _ = tx.send(Event::Pulling(ID));
+            let mut downloaded: u64 = 0;
+            let mut stream = loop {
+                match puller.pull(None).await {
+                    Ok(t) => break t,
+                    Err((e, retry_gap)) => {
+                        let _ = tx.send(Event::PullError(ID, e));
+                        tokio::time::sleep(retry_gap.unwrap_or(options.retry_gap)).await;
+                    }
                 }
-            }
-        };
-        loop {
-            match stream.try_next().await {
-                Ok(Some(chunk)) => {
-                    let len = chunk.len() as u64;
-                    let span = downloaded..(downloaded + len);
-                    let _ = tx.send(Event::PullProgress(ID, span.clone()));
-                    tx_push.send((span, chunk)).await.unwrap();
-                    downloaded += len;
-                }
-                Ok(None) => break,
-                Err((e, retry_gap)) => {
-                    let _ = tx.send(Event::PullError(ID, e));
-                    tokio::time::sleep(retry_gap.unwrap_or(options.retry_gap)).await
+            };
+            loop {
+                match stream.try_next().await {
+                    Ok(Some(chunk)) => {
+                        let len = chunk.len() as u64;
+                        let span = downloaded..(downloaded + len);
+                        let _ = tx.send(Event::PullProgress(ID, span.clone()));
+                        tx_push.send((span, chunk)).await.unwrap();
+                        downloaded += len;
+                    }
+                    Ok(None) => break 'redownload,
+                    Err((e, retry_gap)) => {
+                        let is_irrecoverable = e.is_irrecoverable();
+                        let _ = tx.send(Event::PullError(ID, e));
+                        tokio::time::sleep(retry_gap.unwrap_or(options.retry_gap)).await;
+                        if is_irrecoverable {
+                            continue 'redownload;
+                        }
+                    }
                 }
             }
         }

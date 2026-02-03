@@ -1,5 +1,5 @@
 extern crate std;
-use crate::{DownloadResult, Event, ProgressEntry, Puller, Pusher, Total, WorkerId};
+use crate::{DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, Total, WorkerId};
 use bytes::Bytes;
 use core::{
     sync::atomic::{AtomicUsize, Ordering},
@@ -154,8 +154,12 @@ where
                         }
                         Ok(None) => break,
                         Err((e, retry_gap)) => {
+                            let is_irrecoverable = e.is_irrecoverable();
                             let _ = tx.send(Event::PullError(id, e));
                             tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)).await;
+                            if is_irrecoverable {
+                                break;
+                            }
                         }
                     }
                 }

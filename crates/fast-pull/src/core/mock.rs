@@ -1,5 +1,5 @@
 extern crate alloc;
-use crate::{ProgressEntry, PullResult, PullStream, Puller};
+use crate::{ProgressEntry, PullResult, PullStream, Puller, PullerError};
 use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
 use futures::stream;
@@ -31,3 +31,4 @@ impl Puller for MockPuller {
         ))
     }
 }
+impl PullerError for () {}

@@ -5,7 +5,7 @@ pub use puller::*;
 
 use crate::url_info::FileId;
 use bytes::Bytes;
-use fast_pull::ProgressEntry;
+use fast_pull::{ProgressEntry, PullerError};
 use std::{fmt::Debug, future::Future, time::Duration};
 use url::Url;
 
@@ -46,4 +46,10 @@ pub enum HttpError<Client: HttpClient> {
     GetHeader(GetHeaderError<Client>),
     Irrecoverable,
     MismatchedBody(FileId),
+}
+
+impl<C: HttpClient> PullerError for HttpError<C> {
+    fn is_irrecoverable(&self) -> bool {
+        matches!(self, HttpError::Irrecoverable)
+    }
 }

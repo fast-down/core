@@ -14,9 +14,15 @@ impl<E, T> PullStream<E> for T where
 pub type PullResult<T, E> = Result<T, (E, Option<Duration>)>;
 
 pub trait Puller: Send + Sync + Clone + 'static {
-    type Error: Send + Unpin + 'static;
+    type Error: PullerError;
     fn pull(
         &mut self,
         range: Option<&ProgressEntry>,
     ) -> impl Future<Output = PullResult<impl PullStream<Self::Error>, Self::Error>> + Send;
+}
+
+pub trait PullerError: Send + Unpin + 'static {
+    fn is_irrecoverable(&self) -> bool {
+        false
+    }
 }

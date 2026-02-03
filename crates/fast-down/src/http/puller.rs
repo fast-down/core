@@ -82,32 +82,22 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
         &mut self,
         range: Option<&ProgressEntry>,
     ) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
+        let range = range.cloned().unwrap_or(0..u64::MAX);
         Ok(RandRequestStream {
             client: self.client.clone(),
             url: self.url.clone(),
-            range: range.cloned(),
-            state: match range {
-                Some(range) => {
-                    if range.start == 0
-                        && let Some(resp) = &self.resp
-                        && let Some(resp) = resp.lock().take()
-                    {
-                        ResponseState::Streaming(into_chunk_stream(resp))
-                    } else {
-                        ResponseState::None
-                    }
-                }
-                None => {
-                    if let Some(resp) = &self.resp
-                        && let Some(resp) = resp.lock().take()
-                    {
-                        ResponseState::Streaming(into_chunk_stream(resp))
-                    } else {
-                        let req = self.client.get(self.url.clone(), None).send();
-                        ResponseState::Pending(Box::pin(req))
-                    }
-                }
+            state: if range.start == 0
+                && let Some(resp) = &self.resp
+                && let Some(resp) = resp.lock().take()
+            {
+                ResponseState::Streaming(into_chunk_stream(resp))
+            } else if range.end == u64::MAX {
+                let req = self.client.get(self.url.clone(), None).send();
+                ResponseState::Pending(Box::pin(req))
+            } else {
+                ResponseState::None
             },
+            range,
             file_id: self.file_id.clone(),
         })
     }
@@ -115,7 +105,7 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
 struct RandRequestStream<Client: HttpClient> {
     client: Client,
     url: Url,
-    range: Option<Range<u64>>,
+    range: Range<u64>,
     state: ResponseState<Client>,
     file_id: FileId,
 }
@@ -145,22 +135,20 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
                     Poll::Pending => Poll::Pending,
                 },
                 ResponseState::None => {
-                    if let Some(range) = &self.range {
+                    if self.range.end == u64::MAX {
+                        break Poll::Ready(Some(Err((HttpError::Irrecoverable, None))));
+                    } else {
                         let resp = self
                             .client
-                            .get(self.url.clone(), Some(range.start..range.end))
+                            .get(self.url.clone(), Some(self.range.clone()))
                             .send();
                         self.state = ResponseState::Pending(Box::pin(resp));
                         continue;
-                    } else {
-                        break Poll::Ready(Some(Err((HttpError::Irrecoverable, None))));
                     }
                 }
                 ResponseState::Streaming(stream) => match stream.as_mut().poll_next(cx) {
                     Poll::Ready(Some(Ok(chunk))) => {
-                        if let Some(range) = &mut self.range {
-                            range.start += chunk.len() as u64;
-                        }
+                        self.range.start += chunk.len() as u64;
                         Poll::Ready(Some(Ok(chunk)))
                     }
                     Poll::Ready(Some(Err(e))) => {

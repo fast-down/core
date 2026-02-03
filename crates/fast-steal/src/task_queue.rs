@@ -75,7 +75,6 @@ impl<H: Handle> TaskQueue<H> {
         min_chunk_size: u64,
         executor: Option<&E>,
     ) -> Option<()> {
-        let threads = threads.max(1);
         let min_chunk_size = min_chunk_size.max(1);
         let mut guard = self.inner.lock();
         let len = guard.running.len();

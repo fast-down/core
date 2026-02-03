@@ -1,6 +1,7 @@
 extern crate alloc;
 use crate::{Event, handle::SharedHandle};
 use alloc::sync::{Arc, Weak};
+use core::sync::atomic::{AtomicBool, Ordering};
 use crossfire::{MAsyncRx, mpmc};
 use fast_steal::{Executor, Handle, TaskQueue};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
@@ -20,6 +21,7 @@ where
     handle: Arc<SharedHandle<()>>,
     abort_handles: Option<Arc<[AbortHandle]>>,
     task_queue: Option<(Weak<E>, TaskQueue<E::Handle>)>,
+    is_aborted: Arc<AtomicBool>,
 }
 
 impl<E, PullError, PushError> Clone for DownloadResult<E, PullError, PushError>
@@ -34,6 +36,7 @@ where
             handle: self.handle.clone(),
             abort_handles: self.abort_handles.clone(),
             task_queue: self.task_queue.clone(),
+            is_aborted: self.is_aborted.clone(),
         }
     }
 }
@@ -55,6 +58,7 @@ where
             handle: Arc::new(SharedHandle::new(handle)),
             abort_handles: abort_handles.map(Arc::from),
             task_queue,
+            is_aborted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -75,16 +79,24 @@ where
                 }
             });
         }
+        self.is_aborted.store(true, Ordering::Release);
     }
 
     pub fn set_threads(&self, threads: usize, min_chunk_size: u64) {
         if let Some((executor, task_queue)) = &self.task_queue {
             let executor = executor.upgrade();
-            task_queue.set_threads(
+            let res = task_queue.set_threads(
                 threads,
                 min_chunk_size,
                 executor.as_ref().map(|e| e.as_ref()),
             );
+            if res.is_some() && threads > 0 {
+                self.is_aborted.store(false, Ordering::Release);
+            }
         }
+    }
+
+    pub fn is_aborted(&self) -> bool {
+        self.is_aborted.load(Ordering::Acquire)
     }
 }
