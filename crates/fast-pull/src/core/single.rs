@@ -1,6 +1,5 @@
 extern crate std;
-use crate::{DownloadResult, Event, ProgressEntry, Puller, Pusher, multi::TokioExecutor};
-use bytes::Bytes;
+use crate::{DownloadResult, Event, Puller, Pusher, multi::TokioExecutor};
 use core::time::Duration;
 use crossfire::{mpmc, spsc};
 use futures::TryStreamExt;
@@ -17,7 +16,7 @@ pub fn download_single<R: Puller, W: Pusher>(
     options: DownloadOptions,
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     let (tx, event_chain) = mpmc::unbounded_async();
-    let (tx_push, rx_push) = spsc::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);
+    let (tx_push, rx_push) = spsc::bounded_async(options.push_queue_cap);
     let tx_clone = tx.clone();
     const ID: usize = 0;
     let rx_push = rx_push.into_blocking();
@@ -88,7 +87,7 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::{
-        Merge,
+        Merge, ProgressEntry,
         mem::MemPusher,
         mock::{MockPuller, build_mock_data},
     };

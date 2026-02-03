@@ -1,9 +1,8 @@
 extern crate alloc;
-use core::fmt::Debug;
-
 use crate::ProgressEntry;
 use alloc::boxed::Box;
 use bytes::Bytes;
+use core::fmt::Debug;
 
 pub trait Pusher: Send + 'static {
     type Error: Send + Unpin + 'static;

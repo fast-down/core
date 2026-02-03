@@ -26,8 +26,7 @@ pub fn download_multi<'a, R: Puller, W: Pusher, I: Iterator<Item = &'a ProgressE
     options: DownloadOptions<'a, I>,
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     let (tx, event_chain) = mpmc::unbounded_async();
-    let (tx_push, rx_push) =
-        mpsc::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
+    let (tx_push, rx_push) = mpsc::bounded_async(options.push_queue_cap);
     let tx_clone = tx.clone();
     let rx_push = rx_push.into_blocking();
     let push_handle = tokio::task::spawn_blocking(move || {
