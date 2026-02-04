@@ -8,7 +8,7 @@
 
 `fast-pull` **Fastest** concurrent downloader!
 
-**[Official Website (Simplified Chinese)](https://fast.s121.top/)**
+**[Official Website (Simplified Chinese)](https://fd.s121.top/)**
 
 ## Features
 

@@ -12,7 +12,7 @@ license = "MIT"
 [workspace.dependencies]
 bytes = "1.11.1"
 crossfire = "3.0.4"
-fast-pull = { path = "crates/fast-pull", version = "3.6.1" }
+fast-pull = { path = "crates/fast-pull", version = "3.6.2" }
 fast-steal = { path = "crates/fast-steal", version = "6.3.1" }
 futures = "0.3.31"
 parking_lot = "0.12.5"
