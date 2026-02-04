@@ -10,8 +10,8 @@ repository = "https://github.com/fast-down/core"
 license = "MIT"
 
 [workspace.dependencies]
-bytes = "1.11.0"
-crossfire = "3.0.3"
+bytes = "1.11.1"
+crossfire = "3.0.4"
 fast-pull = { path = "crates/fast-pull", version = "3.6.1" }
 fast-steal = { path = "crates/fast-steal", version = "6.3.1" }
 futures = "0.3.31"
