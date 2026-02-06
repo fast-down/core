@@ -2,6 +2,7 @@ use crate::{
     UrlInfo,
     http::{GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse},
     url_info::FileId,
+    utils::ContentDisposition,
 };
 use std::{borrow::Borrow, future::Future, time::Duration};
 use url::Url;
@@ -27,7 +28,7 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
     headers
         .get("content-disposition")
         .ok()
-        .and_then(|s| content_disposition::parse_content_disposition(s).filename_full())
+        .and_then(|s| ContentDisposition::parse(s).filename)
         .map(|s| urlencoding::decode(&s).map(String::from).unwrap_or(s))
         .filter(|s| !s.trim().is_empty())
         .or_else(|| {

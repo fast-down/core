@@ -164,6 +164,33 @@ mod tests {
         assert_eq!(url_info.raw_name, "test.txt");
         mock1.assert_async().await;
 
+        // 测试仅包含 filename* (UTF-8 编码)
+        let mock_star = server
+            .mock("GET", "/test_star")
+            .with_header(
+                "Content-Disposition",
+                r#"attachment; filename*=UTF-8''%E6%B5%8B%E8%AF%95.txt"#,
+            ) // "测试.txt"
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/test_star", server.url())).unwrap();
+        let (url_info, _) = client.prefetch(url).await.unwrap();
+        assert_eq!(url_info.raw_name, "测试.txt");
+        mock_star.assert_async().await;
+
+        let mock_both = server
+            .mock("GET", "/test_both")
+            .with_header(
+                "Content-Disposition",
+                r#"attachment; filename="fallback.txt"; filename*=UTF-8''%E6%B5%8B%E8%AF%95.txt"#,
+            )
+            .create_async()
+            .await;
+        let url = Url::parse(&format!("{}/test_both", server.url())).unwrap();
+        let (url_info, _) = client.prefetch(url).await.unwrap();
+        assert_eq!(url_info.raw_name, "测试.txt");
+        mock_both.assert_async().await;
+
         // Test URL path source
         let mock2 = server
             .mock("GET", "/test2/%E5%A5%BD%E5%A5%BD%E5%A5%BD.pdf")
