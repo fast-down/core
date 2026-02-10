@@ -100,3 +100,14 @@ where
         self.is_aborted.load(Ordering::Acquire)
     }
 }
+
+impl<E, PullError, PushError> Drop for DownloadResult<E, PullError, PushError>
+where
+    E: Executor,
+    PullError: Send + Unpin + 'static,
+    PushError: Send + Unpin + 'static,
+{
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
