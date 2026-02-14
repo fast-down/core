@@ -6,6 +6,7 @@ pub type WorkerId = usize;
 pub enum Event<PullError, PushError> {
     Pulling(WorkerId),
     PullError(WorkerId, PullError),
+    PullTimeout(WorkerId),
     PullProgress(WorkerId, ProgressEntry),
     PushError(WorkerId, PushError),
     PushProgress(WorkerId, ProgressEntry),

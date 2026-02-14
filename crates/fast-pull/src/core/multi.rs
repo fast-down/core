@@ -16,6 +16,7 @@ pub struct DownloadOptions<'a, I: Iterator<Item = &'a ProgressEntry>> {
     pub download_chunks: I,
     pub concurrent: usize,
     pub retry_gap: Duration,
+    pub pull_timeout: Duration,
     pub push_queue_cap: usize,
     pub min_chunk_size: u64,
 }
@@ -57,6 +58,7 @@ pub fn download_multi<'a, R: Puller, W: Pusher, I: Iterator<Item = &'a ProgressE
         tx,
         tx_push,
         puller,
+        pull_timeout: options.pull_timeout,
         retry_gap: options.retry_gap,
         id: AtomicUsize::new(0),
         min_chunk_size: options.min_chunk_size,
@@ -93,6 +95,7 @@ where
     tx_push: MAsyncTx<mpsc::Array<(WorkerId, ProgressEntry, Bytes)>>,
     puller: R,
     retry_gap: Duration,
+    pull_timeout: Duration,
     id: AtomicUsize,
     min_chunk_size: u64,
 }
@@ -106,10 +109,12 @@ where
         let id = self.id.fetch_add(1, Ordering::SeqCst);
         let mut puller = self.puller.clone();
         let min_chunk_size = self.min_chunk_size;
+        let pull_timeout = self.pull_timeout;
         let cfg_retry_gap = self.retry_gap;
         let tx = self.tx.clone();
         let tx_push = self.tx_push.clone();
         let handle = tokio::spawn(async move {
+            let _guard = WorkerGuard::new(id, &task_queue, &task, &tx);
             loop {
                 let mut start = task.start();
                 if start >= task.end() {
@@ -131,8 +136,8 @@ where
                     }
                 };
                 loop {
-                    match stream.try_next().await {
-                        Ok(Some(mut chunk)) => {
+                    match tokio::time::timeout(pull_timeout, stream.try_next()).await {
+                        Ok(Ok(Some(mut chunk))) => {
                             let len = chunk.len() as u64;
                             if task.fetch_add_start(len).is_err() {
                                 break;
@@ -152,8 +157,8 @@ where
                             })
                             .await;
                         }
-                        Ok(None) => break,
-                        Err((e, retry_gap)) => {
+                        Ok(Ok(None)) => break,
+                        Ok(Err((e, retry_gap))) => {
                             let is_irrecoverable = e.is_irrecoverable();
                             let _ = tx.send(Event::PullError(id, e));
                             tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)).await;
@@ -161,13 +166,59 @@ where
                                 break;
                             }
                         }
+                        Err(_) => {
+                            let _ = tx.send(Event::PullTimeout(id));
+                            drop(stream);
+                            puller = puller.clone();
+                            break;
+                        }
                     }
                 }
             }
-            task_queue.finish_work(&task);
-            let _ = tx.send(Event::Finished(id));
         });
         TokioHandle(handle.abort_handle())
+    }
+}
+
+pub struct WorkerGuard<RE, WE>
+where
+    RE: PullerError,
+    WE: Send + Unpin + 'static,
+{
+    pub task_queue: TaskQueue<TokioHandle>,
+    pub task: Task,
+    pub id: WorkerId,
+    pub tx: crossfire::MTx<crossfire::mpmc::List<Event<RE, WE>>>,
+}
+
+impl<RE, WE> WorkerGuard<RE, WE>
+where
+    RE: PullerError,
+    WE: Send + Unpin + 'static,
+{
+    pub fn new(
+        id: WorkerId,
+        task_queue: &TaskQueue<TokioHandle>,
+        task: &Task,
+        tx: &crossfire::MTx<crossfire::mpmc::List<Event<RE, WE>>>,
+    ) -> Self {
+        Self {
+            task_queue: task_queue.clone(),
+            task: task.clone(),
+            id,
+            tx: tx.clone(),
+        }
+    }
+}
+
+impl<RE, WE> Drop for WorkerGuard<RE, WE>
+where
+    RE: PullerError,
+    WE: Send + Unpin + 'static,
+{
+    fn drop(&mut self) {
+        self.task_queue.finish_work(&self.task);
+        let _ = self.tx.send(Event::Finished(self.id));
     }
 }
 
@@ -198,6 +249,7 @@ mod tests {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter(),
+                pull_timeout: Duration::from_secs(5),
                 min_chunk_size: 1,
             },
         );

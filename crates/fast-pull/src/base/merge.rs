@@ -67,5 +67,9 @@ mod tests {
         assert_eq!(v, vec![1..40, 50..61, 62..70]);
         v.merge_progress(40..62);
         assert_eq!(v, vec![1..70]);
+        v.merge_progress(72..82);
+        assert_eq!(v, vec![1..70, 72..82]);
+        v.merge_progress(0..90);
+        assert_eq!(v, vec![0..90]);
     }
 }
