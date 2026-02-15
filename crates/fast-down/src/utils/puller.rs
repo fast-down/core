@@ -41,18 +41,11 @@ pub fn build_client(
 #[derive(Debug)]
 pub struct FastDownPuller {
     inner: HttpPuller<Client>,
-    headers: Arc<HeaderMap>,
-    proxy: Option<Arc<str>>,
-    url: Arc<Url>,
-    accept_invalid_certs: bool,
-    accept_invalid_hostnames: bool,
-    file_id: FileId,
-    resp: Option<Arc<Mutex<Option<Response>>>>,
-    available_ips: Arc<[IpAddr]>,
+    pullers: Arc<[HttpPuller<Client>]>,
     turn: Arc<AtomicUsize>,
 }
 
-pub struct FastDownPullerOptions<'a> {
+pub struct FastDownPullerOptions<'a, 'b> {
     pub url: Url,
     pub headers: Arc<HeaderMap>,
     pub proxy: Option<&'a str>,
@@ -60,41 +53,52 @@ pub struct FastDownPullerOptions<'a> {
     pub accept_invalid_hostnames: bool,
     pub file_id: FileId,
     pub resp: Option<Arc<Mutex<Option<Response>>>>,
-    pub available_ips: Arc<[IpAddr]>,
+    pub available_ips: &'b [IpAddr],
 }
 
 impl FastDownPuller {
     pub fn new(option: FastDownPullerOptions) -> Result<Self, reqwest::Error> {
-        let turn = Arc::new(AtomicUsize::new(0));
-        let available_ips = option.available_ips;
-        let client = build_client(
-            &option.headers,
-            option.proxy,
-            option.accept_invalid_certs,
-            option.accept_invalid_hostnames,
-            if available_ips.is_empty() {
-                None
-            } else {
-                available_ips
-                    .get(turn.fetch_add(1, Ordering::AcqRel) % available_ips.len())
-                    .cloned()
-            },
-        )?;
-        Ok(Self {
-            inner: HttpPuller::new(
+        let turn = Arc::new(AtomicUsize::new(1));
+        let pullers: Arc<[HttpPuller<Client>]> = option
+            .available_ips
+            .iter()
+            .flat_map(|&ip| {
+                build_client(
+                    &option.headers,
+                    option.proxy,
+                    option.accept_invalid_certs,
+                    option.accept_invalid_hostnames,
+                    Some(ip),
+                )
+            })
+            .map(|client| {
+                HttpPuller::new(
+                    option.url.clone(),
+                    client,
+                    option.resp.clone(),
+                    option.file_id.clone(),
+                )
+            })
+            .collect();
+        let puller = if let Some(puller) = pullers.first().cloned() {
+            puller
+        } else {
+            HttpPuller::new(
                 option.url.clone(),
-                client,
+                build_client(
+                    &option.headers,
+                    option.proxy,
+                    option.accept_invalid_certs,
+                    option.accept_invalid_hostnames,
+                    None,
+                )?,
                 option.resp.clone(),
                 option.file_id.clone(),
-            ),
-            resp: option.resp,
-            headers: option.headers,
-            proxy: option.proxy.map(Arc::from),
-            url: Arc::new(option.url),
-            accept_invalid_certs: option.accept_invalid_certs,
-            accept_invalid_hostnames: option.accept_invalid_hostnames,
-            file_id: option.file_id,
-            available_ips,
+            )
+        };
+        Ok(Self {
+            inner: puller,
+            pullers,
             turn,
         })
     }
@@ -102,42 +106,24 @@ impl FastDownPuller {
 
 impl Clone for FastDownPuller {
     fn clone(&self) -> Self {
-        let available_ips = self.available_ips.clone();
+        let pullers = self.pullers.clone();
         let turn = self.turn.clone();
         Self {
-            inner: if let Some(ip) = {
-                if available_ips.is_empty() {
+            inner: if let Some(puller) = {
+                if pullers.is_empty() {
                     None
                 } else {
-                    available_ips
-                        .get(turn.fetch_add(1, Ordering::AcqRel) % available_ips.len())
+                    pullers
+                        .get(turn.fetch_add(1, Ordering::AcqRel) % pullers.len())
                         .cloned()
                 }
-            } && let Ok(client) = build_client(
-                &self.headers,
-                self.proxy.as_deref(),
-                self.accept_invalid_certs,
-                self.accept_invalid_hostnames,
-                Some(ip),
-            ) {
-                HttpPuller::new(
-                    self.url.as_ref().clone(),
-                    client,
-                    self.resp.clone(),
-                    self.file_id.clone(),
-                )
+            } {
+                puller
             } else {
                 self.inner.clone()
             },
-            resp: self.resp.clone(),
-            headers: self.headers.clone(),
-            proxy: self.proxy.clone(),
-            url: self.url.clone(),
-            accept_invalid_certs: self.accept_invalid_certs,
-            accept_invalid_hostnames: self.accept_invalid_hostnames,
-            file_id: self.file_id.clone(),
-            available_ips,
             turn,
+            pullers,
         }
     }
 }
