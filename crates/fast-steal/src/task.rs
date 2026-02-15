@@ -1,11 +1,27 @@
 extern crate alloc;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use core::{fmt, ops::Range, sync::atomic::Ordering};
 use portable_atomic::AtomicU128;
 
 #[derive(Debug, Clone)]
 pub struct Task {
-    state: Arc<AtomicU128>,
+    pub state: Arc<AtomicU128>,
+}
+#[derive(Debug, Clone)]
+pub struct WeakTask {
+    pub state: Weak<AtomicU128>,
+}
+
+impl WeakTask {
+    pub fn upgrade(&self) -> Option<Task> {
+        self.state.upgrade().map(|state| Task { state })
+    }
+    pub fn strong_count(&self) -> usize {
+        self.state.strong_count()
+    }
+    pub fn weak_count(&self) -> usize {
+        self.state.weak_count()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,41 +60,19 @@ impl Task {
     pub fn start(&self) -> u64 {
         (self.state.load(Ordering::Acquire) >> 64) as u64
     }
-    /// 当 start > end 时返回 RangeError
-    pub fn set_start(&self, start: u64) -> Result<(), RangeError> {
+    /// 当 start + bias <= old_start 时返回 RangeError
+    /// 否则返回 old_start..new_start.min(end)
+    pub fn safe_add_start(&self, start: u64, bias: u64) -> Result<Range<u64>, RangeError> {
+        let new_start = start.checked_add(bias).ok_or(RangeError)?;
         let mut old_state = self.state.load(Ordering::Acquire);
         loop {
             let mut range = Self::unpack(old_state);
-            range.start = start;
-            if range.start > range.end {
+            let new_start = new_start.min(range.end);
+            if new_start <= range.start {
                 break Err(RangeError);
             }
-            let new_state = Self::pack(range);
-            if old_state == new_state {
-                return Ok(());
-            }
-            match self.state.compare_exchange_weak(
-                old_state,
-                new_state,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break Ok(()),
-                Err(x) => old_state = x,
-            }
-        }
-    }
-    /// 1. 当 start + value 溢出时返回 RangeError
-    /// 2. 当 start + value > end 时返回 RangeError
-    pub fn fetch_add_start(&self, value: u64) -> Result<u64, RangeError> {
-        let mut old_state = self.state.load(Ordering::Acquire);
-        loop {
-            let mut range = Self::unpack(old_state);
-            let old_start = range.start;
-            range.start = range.start.checked_add(value).ok_or(RangeError)?;
-            if range.start > range.end {
-                break Err(RangeError);
-            }
+            let span = range.start..new_start;
+            range.start = new_start;
             let new_state = Self::pack(range);
             match self.state.compare_exchange_weak(
                 old_state,
@@ -86,56 +80,36 @@ impl Task {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => break Ok(old_start),
+                Ok(_) => break Ok(span),
                 Err(x) => old_state = x,
             }
         }
     }
+    // /// 1. 当 start + value 溢出时返回 RangeError
+    //
+    // pub fn fetch_add_start(&self, value: u64) -> Result<u64, RangeError> {
+    //     let mut old_state = self.state.load(Ordering::Acquire);
+    //     loop {
+    //         let mut range = Self::unpack(old_state);
+    //         let old_start = range.start;
+    //         range.start = range.start.checked_add(value).ok_or(RangeError)?;
+    //         if range.start > range.end {
+    //             break Err(RangeError);
+    //         }
+    //         let new_state = Self::pack(range);
+    //         match self.state.compare_exchange_weak(
+    //             old_state,
+    //             new_state,
+    //             Ordering::AcqRel,
+    //             Ordering::Acquire,
+    //         ) {
+    //             Ok(_) => break Ok(old_start),
+    //             Err(x) => old_state = x,
+    //         }
+    //     }
+    // }
     pub fn end(&self) -> u64 {
         self.state.load(Ordering::Acquire) as u64
-    }
-    /// 当 end < start 时返回 RangeError
-    pub fn set_end(&self, end: u64) -> Result<(), RangeError> {
-        let mut old_state = self.state.load(Ordering::Acquire);
-        loop {
-            let mut range = Self::unpack(old_state);
-            range.end = end;
-            if range.start > range.end {
-                break Err(RangeError);
-            }
-            let new_state = Self::pack(range);
-            if old_state == new_state {
-                return Ok(());
-            }
-            match self.state.compare_exchange_weak(
-                old_state,
-                new_state,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break Ok(()),
-                Err(x) => old_state = x,
-            }
-        }
-    }
-    /// 当 end + value 溢出时返回 RangeError
-    pub fn fetch_add_end(&self, value: u64) -> Result<u64, RangeError> {
-        let mut old_state = self.state.load(Ordering::Acquire);
-        loop {
-            let mut range = Self::unpack(old_state);
-            let old_end = range.end;
-            range.end = range.end.checked_add(value).ok_or(RangeError)?;
-            let new_state = Self::pack(range);
-            match self.state.compare_exchange_weak(
-                old_state,
-                new_state,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break Ok(old_end),
-                Err(x) => old_state = x,
-            }
-        }
     }
     pub fn remain(&self) -> u64 {
         let range = self.get();
@@ -166,7 +140,6 @@ impl Task {
             }
         }
     }
-
     pub fn take(&self) -> Option<Range<u64>> {
         let mut old_state = self.state.load(Ordering::Acquire);
         loop {
@@ -186,6 +159,11 @@ impl Task {
             }
         }
     }
+    pub fn downgrade(&self) -> WeakTask {
+        WeakTask {
+            state: Arc::downgrade(&self.state),
+        }
+    }
 }
 impl From<&Range<u64>> for Task {
     fn from(value: &Range<u64>) -> Self {
@@ -199,16 +177,6 @@ impl PartialEq for Task {
     }
 }
 impl Eq for Task {}
-impl Ord for Task {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.remain().cmp(&other.remain())
-    }
-}
-impl PartialOrd for Task {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -223,20 +191,9 @@ mod tests {
     }
 
     #[test]
-    fn test_setters() {
-        let task = Task::new(0..0);
-        task.set_end(14).unwrap();
-        task.set_start(7).unwrap();
-        assert_eq!(task.start(), 7);
-        assert_eq!(task.end(), 14);
-    }
-
-    #[test]
     fn test_remain() {
         let task = Task::new(10..25);
         assert_eq!(task.remain(), 15);
-        task.set_start(20).unwrap();
-        assert_eq!(task.remain(), 5);
     }
 
     #[test]

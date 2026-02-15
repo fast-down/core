@@ -25,6 +25,7 @@ use tokio::{
 
 pub struct TokioExecutor {
     tx: mpsc::UnboundedSender<(u64, u64)>,
+    speculative: bool,
 }
 #[derive(Clone)]
 pub struct TokioHandle(AbortHandle);
@@ -38,23 +39,26 @@ impl Handle for TokioHandle {
 
 impl Executor for TokioExecutor {
     type Handle = TokioHandle;
-    fn execute(&self, task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
+    fn execute(&self, mut task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
         println!("execute");
         let tx = self.tx.clone();
+        let speculative = self.speculative;
         let handle = tokio::spawn(async move {
             loop {
                 while task.start() < task.end() {
                     let i = task.start();
-                    task.fetch_add_start(1).unwrap();
                     let res = fib(i);
+                    let Ok(_) = task.safe_add_start(i, 1) else {
+                        println!("task-failed: {i} = {res}");
+                        continue;
+                    };
                     println!("task: {i} = {res}");
                     tx.send((i, res)).unwrap();
                 }
-                if !task_queue.steal(&task, 1) {
+                if !task_queue.steal(&mut task, 1, speculative) {
                     break;
                 }
             }
-            assert_eq!(task_queue.finish_work(&task), 1);
         });
         let abort_handle = handle.abort_handle();
         TokioHandle(abort_handle)
@@ -79,26 +83,58 @@ fn fib_fast(n: u64) -> u64 {
 
 #[tokio::main]
 async fn main() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let executor = TokioExecutor { tx };
-    let pre_data = [1..20, 41..48];
-    let task_queue = TaskQueue::new(pre_data.iter());
-    task_queue.set_threads(8, 1, Some(&executor));
-    drop(executor);
-    let mut data = HashMap::new();
-    while let Some((i, res)) = rx.recv().await {
-        println!("main: {i} = {res}");
-        if data.insert(i, res).is_some() {
-            panic!("数字 {i}，值为 {res} 重复计算");
+    {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let executor = TokioExecutor {
+            tx,
+            speculative: false,
+        };
+        let pre_data = [1..20, 41..48];
+        let task_queue = TaskQueue::new(pre_data.iter());
+        task_queue.set_threads(8, 1, Some(&executor));
+        drop(executor);
+        let mut data = HashMap::new();
+        while let Some((i, res)) = rx.recv().await {
+            println!("main: {i} = {res}");
+            if data.insert(i, res).is_some() {
+                panic!("数字 {i}，值为 {res} 重复计算");
+            }
         }
-    }
-    dbg!(&data);
-    for range in pre_data {
-        for i in range {
-            assert_eq!((i, data.get(&i)), (i, Some(&fib_fast(i))));
-            data.remove(&i);
+        dbg!(&data);
+        for range in pre_data {
+            for i in range {
+                assert_eq!((i, data.get(&i)), (i, Some(&fib_fast(i))));
+                data.remove(&i);
+            }
         }
+        assert_eq!(data.len(), 0);
     }
-    assert_eq!(data.len(), 0);
+    
+    {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let executor = TokioExecutor {
+            tx,
+            speculative: true,
+        };
+        let pre_data = [1..20, 41..48];
+        let task_queue = TaskQueue::new(pre_data.iter());
+        task_queue.set_threads(8, 1, Some(&executor));
+        drop(executor);
+        let mut data = HashMap::new();
+        while let Some((i, res)) = rx.recv().await {
+            println!("main: {i} = {res}");
+            if data.insert(i, res).is_some() {
+                panic!("数字 {i}，值为 {res} 重复计算");
+            }
+        }
+        dbg!(&data);
+        for range in pre_data {
+            for i in range {
+                assert_eq!((i, data.get(&i)), (i, Some(&fib_fast(i))));
+                data.remove(&i);
+            }
+        }
+        assert_eq!(data.len(), 0);
+    }
 }
 ```

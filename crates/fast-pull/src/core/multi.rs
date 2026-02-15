@@ -1,5 +1,5 @@
 extern crate std;
-use crate::{DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, Total, WorkerId};
+use crate::{DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, WorkerId};
 use bytes::Bytes;
 use core::{
     sync::atomic::{AtomicUsize, Ordering},
@@ -105,7 +105,7 @@ where
     WE: Send + Unpin + 'static,
 {
     type Handle = TokioHandle;
-    fn execute(&self, task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
+    fn execute(&self, mut task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
         let id = self.id.fetch_add(1, Ordering::SeqCst);
         let mut puller = self.puller.clone();
         let min_chunk_size = self.min_chunk_size;
@@ -114,11 +114,10 @@ where
         let tx = self.tx.clone();
         let tx_push = self.tx_push.clone();
         let handle = tokio::spawn(async move {
-            let _guard = WorkerGuard::new(id, &task_queue, &task, &tx);
             loop {
                 let mut start = task.start();
                 if start >= task.end() {
-                    if task_queue.steal(&task, min_chunk_size) {
+                    if task_queue.steal(&mut task, min_chunk_size, true) {
                         continue;
                     } else {
                         break;
@@ -138,24 +137,28 @@ where
                 loop {
                     match tokio::time::timeout(pull_timeout, stream.try_next()).await {
                         Ok(Ok(Some(mut chunk))) => {
+                            if chunk.is_empty() {
+                                continue;
+                            }
                             let len = chunk.len() as u64;
-                            if task.fetch_add_start(len).is_err() {
+                            let Ok(span) = task.safe_add_start(start, len) else {
                                 break;
+                            };
+                            if span.end >= task.end() {
+                                task_queue.cancel_tasks(&task);
                             }
-                            let range_start = start;
-                            start += len;
-                            let range_end = start.min(task.end());
-                            if range_start >= range_end {
-                                break;
-                            }
-                            let span = range_start..range_end;
-                            chunk.truncate(span.total() as usize);
+                            chunk = chunk
+                                .slice((span.start - start) as usize..(span.end - start) as usize);
+                            start = span.end;
                             let _ = tx.send(Event::PullProgress(id, span.clone()));
                             let tx_push = tx_push.clone();
                             let _ = tokio::spawn(async move {
                                 tx_push.send((id, span, chunk)).await.unwrap();
                             })
                             .await;
+                            if start >= task.end() {
+                                break;
+                            }
                         }
                         Ok(Ok(None)) => break,
                         Ok(Err((e, retry_gap))) => {
@@ -175,50 +178,9 @@ where
                     }
                 }
             }
+            let _ = tx.send(Event::Finished(id));
         });
         TokioHandle(handle.abort_handle())
-    }
-}
-
-pub struct WorkerGuard<RE, WE>
-where
-    RE: PullerError,
-    WE: Send + Unpin + 'static,
-{
-    pub task_queue: TaskQueue<TokioHandle>,
-    pub task: Task,
-    pub id: WorkerId,
-    pub tx: crossfire::MTx<crossfire::mpmc::List<Event<RE, WE>>>,
-}
-
-impl<RE, WE> WorkerGuard<RE, WE>
-where
-    RE: PullerError,
-    WE: Send + Unpin + 'static,
-{
-    pub fn new(
-        id: WorkerId,
-        task_queue: &TaskQueue<TokioHandle>,
-        task: &Task,
-        tx: &crossfire::MTx<crossfire::mpmc::List<Event<RE, WE>>>,
-    ) -> Self {
-        Self {
-            task_queue: task_queue.clone(),
-            task: task.clone(),
-            id,
-            tx: tx.clone(),
-        }
-    }
-}
-
-impl<RE, WE> Drop for WorkerGuard<RE, WE>
-where
-    RE: PullerError,
-    WE: Send + Unpin + 'static,
-{
-    fn drop(&mut self) {
-        self.task_queue.finish_work(&self.task);
-        let _ = self.tx.send(Event::Finished(self.id));
     }
 }
 

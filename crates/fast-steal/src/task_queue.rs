@@ -1,5 +1,5 @@
 extern crate alloc;
-use crate::{Executor, Handle, Task};
+use crate::{Executor, Handle, Task, WeakTask};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use core::ops::Range;
 use parking_lot::Mutex;
@@ -17,7 +17,7 @@ impl<H: Handle> Clone for TaskQueue<H> {
 }
 #[derive(Debug)]
 struct TaskQueueInner<H: Handle> {
-    running: VecDeque<(Task, H)>,
+    running: VecDeque<(WeakTask, H)>,
     waiting: VecDeque<Task>,
 }
 impl<H: Handle> TaskQueue<H> {
@@ -30,26 +30,11 @@ impl<H: Handle> TaskQueue<H> {
             })),
         }
     }
-    /// 仅供 Worker 线程在任务完成后调用
-    pub fn finish_work(&self, task: &Task) -> usize {
-        let mut guard = self.inner.lock();
-        let len = guard.running.len();
-        guard.running.retain(|(t, _)| t != task);
-        len - guard.running.len()
-    }
-    /// 用于从外部取消任务
-    pub fn cancel(&self, task: &Task) -> usize {
-        let mut guard = self.inner.lock();
-        let len = guard.running.len() + guard.waiting.len();
-        guard.running.retain(|(t, _)| t != task);
-        guard.waiting.retain(|t| t != task);
-        len - guard.running.len() - guard.waiting.len()
-    }
     pub fn add(&self, task: Task) {
         let mut guard = self.inner.lock();
         guard.waiting.push_back(task);
     }
-    pub fn steal(&self, task: &Task, min_chunk_size: u64) -> bool {
+    pub fn steal(&self, task: &mut Task, min_chunk_size: u64, speculative: bool) -> bool {
         let min_chunk_size = min_chunk_size.max(1);
         let mut guard = self.inner.lock();
         while let Some(new_task) = guard.waiting.pop_front() {
@@ -58,12 +43,24 @@ impl<H: Handle> TaskQueue<H> {
                 return true;
             }
         }
-        if let Some(steal_task) = guard.running.iter().map(|w| &w.0).max()
-            && steal_task.remain() >= min_chunk_size * 2
-            && let Ok(Some(range)) = steal_task.split_two()
+        if let Some(steal_task) = guard
+            .running
+            .iter()
+            .filter_map(|w| w.0.upgrade())
+            .filter(|w| w != task)
+            .max_by_key(|w| w.remain())
         {
-            task.set(range);
-            true
+            if steal_task.remain() >= min_chunk_size * 2
+                && let Ok(Some(range)) = steal_task.split_two()
+            {
+                task.set(range);
+                true
+            } else if speculative && steal_task.remain() > 0 {
+                task.state = steal_task.state.clone();
+                true
+            } else {
+                false
+            }
         } else {
             false
         }
@@ -77,6 +74,7 @@ impl<H: Handle> TaskQueue<H> {
     ) -> Option<()> {
         let min_chunk_size = min_chunk_size.max(1);
         let mut guard = self.inner.lock();
+        guard.running.retain(|t| t.0.strong_count() > 0);
         let len = guard.running.len();
         if len < threads {
             let executor = executor?;
@@ -84,25 +82,33 @@ impl<H: Handle> TaskQueue<H> {
             let mut temp = Vec::with_capacity(need);
             let iter = guard.waiting.drain(..need);
             for task in iter {
-                let handle = executor.execute(task.clone(), self.clone());
-                temp.push((task, handle));
+                let weak = task.downgrade();
+                let handle = executor.execute(task, self.clone());
+                temp.push((weak, handle));
             }
             guard.running.extend(temp);
             while guard.running.len() < threads
-                && let Some(steal_task) = guard.running.iter().map(|w| &w.0).max()
+                && let Some(steal_task) = guard
+                    .running
+                    .iter()
+                    .filter_map(|w| w.0.upgrade())
+                    .max_by_key(|w| w.remain())
                 && steal_task.remain() >= min_chunk_size * 2
                 && let Ok(Some(range)) = steal_task.split_two()
             {
                 let task = Task::new(range);
-                let handle = executor.execute(task.clone(), self.clone());
-                guard.running.push_back((task, handle));
+                let weak = task.downgrade();
+                let handle = executor.execute(task, self.clone());
+                guard.running.push_back((weak, handle));
             }
         } else if len > threads {
             let mut temp = Vec::with_capacity(len - threads);
             let iter = guard.running.drain(threads..);
             for (task, mut handle) in iter {
+                if let Some(task) = task.upgrade() {
+                    temp.push(task);
+                }
                 handle.abort();
-                temp.push(task);
             }
             guard.waiting.extend(temp);
         }
@@ -116,6 +122,16 @@ impl<H: Handle> TaskQueue<H> {
         let mut iter = guard.running.iter_mut().map(|w| &mut w.1);
         f(&mut iter)
     }
+    pub fn cancel_tasks(&self, task: &Task) {
+        let mut guard = self.inner.lock();
+        for (weak, handle) in &mut guard.running {
+            if let Some(t) = weak.upgrade()
+                && t == *task
+            {
+                handle.abort();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +143,7 @@ mod tests {
 
     pub struct TokioExecutor {
         tx: mpsc::UnboundedSender<(u64, u64)>,
+        speculative: bool,
     }
     #[derive(Clone)]
     pub struct TokioHandle(AbortHandle);
@@ -140,23 +157,26 @@ mod tests {
 
     impl Executor for TokioExecutor {
         type Handle = TokioHandle;
-        fn execute(&self, task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
+        fn execute(&self, mut task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
             println!("execute");
             let tx = self.tx.clone();
+            let speculative = self.speculative;
             let handle = tokio::spawn(async move {
                 loop {
                     while task.start() < task.end() {
                         let i = task.start();
-                        task.fetch_add_start(1).unwrap();
                         let res = fib(i);
+                        let Ok(_) = task.safe_add_start(i, 1) else {
+                            println!("task-failed: {i} = {res}");
+                            continue;
+                        };
                         println!("task: {i} = {res}");
                         tx.send((i, res)).unwrap();
                     }
-                    if !task_queue.steal(&task, 1) {
+                    if !task_queue.steal(&mut task, 1, speculative) {
                         break;
                     }
                 }
-                assert_eq!(task_queue.finish_work(&task), 1);
             });
             let abort_handle = handle.abort_handle();
             TokioHandle(abort_handle)
@@ -179,10 +199,41 @@ mod tests {
         a
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_task_queue() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let executor = TokioExecutor { tx };
+        let executor = TokioExecutor {
+            tx,
+            speculative: false,
+        };
+        let pre_data = [1..20, 41..48];
+        let task_queue = TaskQueue::new(pre_data.iter());
+        task_queue.set_threads(8, 1, Some(&executor));
+        drop(executor);
+        let mut data = HashMap::new();
+        while let Some((i, res)) = rx.recv().await {
+            println!("main: {i} = {res}");
+            if data.insert(i, res).is_some() {
+                panic!("数字 {i}，值为 {res} 重复计算");
+            }
+        }
+        dbg!(&data);
+        for range in pre_data {
+            for i in range {
+                assert_eq!((i, data.get(&i)), (i, Some(&fib_fast(i))));
+                data.remove(&i);
+            }
+        }
+        assert_eq!(data.len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_task_queue2() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let executor = TokioExecutor {
+            tx,
+            speculative: true,
+        };
         let pre_data = [1..20, 41..48];
         let task_queue = TaskQueue::new(pre_data.iter());
         task_queue.set_threads(8, 1, Some(&executor));
