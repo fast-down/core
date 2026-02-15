@@ -25,15 +25,19 @@ use tokio::{
 
 pub struct TokioExecutor {
     tx: mpsc::UnboundedSender<(u64, u64)>,
-    speculative: bool,
+    speculative: usize,
 }
 #[derive(Clone)]
 pub struct TokioHandle(AbortHandle);
 
 impl Handle for TokioHandle {
     type Output = ();
+    type Id = ();
     fn abort(&mut self) -> Self::Output {
         self.0.abort();
+    }
+    fn is_self(&mut self, _: &Self::Id) -> bool {
+        false
     }
 }
 
@@ -87,7 +91,7 @@ async fn main() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let executor = TokioExecutor {
             tx,
-            speculative: false,
+            speculative: 1,
         };
         let pre_data = [1..20, 41..48];
         let task_queue = TaskQueue::new(pre_data.iter());
@@ -114,7 +118,7 @@ async fn main() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let executor = TokioExecutor {
             tx,
-            speculative: true,
+            speculative: 2,
         };
         let pre_data = [1..20, 41..48];
         let task_queue = TaskQueue::new(pre_data.iter());

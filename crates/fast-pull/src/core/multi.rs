@@ -1,4 +1,3 @@
-extern crate std;
 use crate::{DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, WorkerId};
 use bytes::Bytes;
 use core::{
@@ -19,6 +18,7 @@ pub struct DownloadOptions<'a, I: Iterator<Item = &'a ProgressEntry>> {
     pub pull_timeout: Duration,
     pub push_queue_cap: usize,
     pub min_chunk_size: u64,
+    pub max_speculative: usize,
 }
 
 pub fn download_multi<'a, R: Puller, W: Pusher, I: Iterator<Item = &'a ProgressEntry>>(
@@ -62,6 +62,7 @@ pub fn download_multi<'a, R: Puller, W: Pusher, I: Iterator<Item = &'a ProgressE
         retry_gap: options.retry_gap,
         id: AtomicUsize::new(0),
         min_chunk_size: options.min_chunk_size,
+        max_speculative: options.max_speculative,
     });
     let task_queue = TaskQueue::new(options.download_chunks);
     task_queue.set_threads(
@@ -78,11 +79,18 @@ pub fn download_multi<'a, R: Puller, W: Pusher, I: Iterator<Item = &'a ProgressE
 }
 
 #[derive(Clone)]
-pub struct TokioHandle(AbortHandle);
+pub struct TokioHandle {
+    id: usize,
+    abort_handle: AbortHandle,
+}
 impl Handle for TokioHandle {
     type Output = ();
+    type Id = usize;
     fn abort(&mut self) -> Self::Output {
-        self.0.abort();
+        self.abort_handle.abort();
+    }
+    fn is_self(&mut self, id: &Self::Id) -> bool {
+        self.id == *id
     }
 }
 #[derive(Debug)]
@@ -98,6 +106,7 @@ where
     pull_timeout: Duration,
     id: AtomicUsize,
     min_chunk_size: u64,
+    max_speculative: usize,
 }
 impl<R, WE> Executor for TokioExecutor<R, WE>
 where
@@ -111,14 +120,15 @@ where
         let min_chunk_size = self.min_chunk_size;
         let pull_timeout = self.pull_timeout;
         let cfg_retry_gap = self.retry_gap;
+        let max_speculative = self.max_speculative;
         let tx = self.tx.clone();
         let tx_push = self.tx_push.clone();
         let handle = tokio::spawn(async move {
-            loop {
+            'task: loop {
                 let mut start = task.start();
                 if start >= task.end() {
-                    if task_queue.steal(&mut task, min_chunk_size, true) {
-                        continue;
+                    if task_queue.steal(&mut task, min_chunk_size, max_speculative) {
+                        continue 'task;
                     } else {
                         break;
                     }
@@ -142,10 +152,11 @@ where
                             }
                             let len = chunk.len() as u64;
                             let Ok(span) = task.safe_add_start(start, len) else {
-                                break;
+                                start += len;
+                                continue;
                             };
                             if span.end >= task.end() {
-                                task_queue.cancel_tasks(&task);
+                                task_queue.cancel_task(&task, &id);
                             }
                             chunk = chunk
                                 .slice((span.start - start) as usize..(span.end - start) as usize);
@@ -157,30 +168,33 @@ where
                             })
                             .await;
                             if start >= task.end() {
-                                break;
+                                continue 'task;
                             }
                         }
-                        Ok(Ok(None)) => break,
+                        Ok(Ok(None)) => continue 'task,
                         Ok(Err((e, retry_gap))) => {
                             let is_irrecoverable = e.is_irrecoverable();
                             let _ = tx.send(Event::PullError(id, e));
                             tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)).await;
                             if is_irrecoverable {
-                                break;
+                                continue 'task;
                             }
                         }
                         Err(_) => {
                             let _ = tx.send(Event::PullTimeout(id));
                             drop(stream);
                             puller = puller.clone();
-                            break;
+                            continue 'task;
                         }
                     }
                 }
             }
             let _ = tx.send(Event::Finished(id));
         });
-        TokioHandle(handle.abort_handle())
+        TokioHandle {
+            id,
+            abort_handle: handle.abort_handle(),
+        }
     }
 }
 
@@ -213,6 +227,7 @@ mod tests {
                 download_chunks: download_chunks.iter(),
                 pull_timeout: Duration::from_secs(5),
                 min_chunk_size: 1,
+                max_speculative: 3,
             },
         );
 

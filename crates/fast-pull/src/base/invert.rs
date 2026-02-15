@@ -50,14 +50,9 @@ where
 #[cfg(test)]
 mod tests {
     #![allow(clippy::single_range_in_vec_init)]
-    extern crate alloc;
     use super::*;
 
-    fn invert_vec(
-        progress: &[ProgressEntry],
-        total_size: u64,
-        window: u64,
-    ) -> alloc::vec::Vec<ProgressEntry> {
+    fn invert_vec(progress: &[ProgressEntry], total_size: u64, window: u64) -> Vec<ProgressEntry> {
         invert(progress.iter(), total_size, window).collect()
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "fast-pull"
-version = "3.7.0"
+version = "3.7.1"
 authors.workspace = true
 edition.workspace = true
 description = "Pull everything fast"
@@ -20,6 +20,7 @@ futures.workspace = true
 mmap-io = { version = "0.9.4", features = ["hugepages"], optional = true }
 parking_lot.workspace = true
 tokio = { version = "1.49.0", default-features = false, features = [
+  "macros",
   "rt",
   "sync",
   "time"
@@ -29,10 +30,6 @@ tokio = { version = "1.49.0", default-features = false, features = [
 tempfile = "3.24.0"
 tokio = { version = "1.49.0", default-features = false, features = [
   "io-util",
-  "macros",
-  "rt",
-  "sync",
-  "time"
 ] }
 
 [features]

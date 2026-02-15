@@ -1,9 +1,8 @@
-extern crate alloc;
 use crate::{Event, handle::SharedHandle};
-use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicBool, Ordering};
 use crossfire::{MAsyncRx, mpmc};
 use fast_steal::{Executor, Handle, TaskQueue};
+use std::sync::{Arc, Weak};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 
 pub mod handle;

@@ -7,5 +7,7 @@ pub trait Executor {
 
 pub trait Handle {
     type Output;
+    type Id;
     fn abort(&mut self) -> Self::Output;
+    fn is_self(&mut self, id: &Self::Id) -> bool;
 }

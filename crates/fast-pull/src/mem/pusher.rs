@@ -1,8 +1,7 @@
-extern crate alloc;
 use crate::{ProgressEntry, Pusher};
-use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
 use parking_lot::Mutex;
+use std::{sync::Arc, vec::Vec};
 
 #[derive(Debug, Default, Clone)]
 pub struct MemPusher {

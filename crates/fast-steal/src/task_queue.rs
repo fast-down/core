@@ -34,7 +34,7 @@ impl<H: Handle> TaskQueue<H> {
         let mut guard = self.inner.lock();
         guard.waiting.push_back(task);
     }
-    pub fn steal(&self, task: &mut Task, min_chunk_size: u64, speculative: bool) -> bool {
+    pub fn steal(&self, task: &mut Task, min_chunk_size: u64, max_speculative: usize) -> bool {
         let min_chunk_size = min_chunk_size.max(1);
         let mut guard = self.inner.lock();
         while let Some(new_task) = guard.waiting.pop_front() {
@@ -55,7 +55,10 @@ impl<H: Handle> TaskQueue<H> {
             {
                 task.set(range);
                 true
-            } else if speculative && steal_task.remain() > 0 {
+            } else if max_speculative > 1
+                && steal_task.remain() > 0
+                && steal_task.strong_count() <= max_speculative
+            {
                 task.state = steal_task.state.clone();
                 true
             } else {
@@ -122,11 +125,13 @@ impl<H: Handle> TaskQueue<H> {
         let mut iter = guard.running.iter_mut().map(|w| &mut w.1);
         f(&mut iter)
     }
-    pub fn cancel_tasks(&self, task: &Task) {
+
+    pub fn cancel_task(&self, task: &Task, id: &H::Id) {
         let mut guard = self.inner.lock();
         for (weak, handle) in &mut guard.running {
             if let Some(t) = weak.upgrade()
                 && t == *task
+                && !handle.is_self(id)
             {
                 handle.abort();
             }
@@ -143,15 +148,19 @@ mod tests {
 
     pub struct TokioExecutor {
         tx: mpsc::UnboundedSender<(u64, u64)>,
-        speculative: bool,
+        speculative: usize,
     }
     #[derive(Clone)]
     pub struct TokioHandle(AbortHandle);
 
     impl Handle for TokioHandle {
         type Output = ();
+        type Id = ();
         fn abort(&mut self) -> Self::Output {
             self.0.abort();
+        }
+        fn is_self(&mut self, _: &Self::Id) -> bool {
+            false
         }
     }
 
@@ -202,10 +211,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_task_queue() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let executor = TokioExecutor {
-            tx,
-            speculative: false,
-        };
+        let executor = TokioExecutor { tx, speculative: 1 };
         let pre_data = [1..20, 41..48];
         let task_queue = TaskQueue::new(pre_data.iter());
         task_queue.set_threads(8, 1, Some(&executor));
@@ -230,10 +236,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_task_queue2() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let executor = TokioExecutor {
-            tx,
-            speculative: true,
-        };
+        let executor = TokioExecutor { tx, speculative: 2 };
         let pre_data = [1..20, 41..48];
         let task_queue = TaskQueue::new(pre_data.iter());
         task_queue.set_threads(8, 1, Some(&executor));

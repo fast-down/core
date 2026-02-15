@@ -1,4 +1,3 @@
-extern crate std;
 use crate::{DownloadResult, Event, Puller, PullerError, Pusher, multi::TokioExecutor};
 use core::time::Duration;
 use crossfire::{mpmc, spsc};
@@ -90,7 +89,6 @@ pub fn download_single<R: Puller, W: Pusher>(
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
     use super::*;
     use crate::{
         Merge, ProgressEntry,

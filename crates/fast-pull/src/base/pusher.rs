@@ -1,6 +1,4 @@
-extern crate alloc;
 use crate::ProgressEntry;
-use alloc::boxed::Box;
 use bytes::Bytes;
 use core::fmt::Debug;
 

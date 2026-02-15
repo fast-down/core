@@ -12,8 +12,8 @@ license = "MIT"
 [workspace.dependencies]
 bytes = "1.11.1"
 crossfire = "3.0.4"
-fast-pull = { path = "crates/fast-pull", version = "3.7.0" }
-fast-steal = { path = "crates/fast-steal", version = "6.4.0" }
+fast-pull = { path = "crates/fast-pull", version = "3.7.1" }
+fast-steal = { path = "crates/fast-steal", version = "6.4.1" }
 futures = "0.3.31"
 parking_lot = "0.12.5"
 thiserror = "2.0.18"

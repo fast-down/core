@@ -1,4 +1,3 @@
-extern crate alloc;
 use core::ops::Range;
 
 pub type ProgressEntry = Range<u64>;
@@ -14,7 +13,7 @@ impl Total for ProgressEntry {
     }
 }
 
-impl Total for alloc::vec::Vec<ProgressEntry> {
+impl Total for Vec<ProgressEntry> {
     fn total(&self) -> u64 {
         self.iter().map(|r| r.total()).sum()
     }

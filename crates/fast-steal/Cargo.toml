@@ -1,6 +1,6 @@
 [package]
 name = "fast-steal"
-version = "6.4.0"
+version = "6.4.1"
 authors.workspace = true
 edition.workspace = true
 description = "特别快的多线程任务调度器，支持超细颗粒度的任务窃取"

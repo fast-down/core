@@ -85,29 +85,7 @@ impl Task {
             }
         }
     }
-    // /// 1. 当 start + value 溢出时返回 RangeError
-    //
-    // pub fn fetch_add_start(&self, value: u64) -> Result<u64, RangeError> {
-    //     let mut old_state = self.state.load(Ordering::Acquire);
-    //     loop {
-    //         let mut range = Self::unpack(old_state);
-    //         let old_start = range.start;
-    //         range.start = range.start.checked_add(value).ok_or(RangeError)?;
-    //         if range.start > range.end {
-    //             break Err(RangeError);
-    //         }
-    //         let new_state = Self::pack(range);
-    //         match self.state.compare_exchange_weak(
-    //             old_state,
-    //             new_state,
-    //             Ordering::AcqRel,
-    //             Ordering::Acquire,
-    //         ) {
-    //             Ok(_) => break Ok(old_start),
-    //             Err(x) => old_state = x,
-    //         }
-    //     }
-    // }
+
     pub fn end(&self) -> u64 {
         self.state.load(Ordering::Acquire) as u64
     }
@@ -163,6 +141,12 @@ impl Task {
         WeakTask {
             state: Arc::downgrade(&self.state),
         }
+    }
+    pub fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.state)
+    }
+    pub fn weak_count(&self) -> usize {
+        Arc::weak_count(&self.state)
     }
 }
 impl From<&Range<u64>> for Task {

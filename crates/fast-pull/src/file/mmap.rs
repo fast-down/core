@@ -1,4 +1,3 @@
-extern crate std;
 use crate::{ProgressEntry, Pusher};
 use bytes::Bytes;
 use mmap_io::{MemoryMappedFile, MmapIoError, MmapMode, flush::FlushPolicy};

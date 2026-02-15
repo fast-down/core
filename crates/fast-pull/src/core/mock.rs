@@ -1,8 +1,7 @@
-extern crate alloc;
 use crate::{ProgressEntry, PullResult, PullStream, Puller, PullerError};
-use alloc::{sync::Arc, vec::Vec};
 use bytes::Bytes;
 use futures::stream;
+use std::{sync::Arc, vec::Vec};
 
 pub fn build_mock_data(size: usize) -> Vec<u8> {
     (0..size).map(|i| (i % 256) as u8).collect()

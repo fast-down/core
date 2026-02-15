@@ -290,6 +290,7 @@ mod tests {
                 download_chunks: download_chunks.iter(),
                 pull_timeout: Duration::from_secs(5),
                 min_chunk_size: 1,
+                max_speculative: 3,
             },
         );
 
