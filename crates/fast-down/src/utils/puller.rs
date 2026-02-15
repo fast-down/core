@@ -14,9 +14,12 @@ use std::{
 };
 use url::Url;
 
+/// proxy 为 None 意为系统代理
+/// 为 Some("") 意为不使用代理
+/// 为 Some("proxy") 意为使用 proxy 作为全部代理
 pub fn build_client(
     headers: &HeaderMap,
-    proxy: &str,
+    proxy: Option<&str>,
     accept_invalid_certs: bool,
     accept_invalid_hostnames: bool,
     local_addr: Option<IpAddr>,
@@ -27,9 +30,11 @@ pub fn build_client(
         .danger_accept_invalid_certs(accept_invalid_certs)
         .danger_accept_invalid_hostnames(accept_invalid_hostnames)
         .local_address(local_addr);
-    if !proxy.is_empty() {
-        client = client.proxy(Proxy::all(proxy)?);
-    }
+    client = match proxy {
+        None => client,
+        Some("") => client.no_proxy(),
+        Some(p) => client.proxy(Proxy::all(p)?),
+    };
     client.build()
 }
 
@@ -37,7 +42,7 @@ pub fn build_client(
 pub struct FastDownPuller {
     inner: HttpPuller<Client>,
     headers: Arc<HeaderMap>,
-    proxy: Arc<str>,
+    proxy: Option<Arc<str>>,
     url: Arc<Url>,
     accept_invalid_certs: bool,
     accept_invalid_hostnames: bool,
@@ -50,7 +55,7 @@ pub struct FastDownPuller {
 pub struct FastDownPullerOptions<'a> {
     pub url: Url,
     pub headers: Arc<HeaderMap>,
-    pub proxy: &'a str,
+    pub proxy: Option<&'a str>,
     pub accept_invalid_certs: bool,
     pub accept_invalid_hostnames: bool,
     pub file_id: FileId,
@@ -84,7 +89,7 @@ impl FastDownPuller {
             ),
             resp: option.resp,
             headers: option.headers,
-            proxy: Arc::from(option.proxy),
+            proxy: option.proxy.map(Arc::from),
             url: Arc::new(option.url),
             accept_invalid_certs: option.accept_invalid_certs,
             accept_invalid_hostnames: option.accept_invalid_hostnames,
@@ -110,7 +115,7 @@ impl Clone for FastDownPuller {
                 }
             } && let Ok(client) = build_client(
                 &self.headers,
-                &self.proxy,
+                self.proxy.as_deref(),
                 self.accept_invalid_certs,
                 self.accept_invalid_hostnames,
                 Some(ip),
