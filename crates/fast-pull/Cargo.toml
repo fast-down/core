@@ -1,6 +1,6 @@
 [package]
 name = "fast-pull"
-version = "3.6.3"
+version = "3.7.0"
 authors.workspace = true
 edition.workspace = true
 description = "Pull everything fast"
