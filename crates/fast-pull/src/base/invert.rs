@@ -1,15 +1,15 @@
 use crate::ProgressEntry;
 
-pub struct InvertIter<'a, I: Iterator<Item = &'a ProgressEntry>> {
+pub struct InvertIter<I: Iterator<Item = ProgressEntry>> {
     iter: I,
     prev_end: u64,
     total_size: u64,
     window: u64,
 }
 
-impl<'a, I> Iterator for InvertIter<'a, I>
+impl<I> Iterator for InvertIter<I>
 where
-    I: Iterator<Item = &'a ProgressEntry>,
+    I: Iterator<Item = ProgressEntry>,
 {
     type Item = ProgressEntry;
     fn next(&mut self) -> Option<Self::Item> {
@@ -35,9 +35,9 @@ where
 }
 
 /// window: 当一个 ProgressEntry 的长度小于 window 时，会被合并到空洞内，以减少碎片化进度。
-pub fn invert<'a, I>(progress: I, total_size: u64, window: u64) -> InvertIter<'a, I>
+pub fn invert<I>(progress: I, total_size: u64, window: u64) -> InvertIter<I>
 where
-    I: Iterator<Item = &'a ProgressEntry>,
+    I: Iterator<Item = ProgressEntry>,
 {
     InvertIter {
         iter: progress,
@@ -53,7 +53,7 @@ mod tests {
     use super::*;
 
     fn invert_vec(progress: &[ProgressEntry], total_size: u64, window: u64) -> Vec<ProgressEntry> {
-        invert(progress.iter(), total_size, window).collect()
+        invert(progress.iter().cloned(), total_size, window).collect()
     }
 
     #[test]
