@@ -149,9 +149,9 @@ impl Task {
         Arc::weak_count(&self.state)
     }
 }
-impl From<&Range<u64>> for Task {
-    fn from(value: &Range<u64>) -> Self {
-        Self::new(value.clone())
+impl From<Range<u64>> for Task {
+    fn from(value: Range<u64>) -> Self {
+        Self::new(value)
     }
 }
 

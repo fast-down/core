@@ -1,6 +1,6 @@
 [package]
 name = "fast-pull"
-version = "3.7.1"
+version = "3.7.2"
 authors.workspace = true
 edition.workspace = true
 description = "Pull everything fast"
@@ -27,7 +27,7 @@ tokio = { version = "1.49.0", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-tempfile = "3.24.0"
+tempfile = "3.25.0"
 tokio = { version = "1.49.0", default-features = false, features = [
   "io-util",
 ] }

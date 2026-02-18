@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::task::AbortHandle;
 
 #[derive(Debug, Clone)]
-pub struct DownloadOptions<'a, I: Iterator<Item = &'a ProgressEntry>> {
+pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
     pub download_chunks: I,
     pub concurrent: usize,
     pub retry_gap: Duration,
@@ -21,10 +21,10 @@ pub struct DownloadOptions<'a, I: Iterator<Item = &'a ProgressEntry>> {
     pub max_speculative: usize,
 }
 
-pub fn download_multi<'a, R: Puller, W: Pusher, I: Iterator<Item = &'a ProgressEntry>>(
+pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     puller: R,
     mut pusher: W,
-    options: DownloadOptions<'a, I>,
+    options: DownloadOptions<I>,
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     let (tx, event_chain) = mpmc::unbounded_async();
     let (tx_push, rx_push) = mpsc::bounded_async(options.push_queue_cap);
@@ -224,7 +224,7 @@ mod tests {
                 concurrent: 32,
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
-                download_chunks: download_chunks.iter(),
+                download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
                 min_chunk_size: 1,
                 max_speculative: 3,

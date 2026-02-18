@@ -21,7 +21,7 @@ struct TaskQueueInner<H: Handle> {
     waiting: VecDeque<Task>,
 }
 impl<H: Handle> TaskQueue<H> {
-    pub fn new<'a>(tasks: impl Iterator<Item = &'a Range<u64>>) -> Self {
+    pub fn new(tasks: impl Iterator<Item = Range<u64>>) -> Self {
         let waiting: VecDeque<_> = tasks.map(Task::from).collect();
         Self {
             inner: Arc::new(Mutex::new(TaskQueueInner {
@@ -213,7 +213,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let executor = TokioExecutor { tx, speculative: 1 };
         let pre_data = [1..20, 41..48];
-        let task_queue = TaskQueue::new(pre_data.iter());
+        let task_queue = TaskQueue::new(pre_data.iter().cloned());
         task_queue.set_threads(8, 1, Some(&executor));
         drop(executor);
         let mut data = HashMap::new();
@@ -238,7 +238,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let executor = TokioExecutor { tx, speculative: 2 };
         let pre_data = [1..20, 41..48];
-        let task_queue = TaskQueue::new(pre_data.iter());
+        let task_queue = TaskQueue::new(pre_data.iter().cloned());
         task_queue.set_threads(8, 1, Some(&executor));
         drop(executor);
         let mut data = HashMap::new();
