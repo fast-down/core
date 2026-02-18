@@ -287,7 +287,7 @@ mod tests {
                 concurrent: 32,
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
-                download_chunks: download_chunks.iter(),
+                download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
                 min_chunk_size: 1,
                 max_speculative: 3,
