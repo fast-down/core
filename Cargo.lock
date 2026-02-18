@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "fast-down"
-version = "3.7.1"
+version = "3.7.2"
 dependencies = [
  "bytes",
  "fast-pull",
@@ -217,6 +217,7 @@ dependencies = [
  "parking_lot",
  "reqwest",
  "sanitize-filename",
+ "serde",
  "thiserror 2.0.18",
  "tokio",
  "url",
@@ -1606,6 +1607,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
