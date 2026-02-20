@@ -95,7 +95,7 @@ jobs:
         run: cargo install cargo-deny
 
       - name: Run deny
-        run: cargo deny check
+        run: cargo deny --all-features check --deny warnings
 
   udeps:
     name: Udeps
