@@ -1,8 +1,8 @@
 # fast-down
 
-[![GitHub last commit](https://img.shields.io/github/last-commit/fast-down/core/stable)](https://github.com/fast-down/core/commits/stable)
+[![GitHub last commit](https://img.shields.io/github/last-commit/fast-down/core/main)](https://github.com/fast-down/core/commits/main)
 [![Test](https://github.com/fast-down/core/workflows/Test/badge.svg)](https://github.com/fast-down/core/actions)
-[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/fast-down/core/blob/stable/LICENSE)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/fast-down/core/blob/main/LICENSE)
 
 `fast-down` **Fastest** concurrent downloader!
 
