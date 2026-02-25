@@ -16,9 +16,10 @@ use std::{
 use url::Url;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Proxy<T> {
     No,
+    #[default]
     System,
     Custom(T),
 }
@@ -32,7 +33,7 @@ impl<T> Proxy<T> {
         }
     }
 
-    pub fn deref(&self) -> Proxy<&T::Target>
+    pub fn as_deref(&self) -> Proxy<&T::Target>
     where
         T: Deref,
     {
@@ -40,6 +41,14 @@ impl<T> Proxy<T> {
             Self::No => Proxy::No,
             Self::System => Proxy::System,
             Self::Custom(t) => Proxy::Custom(&**t),
+        }
+    }
+
+    pub const fn as_ref(&self) -> Proxy<&T> {
+        match self {
+            Self::No => Proxy::No,
+            Self::System => Proxy::System,
+            Self::Custom(t) => Proxy::Custom(t),
         }
     }
 }
@@ -138,7 +147,7 @@ impl Clone for FastDownPuller {
         Self {
             inner: build_client(
                 &self.headers,
-                self.proxy.deref(),
+                self.proxy.as_deref(),
                 self.accept_invalid_certs,
                 self.accept_invalid_hostnames,
                 {
