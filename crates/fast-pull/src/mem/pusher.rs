@@ -8,11 +8,13 @@ pub struct MemPusher {
     pub receive: Arc<Mutex<Vec<u8>>>,
 }
 impl MemPusher {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             receive: Arc::new(Mutex::new(Vec::new())),
         }
     }
+    #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             receive: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
@@ -22,6 +24,7 @@ impl MemPusher {
 impl Pusher for MemPusher {
     type Error = ();
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)> {
+        #![allow(clippy::significant_drop_tightening, clippy::cast_possible_truncation)]
         let mut guard = self.receive.lock();
         if range.start as usize == guard.len() {
             guard.extend_from_slice(&content);

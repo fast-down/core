@@ -21,6 +21,8 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
     pub max_speculative: usize,
 }
 
+/// # Panics
+/// 当设置线程数，但 executor 意外为空时，panic
 pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     puller: R,
     mut pusher: W,
@@ -34,7 +36,7 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         while let Ok((id, spin, mut data)) = rx_push.recv() {
             loop {
                 match pusher.push(&spin, data) {
-                    Ok(_) => break,
+                    Ok(()) => break,
                     Err((err, bytes)) => {
                         data = bytes;
                         let _ = tx_clone.send(Event::PushError(id, err));
@@ -46,7 +48,7 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         }
         loop {
             match pusher.flush() {
-                Ok(_) => break,
+                Ok(()) => break,
                 Err(err) => {
                     let _ = tx_clone.send(Event::FlushError(err));
                 }
@@ -65,11 +67,14 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         max_speculative: options.max_speculative,
     });
     let task_queue = TaskQueue::new(options.download_chunks);
-    task_queue.set_threads(
-        options.concurrent,
-        options.min_chunk_size,
-        Some(executor.as_ref()),
-    );
+    #[allow(clippy::unwrap_used)]
+    task_queue
+        .set_threads(
+            options.concurrent,
+            options.min_chunk_size,
+            Some(executor.as_ref()),
+        )
+        .unwrap();
     DownloadResult::new(
         event_chain,
         push_handle,
@@ -78,7 +83,7 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     )
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TokioHandle {
     id: usize,
     notify: Arc<Notify>,
@@ -131,15 +136,14 @@ where
                 if start >= task.end() {
                     if task_queue.steal(&mut task, min_chunk_size, max_speculative) {
                         continue 'task;
-                    } else {
-                        break;
                     }
+                    break;
                 }
                 let _ = tx.send(Event::Pulling(id));
                 let download_range = start..task.end();
                 let mut stream = loop {
                     let t = tokio::select! {
-                        _ = notify.notified() => break 'task,
+                        () = notify.notified() => break 'task,
                         t = puller.pull(Some(&download_range)) => t
                     };
                     match t {
@@ -147,15 +151,15 @@ where
                         Err((e, retry_gap)) => {
                             let _ = tx.send(Event::PullError(id, e));
                             tokio::select! {
-                                _ = notify.notified() => break 'task,
-                                _ = tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)) => {}
+                                () = notify.notified() => break 'task,
+                                () = tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)) => {}
                             };
                         }
                     }
                 };
                 loop {
                     let t = tokio::select! {
-                        _ = notify.notified() => break 'task,
+                        () = notify.notified() => break 'task,
                         t = tokio::time::timeout(pull_timeout, stream.try_next()) => t
                     };
                     match t {
@@ -171,11 +175,13 @@ where
                             if span.end >= task.end() {
                                 task_queue.cancel_task(&task, &id);
                             }
-                            chunk = chunk
-                                .slice((span.start - start) as usize..(span.end - start) as usize);
+                            #[allow(clippy::cast_possible_truncation)]
+                            let slice_span =
+                                (span.start - start) as usize..(span.end - start) as usize;
+                            chunk = chunk.slice(slice_span);
                             start = span.end;
                             let _ = tx.send(Event::PullProgress(id, span.clone()));
-                            tx_push.send((id, span, chunk)).await.unwrap();
+                            let _ = tx_push.send((id, span, chunk)).await;
                             if start >= task.end() {
                                 continue 'task;
                             }
@@ -185,8 +191,8 @@ where
                             let is_irrecoverable = e.is_irrecoverable();
                             let _ = tx.send(Event::PullError(id, e));
                             tokio::select! {
-                                _ = notify.notified() => break 'task,
-                                _ = tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)) => {}
+                                () = notify.notified() => break 'task,
+                                () = tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)) => {}
                             };
                             if is_irrecoverable {
                                 continue 'task;
@@ -267,6 +273,7 @@ mod tests {
         assert!(pull_ids.iter().any(|x| *x));
         assert!(push_ids.iter().any(|x| *x));
 
+        #[allow(clippy::unwrap_used)]
         result.join().await.unwrap();
         assert_eq!(&**pusher.receive.lock(), mock_data);
     }

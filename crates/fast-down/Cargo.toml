@@ -36,3 +36,6 @@ reqwest = ["dep:httpdate", "dep:reqwest", "http"]
 sanitize-filename = ["dep:sanitize-filename"]
 serde = ["dep:serde", "url/serde"]
 utils = ["dep:getifaddrs", "reqwest", "reqwest/default-tls"]
+
+[lints]
+workspace = true

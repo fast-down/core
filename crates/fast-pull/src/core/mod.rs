@@ -10,9 +10,10 @@ pub mod mock;
 pub mod multi;
 pub mod single;
 
+#[derive(Debug)]
 pub struct DownloadResult<E, PullError, PushError>
 where
-    E: Executor,
+    E: Executor + Send + Sync,
     PullError: Send + Unpin + 'static,
     PushError: Send + Unpin + 'static,
 {
@@ -25,7 +26,7 @@ where
 
 impl<E, PullError, PushError> Clone for DownloadResult<E, PullError, PushError>
 where
-    E: Executor,
+    E: Executor + Send + Sync,
     PullError: Send + Unpin + 'static,
     PushError: Send + Unpin + 'static,
 {
@@ -42,7 +43,7 @@ where
 
 impl<E, PullError, PushError> DownloadResult<E, PullError, PushError>
 where
-    E: Executor,
+    E: Executor + Send + Sync,
     PullError: Send + Unpin + 'static,
     PushError: Send + Unpin + 'static,
 {
@@ -61,6 +62,8 @@ where
         }
     }
 
+    /// # Errors
+    /// 当写入线程意外退出时返回 `Arc<JoinError>`
     pub async fn join(&self) -> Result<(), Arc<JoinError>> {
         self.handle.join().await
     }
@@ -87,7 +90,7 @@ where
             let res = task_queue.set_threads(
                 threads,
                 min_chunk_size,
-                executor.as_ref().map(|e| e.as_ref()),
+                executor.as_ref().map(AsRef::as_ref),
             );
             if res.is_some() && threads > 0 {
                 self.is_aborted.store(false, Ordering::Release);
@@ -95,6 +98,7 @@ where
         }
     }
 
+    #[must_use]
     pub fn is_aborted(&self) -> bool {
         self.is_aborted.load(Ordering::Acquire)
     }
@@ -102,7 +106,7 @@ where
 
 impl<E, PullError, PushError> Drop for DownloadResult<E, PullError, PushError>
 where
-    E: Executor,
+    E: Executor + Send + Sync,
     PullError: Send + Unpin + 'static,
     PushError: Send + Unpin + 'static,
 {

@@ -38,12 +38,15 @@ impl HttpRequestBuilder for RequestBuilder {
                 .headers()
                 .get(header::RETRY_AFTER)
                 .and_then(|r| r.to_str().ok())
-                .and_then(|r| match r.parse() {
-                    Ok(r) => Some(Duration::from_secs(r)),
-                    Err(_) => match parse_http_date(r) {
-                        Ok(target_time) => target_time.duration_since(SystemTime::now()).ok(),
-                        Err(_) => None,
-                    },
+                .and_then(|r| {
+                    r.parse().map_or_else(
+                        |_| {
+                            parse_http_date(r).ok().and_then(|target_time| {
+                                target_time.duration_since(SystemTime::now()).ok()
+                            })
+                        },
+                        |r| Some(Duration::from_secs(r)),
+                    )
                 });
             Err((ReqwestResponseError::StatusCode(status), retry_after))
         }
@@ -82,7 +85,7 @@ pub enum ReqwestGetHeaderError {
     #[error("Invalid header name {0:?}")]
     InvalidHeaderName(InvalidHeaderName),
     #[error("Failed to convert header value to string {0:?}")]
-    ToStr(reqwest::header::ToStrError),
+    ToStr(header::ToStrError),
     #[error("Header not found")]
     NotFound,
 }
@@ -97,6 +100,12 @@ pub enum ReqwestResponseError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::significant_drop_tightening
+    )]
     use super::*;
     use crate::{
         http::{HttpError, HttpPuller, Prefetch},
@@ -169,7 +178,7 @@ mod tests {
             .mock("GET", "/test_star")
             .with_header(
                 "Content-Disposition",
-                r#"attachment; filename*=UTF-8''%E6%B5%8B%E8%AF%95.txt"#,
+                "attachment; filename*=UTF-8''%E6%B5%8B%E8%AF%95.txt",
             ) // "测试.txt"
             .create_async()
             .await;
@@ -223,12 +232,12 @@ mod tests {
                 HttpError::Request(e) => match e {
                     ReqwestResponseError::Reqwest(error) => unreachable!("{error:?}"),
                     ReqwestResponseError::StatusCode(status_code) => {
-                        assert_eq!(status_code, StatusCode::NOT_FOUND)
+                        assert_eq!(status_code, StatusCode::NOT_FOUND);
                     }
                 },
-                HttpError::Chunk(_) => unreachable!(),
-                HttpError::GetHeader(_) => unreachable!(),
-                HttpError::Irrecoverable => unreachable!(),
+                HttpError::Chunk(_) | HttpError::GetHeader(_) | HttpError::Irrecoverable => {
+                    unreachable!()
+                }
                 HttpError::MismatchedBody(file_id) => {
                     unreachable!("404 status code should not return mismatched body: {file_id:?}")
                 }

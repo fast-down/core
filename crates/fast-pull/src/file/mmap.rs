@@ -9,7 +9,12 @@ pub struct MmapFilePusher {
     mmap: MemoryMappedFile,
 }
 impl MmapFilePusher {
-    pub async fn new(path: impl AsRef<Path>, size: u64) -> Result<Self, MmapIoError> {
+    /// # Errors
+    /// 1. 当 `fs::try_exists` 失败时返回错误。
+    /// 2. 当 `fs::open` 失败时返回错误。
+    /// 3. 当 `fs::set_len` 失败时返回错误。
+    /// 4. 当 `mmap_io::open` 失败时返回错误。
+    pub async fn new(path: impl AsRef<Path> + Send + Sync, size: u64) -> Result<Self, MmapIoError> {
         let mmap_builder = MemoryMappedFile::builder(&path)
             .mode(MmapMode::ReadWrite)
             .huge_pages(true)
@@ -43,6 +48,7 @@ impl Pusher for MmapFilePusher {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use std::vec::Vec;
     use tempfile::NamedTempFile;

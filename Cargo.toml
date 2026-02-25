@@ -18,3 +18,11 @@ futures = "0.3.32"
 parking_lot = "0.12.5"
 thiserror = "2.0.18"
 url = "2.5.8"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# restriction = { level = "deny", priority = -1 }
+multiple_crate_versions = "allow"

@@ -1,10 +1,11 @@
 use std::{iter::Peekable, str::Chars};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ContentDisposition {
     pub filename: Option<String>,
 }
 impl ContentDisposition {
+    #[must_use]
     pub fn parse(header_value: &str) -> Self {
         let mut filename = None;
         let mut filename_star = None;
@@ -21,11 +22,12 @@ impl ContentDisposition {
             let key = Self::read_key(&mut chars);
             if key.is_empty() {
                 // 处理连续分号情况 (e.g. ";;")
-                if let Some(';') = chars.peek() {
-                    chars.next();
-                    continue;
-                } else {
-                    break;
+                match chars.peek() {
+                    Some(';') => {
+                        chars.next();
+                        continue;
+                    }
+                    _ => break,
                 }
             }
             // 检查 Key 后的分隔符
@@ -48,16 +50,17 @@ impl ContentDisposition {
             }
             Self::consume_whitespace(&mut chars);
             // 读取 Value
-            let value = if let Some('"') = chars.peek() {
-                chars.next(); // 消费起始引号
-                Self::read_quoted_string(&mut chars)
-            } else {
-                Self::read_token(&mut chars)
+            let value = match chars.peek() {
+                Some('"') => {
+                    chars.next(); // 消费起始引号
+                    Self::read_quoted_string(&mut chars)
+                }
+                _ => Self::read_token(&mut chars),
             };
             // 如果 Value 后面紧跟分号，消费它
             // 注意：如果 read_token 因为遇到空格停止，这里需要跳过可能的空格找到分号
             Self::consume_whitespace(&mut chars);
-            if let Some(';') = chars.peek() {
+            if matches!(chars.peek(), Some(';')) {
                 chars.next();
             }
             // 匹配 Key
@@ -72,7 +75,7 @@ impl ContentDisposition {
         }
     }
 
-    fn consume_whitespace(chars: &mut Peekable<Chars>) {
+    fn consume_whitespace(chars: &mut Peekable<Chars<'_>>) {
         while let Some(c) = chars.peek()
             && c.is_whitespace()
         {
@@ -81,7 +84,7 @@ impl ContentDisposition {
     }
 
     /// 读取 Key，遇到 `=` 或 `;` 停止
-    fn read_key(chars: &mut Peekable<Chars>) -> String {
+    fn read_key(chars: &mut Peekable<Chars<'_>>) -> String {
         let mut s = String::new();
         while let Some(&c) = chars.peek()
             && c != '='
@@ -95,7 +98,7 @@ impl ContentDisposition {
 
     /// 读取未加引号的 Token (Value)
     /// 停止条件：遇到 `;` 或者 **空白字符**
-    fn read_token(chars: &mut Peekable<Chars>) -> String {
+    fn read_token(chars: &mut Peekable<Chars<'_>>) -> String {
         let mut s = String::new();
         while let Some(&c) = chars.peek()
             && c != ';'
@@ -107,7 +110,7 @@ impl ContentDisposition {
         s
     }
 
-    fn read_quoted_string(chars: &mut Peekable<Chars>) -> String {
+    fn read_quoted_string(chars: &mut Peekable<Chars<'_>>) -> String {
         let mut s = String::new();
         while let Some(c) = chars.next() {
             match c {
@@ -123,7 +126,7 @@ impl ContentDisposition {
         s
     }
 
-    fn skip_until(chars: &mut Peekable<Chars>, target: char) {
+    fn skip_until(chars: &mut Peekable<Chars<'_>>, target: char) {
         for c in chars.by_ref() {
             if c == target {
                 break;
@@ -150,7 +153,9 @@ impl ContentDisposition {
             if c == '%' {
                 let h = chars.next()?.to_digit(16)?;
                 let l = chars.next()?.to_digit(16)?;
-                bytes.push(((h as u8) << 4) | (l as u8));
+                #[allow(clippy::cast_possible_truncation)]
+                let byte = ((h as u8) << 4) | (l as u8);
+                bytes.push(byte);
             } else {
                 bytes.push(c as u8);
             }
@@ -161,11 +166,12 @@ impl ContentDisposition {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     #[test]
     fn test_multiple_params_no_semicolon() {
-        let s = r#"attachment; filename=foo.txt size=10"#;
+        let s = "attachment; filename=foo.txt size=10";
         let cd = ContentDisposition::parse(s);
         assert_eq!(cd.filename.unwrap(), "foo.txt");
     }
@@ -186,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_complex_filename_star() {
-        let s = r#"attachment; filename*=UTF-8''%E6%B5%8B%E8%AF%95.txt"#;
+        let s = "attachment; filename*=UTF-8''%E6%B5%8B%E8%AF%95.txt";
         let cd = ContentDisposition::parse(s);
         assert_eq!(cd.filename.unwrap(), "测试.txt");
         let s = r#"attachment; filename=";;;"; filename*=UTF-8''%E6%B5%8B%E8%AF%95.txt"#;

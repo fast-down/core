@@ -26,9 +26,9 @@ pub enum Proxy<T> {
 impl<T> Proxy<T> {
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Proxy<U> {
         match self {
-            Proxy::No => Proxy::No,
-            Proxy::System => Proxy::System,
-            Proxy::Custom(t) => Proxy::Custom(f(t)),
+            Self::No => Proxy::No,
+            Self::System => Proxy::System,
+            Self::Custom(t) => Proxy::Custom(f(t)),
         }
     }
 
@@ -37,20 +37,22 @@ impl<T> Proxy<T> {
         T: Deref,
     {
         match self {
-            Proxy::No => Proxy::No,
-            Proxy::System => Proxy::System,
-            Proxy::Custom(t) => Proxy::Custom(t.deref()),
+            Self::No => Proxy::No,
+            Self::System => Proxy::System,
+            Self::Custom(t) => Proxy::Custom(&**t),
         }
     }
 }
 
+/// # Errors
+/// 当设置代理报错时返回 Error
 pub fn build_client(
     headers: &HeaderMap,
     proxy: Proxy<&str>,
     accept_invalid_certs: bool,
     accept_invalid_hostnames: bool,
     local_addr: Option<IpAddr>,
-) -> Result<reqwest::Client, reqwest::Error> {
+) -> Result<Client, reqwest::Error> {
     let mut client = ClientBuilder::new()
         .default_headers(headers.clone())
         .danger_accept_invalid_certs(accept_invalid_certs)
@@ -78,6 +80,7 @@ pub struct FastDownPuller {
     turn: Arc<AtomicUsize>,
 }
 
+#[derive(Debug)]
 pub struct FastDownPullerOptions<'a> {
     pub url: Url,
     pub headers: Arc<HeaderMap>,
@@ -90,7 +93,9 @@ pub struct FastDownPullerOptions<'a> {
 }
 
 impl FastDownPuller {
-    pub fn new(option: FastDownPullerOptions) -> Result<Self, reqwest::Error> {
+    /// # Errors
+    /// 当设置代理报错时返回 Error
+    pub fn new(option: FastDownPullerOptions<'_>) -> Result<Self, reqwest::Error> {
         let turn = Arc::new(AtomicUsize::new(1));
         let available_ips = option.available_ips;
         let client = build_client(
@@ -103,7 +108,7 @@ impl FastDownPuller {
             } else {
                 available_ips
                     .get(turn.fetch_add(1, Ordering::AcqRel) % available_ips.len())
-                    .cloned()
+                    .copied()
             },
         )?;
         Ok(Self {
@@ -131,7 +136,7 @@ impl Clone for FastDownPuller {
         let available_ips = self.available_ips.clone();
         let turn = self.turn.clone();
         Self {
-            inner: if let Ok(client) = build_client(
+            inner: build_client(
                 &self.headers,
                 self.proxy.deref(),
                 self.accept_invalid_certs,
@@ -142,19 +147,21 @@ impl Clone for FastDownPuller {
                     } else {
                         available_ips
                             .get(turn.fetch_add(1, Ordering::AcqRel) % available_ips.len())
-                            .cloned()
+                            .copied()
                     }
                 },
-            ) {
-                HttpPuller::new(
-                    self.url.as_ref().clone(),
-                    client,
-                    self.resp.clone(),
-                    self.file_id.clone(),
-                )
-            } else {
-                self.inner.clone()
-            },
+            )
+            .map_or_else(
+                |_| self.inner.clone(),
+                |client| {
+                    HttpPuller::new(
+                        self.url.as_ref().clone(),
+                        client,
+                        self.resp.clone(),
+                        self.file_id.clone(),
+                    )
+                },
+            ),
             resp: self.resp.clone(),
             headers: self.headers.clone(),
             proxy: self.proxy.clone(),

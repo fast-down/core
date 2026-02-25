@@ -21,6 +21,11 @@ where
         Self { rx }
     }
 
+    /// # Panics
+    /// 当用于等待任务完成的后台线程意外退出时报错
+    ///
+    /// # Errors
+    /// 当任务本身返回 `JoinError` 时，返回 `Arc<JoinError>`
     pub async fn join(&self) -> Result<T, Arc<JoinError>> {
         let mut rx = self.rx.clone();
         loop {
@@ -29,12 +34,11 @@ where
                 return res;
             }
             if rx.changed().await.is_err() {
-                return match rx.borrow().clone() {
-                    Some(res) => res,
-                    None => panic!(
-                        "SharedHandle background task panicked or was cancelled unexpectedly"
-                    ),
-                };
+                #[allow(clippy::expect_used)]
+                return rx
+                    .borrow()
+                    .clone()
+                    .expect("SharedHandle background task panicked or was cancelled unexpectedly");
             }
         }
     }

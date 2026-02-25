@@ -1,8 +1,10 @@
 use crate::{
     UrlInfo,
-    http::{GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse},
+    http::{
+        ContentDisposition, GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder,
+        HttpResponse,
+    },
     url_info::FileId,
-    utils::ContentDisposition,
 };
 use std::{borrow::Borrow, future::Future, time::Duration};
 use url::Url;
@@ -34,11 +36,11 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
         .or_else(|| {
             url.path_segments()
                 .and_then(|mut segments| segments.next_back())
-                .map(|s| urlencoding::decode(s).unwrap_or(s.into()))
+                .map(|s| urlencoding::decode(s).unwrap_or_else(|_| s.into()))
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| s.to_string())
         })
-        .or_else(|| url.domain().map(|s| s.to_string()))
+        .or_else(|| url.domain().map(ToString::to_string))
         .unwrap_or_else(|| url.to_string())
 }
 
@@ -49,10 +51,7 @@ async fn prefetch<Client: HttpClient>(client: &Client, url: Url) -> PrefetchResu
         .await
         .map_err(|(e, d)| (HttpError::Request(e), d))?;
     let headers = resp.headers();
-    let supports_range = headers
-        .get("accept-ranges")
-        .map(|v| v == "bytes")
-        .unwrap_or(false);
+    let supports_range = headers.get("accept-ranges").is_ok_and(|v| v == "bytes");
     let size = headers
         .get("content-length")
         .ok()

@@ -10,7 +10,7 @@
 
 ## 优势
 
-1. no_std 支持，不依赖于标准库
+1. `no_std` 支持，不依赖于标准库
 2. 超细颗粒度任务窃取，速度非常快
 3. 安全的 Rust，库中没有使用任何 unsafe 的代码
 4. 测试完全覆盖，保证库的稳定性和可靠性
@@ -95,14 +95,15 @@ async fn main() {
         };
         let pre_data = [1..20, 41..48];
         let task_queue = TaskQueue::new(pre_data.iter().cloned());
-        task_queue.set_threads(8, 1, Some(&executor));
+        task_queue.set_threads(8, 1, Some(&executor)).unwrap();
         drop(executor);
         let mut data = HashMap::new();
         while let Some((i, res)) = rx.recv().await {
             println!("main: {i} = {res}");
-            if data.insert(i, res).is_some() {
-                panic!("数字 {i}，值为 {res} 重复计算");
-            }
+            assert!(
+                data.insert(i, res).is_none(),
+                "数字 {i}，值为 {res} 重复计算"
+            );
         }
         dbg!(&data);
         for range in pre_data {
@@ -113,7 +114,7 @@ async fn main() {
         }
         assert_eq!(data.len(), 0);
     }
-    
+
     {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let executor = TokioExecutor {
@@ -122,14 +123,15 @@ async fn main() {
         };
         let pre_data = [1..20, 41..48];
         let task_queue = TaskQueue::new(pre_data.iter().cloned());
-        task_queue.set_threads(8, 1, Some(&executor));
+        task_queue.set_threads(8, 1, Some(&executor)).unwrap();
         drop(executor);
         let mut data = HashMap::new();
         while let Some((i, res)) = rx.recv().await {
             println!("main: {i} = {res}");
-            if data.insert(i, res).is_some() {
-                panic!("数字 {i}，值为 {res} 重复计算");
-            }
+            assert!(
+                data.insert(i, res).is_none(),
+                "数字 {i}，值为 {res} 重复计算"
+            );
         }
         dbg!(&data);
         for range in pre_data {

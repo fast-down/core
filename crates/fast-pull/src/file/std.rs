@@ -16,6 +16,9 @@ pub struct FilePusher {
     buffer_size: usize,
 }
 impl FilePusher {
+    /// # Errors
+    /// 1. 当 `fs::set_len` 失败时返回错误。
+    /// 2. 当 `BufWriter::with_capacity` 失败时返回错误。
     pub async fn new(
         file: tokio::fs::File,
         size: u64,
@@ -68,6 +71,7 @@ impl Pusher for FilePusher {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use std::{io::Read, vec::Vec};
     use tempfile::NamedTempFile;

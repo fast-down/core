@@ -3,7 +3,7 @@ use core::time::Duration;
 use crossfire::{mpmc, spsc};
 use futures::TryStreamExt;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct DownloadOptions {
     pub retry_gap: Duration,
     pub push_queue_cap: usize,
@@ -14,16 +14,16 @@ pub fn download_single<R: Puller, W: Pusher>(
     mut pusher: W,
     options: DownloadOptions,
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
+    const ID: usize = 0;
     let (tx, event_chain) = mpmc::unbounded_async();
     let (tx_push, rx_push) = spsc::bounded_async(options.push_queue_cap);
     let tx_clone = tx.clone();
-    const ID: usize = 0;
     let rx_push = rx_push.into_blocking();
     let push_handle = tokio::task::spawn_blocking(move || {
         while let Ok((spin, mut data)) = rx_push.recv() {
             loop {
                 match pusher.push(&spin, data) {
-                    Ok(_) => break,
+                    Ok(()) => break,
                     Err((err, bytes)) => {
                         data = bytes;
                         let _ = tx_clone.send(Event::PushError(ID, err));
@@ -35,7 +35,7 @@ pub fn download_single<R: Puller, W: Pusher>(
         }
         loop {
             match pusher.flush() {
-                Ok(_) => break,
+                Ok(()) => break,
                 Err(err) => {
                     let _ = tx_clone.send(Event::FlushError(err));
                 }
@@ -62,7 +62,7 @@ pub fn download_single<R: Puller, W: Pusher>(
                         let len = chunk.len() as u64;
                         let span = downloaded..(downloaded + len);
                         let _ = tx.send(Event::PullProgress(ID, span.clone()));
-                        tx_push.send((span, chunk)).await.unwrap();
+                        let _ = tx_push.send((span, chunk)).await;
                         downloaded += len;
                     }
                     Ok(None) => break 'redownload,
@@ -132,6 +132,7 @@ mod tests {
         assert_eq!(pull_progress, download_chunks);
         assert_eq!(push_progress, download_chunks);
 
+        #[allow(clippy::unwrap_used)]
         result.join().await.unwrap();
         assert_eq!(&**pusher.receive.lock(), mock_data);
     }

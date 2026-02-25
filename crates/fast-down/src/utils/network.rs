@@ -1,6 +1,8 @@
 use getifaddrs::{InterfaceFlags, getifaddrs};
 use std::net::IpAddr;
 
+/// # Errors
+/// 无法读取网卡信息时报错
 pub fn get_available_local_ips() -> std::io::Result<Vec<InterfaceInfo>> {
     const VIRTUAL_KEYWORDS: &[&str] = &[
         // Docker 及其网桥
@@ -48,13 +50,14 @@ pub fn get_available_local_ips() -> std::io::Result<Vec<InterfaceInfo>> {
     Ok(ips)
 }
 
-fn is_link_local(ip: &IpAddr) -> bool {
+const fn is_link_local(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_link_local(),
         IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
     }
 }
 
+#[derive(Debug)]
 pub struct InterfaceInfo {
     pub name: String,
     pub ip: IpAddr,

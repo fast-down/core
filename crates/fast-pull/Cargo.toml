@@ -36,3 +36,6 @@ tokio = { version = "1.49.0", default-features = false, features = [
 default = ["file", "mem"]
 file = ["dep:mmap-io", "tokio/fs"]
 mem = []
+
+[lints]
+workspace = true

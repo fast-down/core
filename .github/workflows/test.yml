@@ -10,110 +10,96 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Tests
+  format:
+    name: Format Check
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        channel:
-          - stable
-          - beta
-          - nightly
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.channel }}
-
-      - name: Rust Cache
-        uses: swatinem/rust-cache@v2
-
-      - name: Test
-        run: cargo test --all-features --verbose
-
-      - name: Test (no-default-features)
-        run: cargo test --no-default-features --verbose
+          components: rustfmt
+      - run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
           components: clippy
-
-      - name: Rust Cache
-        uses: swatinem/rust-cache@v2
-
+      - uses: swatinem/rust-cache@v2
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
       - name: Run Clippy
-        run: cargo clippy --all-features --all-targets --verbose -- -Dwarnings
+        run: cargo hack clippy --feature-powerset
 
-      - name: Run Clippy (minimal-versions)
-        run: cargo clippy --all-features --all-targets -Z minimal-versions --verbose -- -Dwarnings
-
-      - name: Run Clippy (no-default-features)
-        run: cargo clippy --no-default-features --all-targets --verbose -- -Dwarnings
-
-  format:
-    name: Format
+  test:
+    name: Test
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [stable, beta, nightly]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install latest stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
-          components: rustfmt
-
-      - name: Run rustfmt
-        run: cargo fmt --check
+          toolchain: ${{ matrix.channel }}
+      - uses: swatinem/rust-cache@v2
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
+      - name: Run Tests
+        run: cargo hack test --feature-powerset --verbose
 
   deny:
-    name: Deny
+    name: Cargo Deny
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install latest stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust Cache
-        uses: swatinem/rust-cache@v2
-
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
       - name: Install cargo-deny
         run: cargo install cargo-deny
-
-      - name: Run deny
-        run: cargo deny --all-features check --deny warnings
+      - name: Run Deny
+        run: cargo deny --all-features check
 
   udeps:
-    name: Udeps
+    name: Unused Deps
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: nightly
-
-      - name: Rust Cache
-        uses: swatinem/rust-cache@v2
-
-      - name: Install cargo-udeps
-        run: cargo install cargo-udeps
-
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: swatinem/rust-cache@v2
+      - name: Install cargo-hack & cargo-udeps
+        run: |
+          cargo install cargo-hack
+          cargo install cargo-udeps
       - name: Run Udeps
-        run: cargo udeps
+        run: cargo hack udeps --feature-powerset
+
+  docs:
+    name: Doc Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
+      - name: Run Doc Check
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo hack doc --feature-powerset --no-deps
+
+  minimal-versions:
+    name: Minimal Versions Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: swatinem/rust-cache@v2
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
+      - name: Check with minimal versions
+        run: cargo hack check --feature-powerset -Z minimal-versions

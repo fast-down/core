@@ -5,7 +5,15 @@ use url::Url;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UrlInfo {
     pub size: u64,
-    /// 服务器返回的原始文件名，必须清洗掉不合法字符才能安全使用，用 [`UrlInfo::filename()`] 方法处理好的文件名
+    /// 服务器返回的原始文件名，必须清洗掉不合法字符才能安全使用
+    #[cfg_attr(
+        feature = "sanitize-filename",
+        doc = "用 [`UrlInfo::filename()`] 方法处理文件名"
+    )]
+    #[cfg_attr(
+        not(feature = "sanitize-filename"),
+        doc = "开启 `sanitize-filename` 特性后，可使用 `filename()` 方法处理文件名。"
+    )]
     pub raw_name: String,
     pub supports_range: bool,
     pub fast_download: bool,
@@ -15,6 +23,7 @@ pub struct UrlInfo {
 
 #[cfg(feature = "sanitize-filename")]
 impl UrlInfo {
+    #[must_use]
     pub fn filename(&self) -> String {
         sanitize_filename::sanitize_with_options(
             &self.raw_name,

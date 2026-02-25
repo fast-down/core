@@ -1,5 +1,7 @@
+mod content_pisposition;
 mod prefetch;
 mod puller;
+pub use content_pisposition::*;
 pub use prefetch::*;
 pub use puller::*;
 
@@ -29,6 +31,8 @@ pub trait HttpResponse: Send + Unpin {
 }
 pub trait HttpHeaders {
     type GetHeaderError: Send + Debug + Unpin;
+    /// # Errors
+    /// 当获取头信息报错时返回 Error
     fn get(&self, header: &str) -> Result<&str, Self::GetHeaderError>;
 }
 
@@ -50,6 +54,6 @@ pub enum HttpError<Client: HttpClient> {
 
 impl<C: HttpClient> PullerError for HttpError<C> {
     fn is_irrecoverable(&self) -> bool {
-        matches!(self, HttpError::Irrecoverable)
+        matches!(self, Self::Irrecoverable)
     }
 }

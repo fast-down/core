@@ -13,12 +13,15 @@ pub struct WeakTask {
 }
 
 impl WeakTask {
+    #[must_use]
     pub fn upgrade(&self) -> Option<Task> {
         self.state.upgrade().map(|state| Task { state })
     }
+    #[must_use]
     pub fn strong_count(&self) -> usize {
         self.state.strong_count()
     }
+    #[must_use]
     pub fn weak_count(&self) -> usize {
         self.state.weak_count()
     }
@@ -34,34 +37,46 @@ impl fmt::Display for RangeError {
 }
 
 impl Task {
+    #[allow(clippy::inline_always)]
     #[inline(always)]
-    fn pack(range: Range<u64>) -> u128 {
+    const fn pack(range: Range<u64>) -> u128 {
         ((range.start as u128) << 64) | (range.end as u128)
     }
+    #[allow(clippy::inline_always)]
     #[inline(always)]
-    fn unpack(state: u128) -> Range<u64> {
-        (state >> 64) as u64..state as u64
+    const fn unpack(state: u128) -> Range<u64> {
+        #[allow(clippy::cast_possible_truncation)]
+        let end = state as u64;
+        (state >> 64) as u64..end
     }
 
+    /// # Panics
+    /// 当 range.start > range.end
+    #[must_use]
     pub fn new(range: Range<u64>) -> Self {
         assert!(range.start <= range.end);
         Self {
             state: Arc::new(AtomicU128::new(Self::pack(range))),
         }
     }
+    #[must_use]
     pub fn get(&self) -> Range<u64> {
         let state = self.state.load(Ordering::Acquire);
         Self::unpack(state)
     }
+    /// # Panics
+    /// 当 range.start > range.end
     pub fn set(&self, range: Range<u64>) {
         assert!(range.start <= range.end);
         self.state.store(Self::pack(range), Ordering::Release);
     }
+    #[must_use]
     pub fn start(&self) -> u64 {
         (self.state.load(Ordering::Acquire) >> 64) as u64
     }
-    /// 当 start + bias <= old_start 时返回 RangeError
-    /// 否则返回 old_start..new_start.min(end)
+    /// # Errors
+    /// 当 `start` + `bias` <= `old_start` 时返回 [`RangeError`]
+    /// 否则返回 `old_start..new_start.min(end)`
     pub fn safe_add_start(&self, start: u64, bias: u64) -> Result<Range<u64>, RangeError> {
         let new_start = start.checked_add(bias).ok_or(RangeError)?;
         let mut old_state = self.state.load(Ordering::Acquire);
@@ -85,15 +100,20 @@ impl Task {
             }
         }
     }
-
+    #[must_use]
     pub fn end(&self) -> u64 {
-        self.state.load(Ordering::Acquire) as u64
+        let state = self.state.load(Ordering::Acquire);
+        #[allow(clippy::cast_possible_truncation)]
+        let end = state as u64;
+        end
     }
+    #[must_use]
     pub fn remain(&self) -> u64 {
         let range = self.get();
         range.end.saturating_sub(range.start)
     }
-    /// 1. 当 start > end 时返回 RangeError
+    /// # Errors
+    /// 1. 当 start > end 时返回 [`RangeError`]
     /// 2. 当 remain < 2 时返回 None 并且不会修改自己
     pub fn split_two(&self) -> Result<Option<Range<u64>>, RangeError> {
         let mut old_state = self.state.load(Ordering::Acquire);
@@ -118,6 +138,7 @@ impl Task {
             }
         }
     }
+    #[must_use]
     pub fn take(&self) -> Option<Range<u64>> {
         let mut old_state = self.state.load(Ordering::Acquire);
         loop {
@@ -137,14 +158,17 @@ impl Task {
             }
         }
     }
+    #[must_use]
     pub fn downgrade(&self) -> WeakTask {
         WeakTask {
             state: Arc::downgrade(&self.state),
         }
     }
+    #[must_use]
     pub fn strong_count(&self) -> usize {
         Arc::strong_count(&self.state)
     }
+    #[must_use]
     pub fn weak_count(&self) -> usize {
         Arc::weak_count(&self.state)
     }
@@ -164,6 +188,7 @@ impl Eq for Task {}
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     #[test]

@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use tokio::{fs, io};
 
+/// # Errors
+/// 当 `fs::try_exists()` 失败时返回 Error
 pub async fn gen_unique_path(path: impl AsRef<Path>) -> io::Result<PathBuf> {
     let path = path.as_ref();
     if !fs::try_exists(path).await? {

@@ -17,15 +17,24 @@ use std::{
 };
 use url::Url;
 
-#[derive(Clone)]
 pub struct HttpPuller<Client: HttpClient> {
     client: Client,
     url: Url,
     resp: Option<Arc<Mutex<Option<GetResponse<Client>>>>>,
     file_id: FileId,
 }
+impl<C: HttpClient> Clone for HttpPuller<C> {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            url: self.url.clone(),
+            resp: self.resp.clone(),
+            file_id: self.file_id.clone(),
+        }
+    }
+}
 impl<Client: HttpClient> HttpPuller<Client> {
-    pub fn new(
+    pub const fn new(
         url: Url,
         client: Client,
         resp: Option<Arc<Mutex<Option<GetResponse<Client>>>>>,
@@ -120,13 +129,12 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
                             resp.headers().get("etag").ok(),
                             resp.headers().get("last-modified").ok(),
                         );
-                        if new_file_id != self.file_id {
-                            self.state = ResponseState::None;
-                            Poll::Ready(Some(Err((HttpError::MismatchedBody(new_file_id), None))))
-                        } else {
+                        if new_file_id == self.file_id {
                             self.state = ResponseState::Streaming(into_chunk_stream(resp));
                             continue;
                         }
+                        self.state = ResponseState::None;
+                        Poll::Ready(Some(Err((HttpError::MismatchedBody(new_file_id), None))))
                     }
                     Poll::Ready(Err((e, d))) => {
                         self.state = ResponseState::None;
@@ -137,14 +145,13 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
                 ResponseState::None => {
                     if self.range.end == u64::MAX {
                         break Poll::Ready(Some(Err((HttpError::Irrecoverable, None))));
-                    } else {
-                        let resp = self
-                            .client
-                            .get(self.url.clone(), Some(self.range.clone()))
-                            .send();
-                        self.state = ResponseState::Pending(Box::pin(resp));
-                        continue;
                     }
+                    let resp = self
+                        .client
+                        .get(self.url.clone(), Some(self.range.clone()))
+                        .send();
+                    self.state = ResponseState::Pending(Box::pin(resp));
+                    continue;
                 }
                 ResponseState::Streaming(stream) => match stream.as_mut().poll_next(cx) {
                     Poll::Ready(Some(Ok(chunk))) => {
@@ -165,6 +172,7 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use futures::TryStreamExt;
 
@@ -184,7 +192,7 @@ mod tests {
             Ok(MockResponse::new())
         }
     }
-    pub struct MockResponse {
+    struct MockResponse {
         headers: MockHeaders,
         url: Url,
     }
@@ -209,7 +217,7 @@ mod tests {
             DelayChunk::new().await
         }
     }
-    pub struct MockHeaders;
+    struct MockHeaders;
     impl HttpHeaders for MockHeaders {
         type GetHeaderError = MockError;
         fn get(&self, _header: &str) -> Result<&str, Self::GetHeaderError> {
@@ -217,7 +225,7 @@ mod tests {
         }
     }
     #[derive(Debug)]
-    pub struct MockError;
+    struct MockError;
 
     struct DelayChunk {
         polled_once: bool,
@@ -256,7 +264,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), async { stream.try_next().await }).await;
         match result {
             Ok(Ok(Some(bytes))) => {
-                println!("收到数据: {:?}", bytes);
+                println!("收到数据: {bytes:?}");
                 assert_eq!(bytes, Bytes::from_static(b"success"));
                 println!("测试通过：HttpPuller 正确处理了 Pending 状态！");
             }

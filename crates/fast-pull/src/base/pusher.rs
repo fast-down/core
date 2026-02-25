@@ -38,16 +38,12 @@ where
 {
     type Error = Box<dyn AnyError>;
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)> {
-        self.inner.push(range, content).map_err(|(e, b)| {
-            let err: Box<dyn AnyError> = Box::new(e);
-            (err, b)
-        })
+        self.inner
+            .push(range, content)
+            .map_err(|(e, b)| (BoxPusher::upcast(e), b))
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
-        self.inner.flush().map_err(|e| {
-            let err: Box<dyn AnyError> = Box::new(e);
-            err
-        })
+        self.inner.flush().map_err(|e| BoxPusher::upcast(e))
     }
 }
 
@@ -59,5 +55,8 @@ impl BoxPusher {
         Self {
             pusher: Box::new(PusherAdapter { inner: pusher }),
         }
+    }
+    pub fn upcast<E: AnyError>(e: E) -> Box<dyn AnyError> {
+        Box::new(e)
     }
 }
