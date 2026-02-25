@@ -88,6 +88,7 @@ pub fn download_single<R: Puller, W: Pusher>(
 }
 
 #[cfg(test)]
+#[cfg(feature = "mem")]
 mod tests {
     use super::*;
     use crate::{

@@ -217,6 +217,7 @@ where
 }
 
 #[cfg(test)]
+#[cfg(feature = "mem")]
 mod tests {
     use vec::Vec;
 
