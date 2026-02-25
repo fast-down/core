@@ -1,6 +1,6 @@
 [package]
 name = "fast-down"
-version = "3.7.7"
+version = "3.8.0"
 authors.workspace = true
 edition.workspace = true
 description = "Download everything fast"

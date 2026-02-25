@@ -1,5 +1,6 @@
 use crate::ProgressEntry;
 
+#[derive(Debug)]
 pub struct InvertIter<I: Iterator<Item = ProgressEntry>> {
     iter: I,
     prev_end: u64,
@@ -34,8 +35,8 @@ where
     }
 }
 
-/// window: 当一个 ProgressEntry 的长度小于 window 时，会被合并到空洞内，以减少碎片化进度。
-pub fn invert<I>(progress: I, total_size: u64, window: u64) -> InvertIter<I>
+/// window: 当一个 [`ProgressEntry`] 的长度小于 `window` 时，会被合并到空洞内，以减少碎片化进度。
+pub const fn invert<I>(progress: I, total_size: u64, window: u64) -> InvertIter<I>
 where
     I: Iterator<Item = ProgressEntry>,
 {

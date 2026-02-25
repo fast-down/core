@@ -4,9 +4,10 @@ use crate::{
 };
 use fast_pull::Puller;
 use parking_lot::Mutex;
-use reqwest::{Client, ClientBuilder, Proxy, Response, header::HeaderMap};
+use reqwest::{Client, ClientBuilder, Proxy as ProxyInner, Response, header::HeaderMap};
 use std::{
     net::IpAddr,
+    ops::Deref,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -14,12 +15,38 @@ use std::{
 };
 use url::Url;
 
-/// proxy 为 None 意为系统代理
-/// 为 Some("") 意为不使用代理
-/// 为 Some("proxy") 意为使用 proxy 作为全部代理
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Proxy<T> {
+    No,
+    System,
+    Custom(T),
+}
+
+impl<T> Proxy<T> {
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Proxy<U> {
+        match self {
+            Proxy::No => Proxy::No,
+            Proxy::System => Proxy::System,
+            Proxy::Custom(t) => Proxy::Custom(f(t)),
+        }
+    }
+
+    pub fn deref(&self) -> Proxy<&T::Target>
+    where
+        T: Deref,
+    {
+        match self {
+            Proxy::No => Proxy::No,
+            Proxy::System => Proxy::System,
+            Proxy::Custom(t) => Proxy::Custom(t.deref()),
+        }
+    }
+}
+
 pub fn build_client(
     headers: &HeaderMap,
-    proxy: Option<&str>,
+    proxy: Proxy<&str>,
     accept_invalid_certs: bool,
     accept_invalid_hostnames: bool,
     local_addr: Option<IpAddr>,
@@ -30,9 +57,9 @@ pub fn build_client(
         .danger_accept_invalid_hostnames(accept_invalid_hostnames)
         .local_address(local_addr);
     client = match proxy {
-        None => client,
-        Some("") => client.no_proxy(),
-        Some(p) => client.proxy(Proxy::all(p)?),
+        Proxy::No => client.no_proxy(),
+        Proxy::System => client,
+        Proxy::Custom(p) => client.proxy(ProxyInner::all(p)?),
     };
     client.build()
 }
@@ -41,7 +68,7 @@ pub fn build_client(
 pub struct FastDownPuller {
     inner: HttpPuller<Client>,
     headers: Arc<HeaderMap>,
-    proxy: Option<Arc<str>>,
+    proxy: Proxy<Arc<str>>,
     url: Arc<Url>,
     accept_invalid_certs: bool,
     accept_invalid_hostnames: bool,
@@ -54,7 +81,7 @@ pub struct FastDownPuller {
 pub struct FastDownPullerOptions<'a> {
     pub url: Url,
     pub headers: Arc<HeaderMap>,
-    pub proxy: Option<&'a str>,
+    pub proxy: Proxy<&'a str>,
     pub accept_invalid_certs: bool,
     pub accept_invalid_hostnames: bool,
     pub file_id: FileId,
@@ -106,7 +133,7 @@ impl Clone for FastDownPuller {
         Self {
             inner: if let Ok(client) = build_client(
                 &self.headers,
-                self.proxy.as_deref(),
+                self.proxy.deref(),
                 self.accept_invalid_certs,
                 self.accept_invalid_hostnames,
                 {

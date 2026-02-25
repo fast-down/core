@@ -4,7 +4,9 @@ use core::fmt::Debug;
 
 pub trait Pusher: Send + 'static {
     type Error: Send + Unpin + 'static;
+    #[allow(clippy::missing_errors_doc)]
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)>;
+    #[allow(clippy::missing_errors_doc)]
     fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -13,6 +15,7 @@ pub trait Pusher: Send + 'static {
 pub trait AnyError: Debug + Send + Unpin + 'static {}
 impl<T: Debug + Send + Unpin + 'static> AnyError for T {}
 
+#[allow(missing_debug_implementations)]
 pub struct BoxPusher {
     pub pusher: Box<dyn Pusher<Error = Box<dyn AnyError>>>,
 }
@@ -35,14 +38,16 @@ where
 {
     type Error = Box<dyn AnyError>;
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)> {
-        self.inner
-            .push(range, content)
-            .map_err(|(e, b)| (Box::new(e) as Box<dyn AnyError>, b))
+        self.inner.push(range, content).map_err(|(e, b)| {
+            let err: Box<dyn AnyError> = Box::new(e);
+            (err, b)
+        })
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
-        self.inner
-            .flush()
-            .map_err(|e| Box::new(e) as Box<dyn AnyError>)
+        self.inner.flush().map_err(|e| {
+            let err: Box<dyn AnyError> = Box::new(e);
+            err
+        })
     }
 }
 

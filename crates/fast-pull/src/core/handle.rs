@@ -24,7 +24,8 @@ where
     pub async fn join(&self) -> Result<T, Arc<JoinError>> {
         let mut rx = self.rx.clone();
         loop {
-            if let Some(res) = rx.borrow_and_update().clone() {
+            let res = rx.borrow_and_update().clone();
+            if let Some(res) = res {
                 return res;
             }
             if rx.changed().await.is_err() {

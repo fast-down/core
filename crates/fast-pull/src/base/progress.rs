@@ -7,6 +7,7 @@ pub trait Total {
 }
 
 impl Total for ProgressEntry {
+    #[allow(clippy::inline_always)]
     #[inline(always)]
     fn total(&self) -> u64 {
         self.end.saturating_sub(self.start)
@@ -15,6 +16,6 @@ impl Total for ProgressEntry {
 
 impl Total for Vec<ProgressEntry> {
     fn total(&self) -> u64 {
-        self.iter().map(|r| r.total()).sum()
+        self.iter().map(Total::total).sum()
     }
 }
