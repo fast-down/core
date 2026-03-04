@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "fast-down"
-version = "3.8.1"
+version = "3.8.2"
 dependencies = [
  "bytes",
  "fast-pull",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "fast-pull"
-version = "3.7.5"
+version = "3.7.6"
 dependencies = [
  "bytes",
  "crossfire",
