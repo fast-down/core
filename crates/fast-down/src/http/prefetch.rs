@@ -66,6 +66,7 @@ async fn prefetch<Client: HttpClient>(client: &Client, url: Url) -> PrefetchResu
             supports_range,
             fast_download: size > 0 && supports_range,
             file_id: FileId::new(headers.get("etag").ok(), headers.get("last-modified").ok()),
+            content_type: headers.get("content-type").ok().map(String::from),
         },
         resp,
     ))

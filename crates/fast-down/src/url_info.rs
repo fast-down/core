@@ -19,6 +19,7 @@ pub struct UrlInfo {
     pub fast_download: bool,
     pub final_url: Url,
     pub file_id: FileId,
+    pub content_type: Option<String>,
 }
 
 #[cfg(feature = "sanitize-filename")]
