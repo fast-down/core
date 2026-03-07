@@ -59,7 +59,7 @@ impl Executor for TokioExecutor {
                     println!("task: {i} = {res}");
                     tx.send((i, res)).unwrap();
                 }
-                if !task_queue.steal(&mut task, 1, speculative) {
+                if !task_queue.steal(&(), &mut task, 1, speculative) {
                     break;
                 }
             }
