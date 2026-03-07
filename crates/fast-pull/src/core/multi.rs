@@ -157,13 +157,25 @@ where
                         }
                     }
                 };
+                tokio::pin! {
+                    let sleep = tokio::time::sleep(pull_timeout);
+                }
                 loop {
+                    sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + pull_timeout);
                     let t = tokio::select! {
                         () = notify.notified() => break 'task,
-                        t = tokio::time::timeout(pull_timeout, stream.try_next()) => t
+                        () = &mut sleep => {
+                            let _ = tx.send(Event::PullTimeout(id));
+                            drop(stream);
+                            puller = puller.clone();
+                            continue 'task;
+                        },
+                        t = stream.try_next() => t,
                     };
                     match t {
-                        Ok(Ok(Some(mut chunk))) => {
+                        Ok(Some(mut chunk)) => {
                             if chunk.is_empty() {
                                 continue;
                             }
@@ -186,8 +198,8 @@ where
                                 continue 'task;
                             }
                         }
-                        Ok(Ok(None)) => continue 'task,
-                        Ok(Err((e, retry_gap))) => {
+                        Ok(None) => continue 'task,
+                        Err((e, retry_gap)) => {
                             let is_irrecoverable = e.is_irrecoverable();
                             let _ = tx.send(Event::PullError(id, e));
                             tokio::select! {
@@ -197,12 +209,6 @@ where
                             if is_irrecoverable {
                                 continue 'task;
                             }
-                        }
-                        Err(_) => {
-                            let _ = tx.send(Event::PullTimeout(id));
-                            drop(stream);
-                            puller = puller.clone();
-                            continue 'task;
                         }
                     }
                 }
