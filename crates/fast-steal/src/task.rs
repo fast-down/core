@@ -64,12 +64,6 @@ impl Task {
         let state = self.state.load(Ordering::Acquire);
         Self::unpack(state)
     }
-    /// # Panics
-    /// 当 range.start > range.end
-    pub fn set(&self, range: Range<u64>) {
-        assert!(range.start <= range.end);
-        self.state.store(Self::pack(range), Ordering::Release);
-    }
     #[must_use]
     pub fn start(&self) -> u64 {
         (self.state.load(Ordering::Acquire) >> 64) as u64

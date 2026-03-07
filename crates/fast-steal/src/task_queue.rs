@@ -34,39 +34,58 @@ impl<H: Handle> TaskQueue<H> {
         let mut guard = self.inner.lock();
         guard.waiting.push_back(task);
     }
-    pub fn steal(&self, task: &mut Task, min_chunk_size: u64, max_speculative: usize) -> bool {
+    pub fn steal(
+        &self,
+        id: &H::Id,
+        task: &mut Task,
+        min_chunk_size: u64,
+        max_speculative: usize,
+    ) -> bool {
         let min_chunk_size = min_chunk_size.max(1);
         let mut guard = self.inner.lock();
-        while let Some(new_task) = guard.waiting.pop_front() {
-            if let Some(range) = new_task.take() {
-                task.set(range);
-                return true;
+        let mut worker_idx = None;
+        for (i, (_, handle)) in guard.running.iter_mut().enumerate() {
+            if handle.is_self(id) {
+                worker_idx = Some(i);
+                break;
             }
         }
-        if let Some(steal_task) = guard
-            .running
-            .iter()
-            .filter_map(|w| w.0.upgrade())
-            .filter(|w| w != task)
-            .max_by_key(Task::remain)
+        let Some(worker_idx) = worker_idx else {
+            return false;
+        };
+        let mut found = false;
+        while let Some(new_task) = guard.waiting.pop_front() {
+            if let Some(range) = new_task.take() {
+                *task = Task::new(range);
+                found = true;
+                break;
+            }
+        }
+        if !found
+            && let Some(steal_task) = guard
+                .running
+                .iter()
+                .filter_map(|w| w.0.upgrade())
+                .filter(|w| w != task)
+                .max_by_key(Task::remain)
         {
             if steal_task.remain() >= min_chunk_size * 2
                 && let Ok(Some(range)) = steal_task.split_two()
             {
-                task.set(range);
-                true
+                *task = Task::new(range);
+                found = true;
             } else if max_speculative > 1
                 && steal_task.remain() > 0
                 && steal_task.strong_count() <= max_speculative
             {
                 task.state = steal_task.state;
-                true
-            } else {
-                false
+                found = true;
             }
-        } else {
-            false
         }
+        if found {
+            guard.running[worker_idx].0 = task.downgrade();
+        }
+        found
     }
     /// 当线程数需要增加时，但 executor 为空时，返回 None
     #[must_use]
@@ -186,7 +205,7 @@ mod tests {
                         println!("task: {i} = {res}");
                         tx.send((i, res)).unwrap();
                     }
-                    if !task_queue.steal(&mut task, 1, speculative) {
+                    if !task_queue.steal(&(), &mut task, 1, speculative) {
                         break;
                     }
                 }
