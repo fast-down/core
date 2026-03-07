@@ -119,6 +119,7 @@ where
     WE: Send + Unpin + 'static,
 {
     type Handle = TokioHandle;
+    #[allow(clippy::too_many_lines)]
     fn execute(&self, mut task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
         let id = self.id.fetch_add(1, Ordering::SeqCst);
         let mut puller = self.puller.clone();
@@ -134,7 +135,12 @@ where
             'task: loop {
                 let mut start = task.start();
                 if start >= task.end() {
-                    if task_queue.steal(&mut task, min_chunk_size, max_speculative) {
+                    if task_queue.steal(&id, &mut task, min_chunk_size, max_speculative) {
+                        tokio::select! {
+                            biased;
+                            () = notify.notified() => {}
+                            () = async {} => {}
+                        }
                         continue 'task;
                     }
                     break;
