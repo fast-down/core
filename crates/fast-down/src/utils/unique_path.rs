@@ -9,13 +9,17 @@ pub async fn gen_unique_path(path: impl AsRef<Path>) -> io::Result<PathBuf> {
         return Ok(path.into());
     }
     let stem = path.file_stem().unwrap_or_default();
-    let ext = path.extension().unwrap_or_default();
+    let ext = path.extension();
     for i in 1.. {
         let mut new_name = stem.to_os_string();
         new_name.push(" (");
         new_name.push(i.to_string());
-        new_name.push(").");
-        new_name.push(ext);
+        if let Some(ext) = ext {
+            new_name.push(").");
+            new_name.push(ext);
+        } else {
+            new_name.push(")");
+        }
         let new_path = path.with_file_name(new_name);
         if !fs::try_exists(&new_path).await? {
             return Ok(new_path);
