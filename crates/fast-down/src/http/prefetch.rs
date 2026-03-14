@@ -45,13 +45,33 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
 }
 
 async fn prefetch<Client: HttpClient>(client: &Client, url: Url) -> PrefetchResult<Client> {
+    let (no_range_fut, range_fut) = (
+        prefetch_no_range(client, url.clone()),
+        is_support_range(client, url),
+    );
+    let (result_no_range, result_range) = tokio::join!(no_range_fut, range_fut);
+    let mut res = result_no_range?;
+    if let Ok(supports_range) = result_range
+        && supports_range
+    {
+        res.0.supports_range = true;
+        if res.0.size != 0 {
+            res.0.fast_download = true;
+        }
+    }
+    Ok(res)
+}
+
+async fn prefetch_no_range<Client: HttpClient>(
+    client: &Client,
+    url: Url,
+) -> PrefetchResult<Client> {
     let resp = client
         .get(url, None)
         .send()
         .await
         .map_err(|(e, d)| (HttpError::Request(e), d))?;
     let headers = resp.headers();
-    let supports_range = headers.get("accept-ranges").is_ok_and(|v| v == "bytes");
     let size = headers
         .get("content-length")
         .ok()
@@ -63,11 +83,27 @@ async fn prefetch<Client: HttpClient>(client: &Client, url: Url) -> PrefetchResu
             final_url: final_url.clone(),
             raw_name: get_filename(headers, final_url),
             size,
-            supports_range,
-            fast_download: size > 0 && supports_range,
+            supports_range: false,
+            fast_download: false,
             file_id: FileId::new(headers.get("etag").ok(), headers.get("last-modified").ok()),
             content_type: headers.get("content-type").ok().map(String::from),
         },
         resp,
     ))
+}
+
+async fn is_support_range<Client: HttpClient>(
+    client: &Client,
+    url: Url,
+) -> Result<bool, (HttpError<Client>, Option<Duration>)> {
+    let resp = client
+        .get(url, Some(0..1))
+        .send()
+        .await
+        .map_err(|(e, d)| (HttpError::Request(e), d))?;
+    let headers = resp.headers();
+    let supports_range = headers
+        .get("content-range")
+        .is_ok_and(|v| v.trim_start().to_lowercase().starts_with("bytes 0-0/"));
+    Ok(supports_range)
 }
