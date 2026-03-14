@@ -1,3 +1,5 @@
+#![cfg(not(target_family = "wasm"))]
+
 use crate::http::{HttpClient, HttpHeaders, HttpRequestBuilder, HttpResponse};
 use fast_pull::ProgressEntry;
 use httpdate::parse_http_date;

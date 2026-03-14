@@ -1,8 +1,10 @@
 #![doc = include_str!("../README.md")]
 
+mod proxy;
 mod url_info;
 
 pub use fast_pull::*;
+pub use proxy::*;
 pub use url_info::*;
 
 #[cfg(feature = "http")]
