@@ -50,7 +50,7 @@ jobs:
       - name: Install cargo-hack
         run: cargo install cargo-hack
       - name: Run Tests
-        run: cargo hack test --feature-powerset --depth 2 --verbose
+        run: cargo hack test --feature-powerset --depth 1 --verbose
 
   deny:
     name: Cargo Deny

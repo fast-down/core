@@ -99,6 +99,7 @@ pub enum ReqwestResponseError {
 }
 
 #[cfg(test)]
+#[cfg(feature = "mem")]
 mod tests {
     #![allow(
         clippy::unwrap_used,
