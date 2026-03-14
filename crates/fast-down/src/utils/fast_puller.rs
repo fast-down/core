@@ -5,14 +5,7 @@ use crate::{
 use fast_pull::Puller;
 use parking_lot::Mutex;
 use reqwest::{Client, ClientBuilder, Response, header::HeaderMap};
-use std::{
-    net::IpAddr,
-    ops::Deref,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+use std::{ops::Deref, sync::Arc};
 use url::Url;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -64,7 +57,7 @@ pub fn build_client(
     #[cfg(not(target_family = "wasm"))]
     #[allow(unused)]
     accept_invalid_hostnames: bool,
-    #[cfg(not(target_family = "wasm"))] local_addr: Option<IpAddr>,
+    #[cfg(not(target_family = "wasm"))] local_addr: Option<std::net::IpAddr>,
 ) -> Result<Client, reqwest::Error> {
     #[allow(unused_mut)]
     let mut client = ClientBuilder::new().default_headers(headers.clone());
@@ -100,8 +93,9 @@ pub struct FastDownPuller {
     file_id: FileId,
     resp: Option<Arc<Mutex<Option<Response>>>>,
     #[cfg(not(target_family = "wasm"))]
-    available_ips: Arc<[IpAddr]>,
-    turn: Arc<AtomicUsize>,
+    available_ips: Arc<[std::net::IpAddr]>,
+    #[cfg(not(target_family = "wasm"))]
+    turn: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[derive(Debug)]
@@ -117,14 +111,15 @@ pub struct FastDownPullerOptions<'a> {
     pub file_id: FileId,
     pub resp: Option<Arc<Mutex<Option<Response>>>>,
     #[cfg(not(target_family = "wasm"))]
-    pub available_ips: Arc<[IpAddr]>,
+    pub available_ips: Arc<[std::net::IpAddr]>,
 }
 
 impl FastDownPuller {
     /// # Errors
     /// 当设置代理报错时返回 Error
     pub fn new(option: FastDownPullerOptions<'_>) -> Result<Self, reqwest::Error> {
-        let turn = Arc::new(AtomicUsize::new(1));
+        #[cfg(not(target_family = "wasm"))]
+        let turn = Arc::new(std::sync::atomic::AtomicUsize::new(1));
         #[cfg(not(target_family = "wasm"))]
         let available_ips = option.available_ips;
         let client = build_client(
@@ -140,7 +135,10 @@ impl FastDownPuller {
                 None
             } else {
                 available_ips
-                    .get(turn.fetch_add(1, Ordering::AcqRel) % available_ips.len())
+                    .get(
+                        turn.fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                            % available_ips.len(),
+                    )
                     .copied()
             },
         )?;
@@ -163,6 +161,7 @@ impl FastDownPuller {
             file_id: option.file_id,
             #[cfg(not(target_family = "wasm"))]
             available_ips,
+            #[cfg(not(target_family = "wasm"))]
             turn,
         })
     }
@@ -172,6 +171,7 @@ impl Clone for FastDownPuller {
     fn clone(&self) -> Self {
         #[cfg(not(target_family = "wasm"))]
         let available_ips = self.available_ips.clone();
+        #[cfg(not(target_family = "wasm"))]
         let turn = self.turn.clone();
         Self {
             inner: build_client(
@@ -188,7 +188,10 @@ impl Clone for FastDownPuller {
                         None
                     } else {
                         available_ips
-                            .get(turn.fetch_add(1, Ordering::AcqRel) % available_ips.len())
+                            .get(
+                                turn.fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                                    % available_ips.len(),
+                            )
                             .copied()
                     }
                 },
@@ -216,6 +219,7 @@ impl Clone for FastDownPuller {
             file_id: self.file_id.clone(),
             #[cfg(not(target_family = "wasm"))]
             available_ips,
+            #[cfg(not(target_family = "wasm"))]
             turn,
         }
     }
