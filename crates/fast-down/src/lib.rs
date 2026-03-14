@@ -9,5 +9,6 @@ pub use url_info::*;
 pub mod http;
 #[cfg(feature = "reqwest")]
 pub mod reqwest;
-#[cfg(feature = "utils")]
-pub mod utils;
+mod utils;
+#[allow(unused_imports)]
+pub use utils::*;

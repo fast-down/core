@@ -1,9 +1,10 @@
-use getifaddrs::{InterfaceFlags, getifaddrs};
 use std::net::IpAddr;
 
 /// # Errors
 /// 无法读取网卡信息时报错
+#[cfg(not(target_family = "wasm"))]
 pub fn get_available_local_ips() -> std::io::Result<Vec<InterfaceInfo>> {
+    use getifaddrs::{InterfaceFlags, getifaddrs};
     const VIRTUAL_KEYWORDS: &[&str] = &[
         // Docker 及其网桥
         "docker",
@@ -50,6 +51,16 @@ pub fn get_available_local_ips() -> std::io::Result<Vec<InterfaceInfo>> {
     Ok(ips)
 }
 
+/// 无法在 wasm 上获取网卡信息，所以永远返回 `Ok(Vec::new())`
+///
+/// # Errors
+/// 永远不会返回 Err
+#[cfg(target_family = "wasm")]
+pub const fn get_available_local_ips() -> std::io::Result<Vec<InterfaceInfo>> {
+    Ok(Vec::new())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 const fn is_link_local(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_link_local(),
