@@ -8,8 +8,10 @@ pub enum Event<PullError, PushError> {
     PullError(WorkerId, PullError),
     PullTimeout(WorkerId),
     PullProgress(WorkerId, ProgressEntry),
-    PushError(WorkerId, PushError),
+    Pushing(WorkerId, ProgressEntry),
+    PushError(WorkerId, ProgressEntry, PushError),
     PushProgress(WorkerId, ProgressEntry),
+    Flushing,
     FlushError(PushError),
     Finished(WorkerId),
 }

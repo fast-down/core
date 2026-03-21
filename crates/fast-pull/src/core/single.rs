@@ -1,4 +1,7 @@
-use crate::{DownloadResult, Event, Puller, PullerError, Pusher, multi::TokioExecutor};
+use crate::{
+    DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, multi::TokioExecutor,
+};
+use bytes::Bytes;
 use core::time::Duration;
 use crossfire::{mpmc, spsc};
 use futures::TryStreamExt;
@@ -16,17 +19,18 @@ pub fn download_single<R: Puller, W: Pusher>(
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     const ID: usize = 0;
     let (tx, event_chain) = mpmc::unbounded_async();
-    let (tx_push, rx_push) = spsc::bounded_async(options.push_queue_cap);
+    let (tx_push, rx_push) = spsc::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     let rx_push = rx_push.into_blocking();
     let push_handle = tokio::task::spawn_blocking(move || {
         while let Ok((spin, mut data)) = rx_push.recv() {
             loop {
+                let _ = tx_clone.send(Event::Pushing(ID, spin.clone()));
                 match pusher.push(&spin, data) {
                     Ok(()) => break,
                     Err((err, bytes)) => {
                         data = bytes;
-                        let _ = tx_clone.send(Event::PushError(ID, err));
+                        let _ = tx_clone.send(Event::PushError(ID, spin.clone(), err));
                     }
                 }
                 std::thread::sleep(options.retry_gap);
@@ -34,6 +38,7 @@ pub fn download_single<R: Puller, W: Pusher>(
             let _ = tx_clone.send(Event::PushProgress(ID, spin));
         }
         loop {
+            let _ = tx_clone.send(Event::Flushing);
             match pusher.flush() {
                 Ok(()) => break,
                 Err(err) => {

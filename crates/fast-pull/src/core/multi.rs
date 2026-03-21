@@ -29,17 +29,19 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     options: DownloadOptions<I>,
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     let (tx, event_chain) = mpmc::unbounded_async();
-    let (tx_push, rx_push) = mpsc::bounded_async(options.push_queue_cap);
+    let (tx_push, rx_push) =
+        mpsc::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     let rx_push = rx_push.into_blocking();
     let push_handle = tokio::task::spawn_blocking(move || {
         while let Ok((id, spin, mut data)) = rx_push.recv() {
             loop {
+                let _ = tx_clone.send(Event::Pushing(id, spin.clone()));
                 match pusher.push(&spin, data) {
                     Ok(()) => break,
                     Err((err, bytes)) => {
                         data = bytes;
-                        let _ = tx_clone.send(Event::PushError(id, err));
+                        let _ = tx_clone.send(Event::PushError(id, spin.clone(), err));
                     }
                 }
                 std::thread::sleep(options.retry_gap);
@@ -47,6 +49,7 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
             let _ = tx_clone.send(Event::PushProgress(id, spin));
         }
         loop {
+            let _ = tx_clone.send(Event::Flushing);
             match pusher.flush() {
                 Ok(()) => break,
                 Err(err) => {
