@@ -126,8 +126,8 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
                 ResponseState::Pending(resp) => match resp.as_mut().poll(cx) {
                     Poll::Ready(Ok(resp)) => {
                         let new_file_id = FileId::new(
-                            resp.headers().get("etag").ok(),
-                            resp.headers().get("last-modified").ok(),
+                            resp.headers().get("etag").ok().as_deref(),
+                            resp.headers().get("last-modified").ok().as_deref(),
                         );
                         if new_file_id == self.file_id {
                             self.state = ResponseState::Streaming(into_chunk_stream(resp));
@@ -173,6 +173,8 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use std::borrow::Cow;
+
     use super::*;
     use futures::TryStreamExt;
 
@@ -220,7 +222,7 @@ mod tests {
     struct MockHeaders;
     impl HttpHeaders for MockHeaders {
         type GetHeaderError = MockError;
-        fn get(&self, _header: &str) -> Result<&str, Self::GetHeaderError> {
+        fn get(&self, _header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
             Err(MockError)
         }
     }

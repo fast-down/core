@@ -30,7 +30,7 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
     headers
         .get("content-disposition")
         .ok()
-        .and_then(|s| ContentDisposition::parse(s).filename)
+        .and_then(|s| ContentDisposition::parse(s.as_ref()).filename)
         .map(|s| urlencoding::decode(&s).map(String::from).unwrap_or(s))
         .filter(|s| !s.trim().is_empty())
         .or_else(|| {
@@ -85,7 +85,10 @@ async fn prefetch_no_range<Client: HttpClient>(
             size,
             supports_range: false,
             fast_download: false,
-            file_id: FileId::new(headers.get("etag").ok(), headers.get("last-modified").ok()),
+            file_id: FileId::new(
+                headers.get("etag").ok().as_deref(),
+                headers.get("last-modified").ok().as_deref(),
+            ),
             content_type: headers.get("content-type").ok().map(String::from),
         },
         resp,

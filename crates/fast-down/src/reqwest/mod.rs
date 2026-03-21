@@ -5,9 +5,12 @@ use fast_pull::ProgressEntry;
 use httpdate::parse_http_date;
 use reqwest::{
     Client, RequestBuilder, Response,
-    header::{self, HeaderMap, HeaderName, InvalidHeaderName},
+    header::{self, HeaderMap, InvalidHeaderName},
 };
-use std::time::{Duration, SystemTime};
+use std::{
+    borrow::Cow,
+    time::{Duration, SystemTime},
+};
 use url::Url;
 
 impl HttpClient for Client {
@@ -71,14 +74,9 @@ impl HttpResponse for Response {
 
 impl HttpHeaders for HeaderMap {
     type GetHeaderError = ReqwestGetHeaderError;
-    fn get(&self, header: &str) -> Result<&str, Self::GetHeaderError> {
-        let header_name: HeaderName = header
-            .parse()
-            .map_err(ReqwestGetHeaderError::InvalidHeaderName)?;
-        let header_value = self
-            .get(&header_name)
-            .ok_or(ReqwestGetHeaderError::NotFound)?;
-        header_value.to_str().map_err(ReqwestGetHeaderError::ToStr)
+    fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
+        let header_value = self.get(header).ok_or(ReqwestGetHeaderError::NotFound)?;
+        Ok(String::from_utf8_lossy(header_value.as_bytes()))
     }
 }
 
@@ -86,8 +84,6 @@ impl HttpHeaders for HeaderMap {
 pub enum ReqwestGetHeaderError {
     #[error("Invalid header name {0:?}")]
     InvalidHeaderName(InvalidHeaderName),
-    #[error("Failed to convert header value to string {0:?}")]
-    ToStr(header::ToStrError),
     #[error("Header not found")]
     NotFound,
 }

@@ -8,7 +8,7 @@ pub use puller::*;
 use crate::url_info::FileId;
 use bytes::Bytes;
 use fast_pull::{ProgressEntry, PullerError};
-use std::{fmt::Debug, future::Future, time::Duration};
+use std::{borrow::Cow, fmt::Debug, future::Future, time::Duration};
 use url::Url;
 
 pub trait HttpClient: Clone + Send + Sync + Unpin + 'static {
@@ -33,7 +33,7 @@ pub trait HttpHeaders {
     type GetHeaderError: Send + Debug + Unpin;
     /// # Errors
     /// 当获取头信息报错时返回 Error
-    fn get(&self, header: &str) -> Result<&str, Self::GetHeaderError>;
+    fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError>;
 }
 
 pub type GetRequestBuilder<Client> = <Client as HttpClient>::RequestBuilder;
