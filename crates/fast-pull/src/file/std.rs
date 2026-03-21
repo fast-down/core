@@ -4,12 +4,14 @@ use std::{
     collections::BTreeMap,
     fs::File,
     io::{BufWriter, Seek, Write},
+    sync::Arc,
 };
 use tokio::io::SeekFrom;
 
 #[derive(Debug)]
 pub struct FilePusher {
-    buffer: BufWriter<File>,
+    buffer: BufWriter<Arc<File>>,
+    file: Arc<File>,
     cache: BTreeMap<u64, Bytes>,
     p: u64,
     cache_size: usize,
@@ -23,34 +25,22 @@ impl FilePusher {
         file: tokio::fs::File,
         size: u64,
         buffer_size: usize,
-    ) -> tokio::io::Result<Self> {
+    ) -> std::io::Result<Self> {
         file.set_len(size).await?;
+        let file = Arc::new(file.into_std().await);
         Ok(Self {
-            buffer: BufWriter::with_capacity(buffer_size, file.into_std().await),
+            buffer: BufWriter::with_capacity(buffer_size, file.clone()),
             cache: BTreeMap::new(),
             p: 0,
             cache_size: 0,
+            file,
             buffer_size,
         })
     }
-}
-impl Pusher for FilePusher {
-    type Error = tokio::io::Error;
-    fn push(&mut self, range: &ProgressEntry, bytes: Bytes) -> Result<(), (Self::Error, Bytes)> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        self.cache_size += bytes.len();
-        self.cache.insert(range.start, bytes);
-        if self.cache_size >= self.buffer_size {
-            self.flush().map_err(|e| {
-                let bytes = self.cache.remove(&range.start);
-                (e, bytes.unwrap_or_default())
-            })?;
-        }
-        Ok(())
-    }
-    fn flush(&mut self) -> Result<(), Self::Error> {
+
+    /// # Errors
+    /// 当 `BufWriter::write_all` 或 `BufWriter::flush` 失败时返回错误。
+    pub fn write(&mut self) -> Result<(), std::io::Error> {
         while let Some(entry) = self.cache.first_entry() {
             let start = *entry.key();
             let bytes = entry.get();
@@ -66,6 +56,27 @@ impl Pusher for FilePusher {
         }
         self.buffer.flush()?;
         Ok(())
+    }
+}
+impl Pusher for FilePusher {
+    type Error = std::io::Error;
+    fn push(&mut self, range: &ProgressEntry, bytes: Bytes) -> Result<(), (Self::Error, Bytes)> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.cache_size += bytes.len();
+        self.cache.insert(range.start, bytes);
+        if self.cache_size >= self.buffer_size {
+            self.write().map_err(|e| {
+                let bytes = self.cache.remove(&range.start);
+                (e, bytes.unwrap_or_default())
+            })?;
+        }
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.write()?;
+        self.file.sync_all()
     }
 }
 
