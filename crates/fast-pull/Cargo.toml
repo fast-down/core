@@ -17,7 +17,7 @@ bytes.workspace = true
 crossfire.workspace = true
 fast-steal.workspace = true
 futures.workspace = true
-mmap-io = { version = "0.9.4", features = ["hugepages"], optional = true }
+memmap2 = { version = "0.9.10", optional = true }
 parking_lot.workspace = true
 tokio = { version = "1.50.0", default-features = false, features = [
   "macros",
@@ -34,7 +34,7 @@ tokio = { version = "1.50.0", default-features = false, features = [
 ] }
 
 [features]
-file = ["dep:mmap-io", "tokio/fs"]
+file = ["dep:memmap2", "tokio/fs"]
 mem = []
 
 [lints]

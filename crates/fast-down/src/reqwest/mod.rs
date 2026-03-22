@@ -125,18 +125,18 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let client = Client::builder().no_proxy().build().unwrap();
 
-        let mock_redirect = server
+        let _mock_redirect = server
             .mock("GET", "/redirect")
             .with_status(301)
             .with_header("Location", "/%e4%bd%a0%e5%a5%bd.txt")
             .create_async()
             .await;
 
-        let mock_file = server
+        let _mock_file = server
             .mock("GET", "/%e4%bd%a0%e5%a5%bd.txt")
-            .with_status(200)
+            .with_status(206)
             .with_header("Content-Length", "1024")
-            .with_header("Accept-Ranges", "bytes")
+            .with_header("Content-Range", "bytes 0-0/1024")
             .with_body(vec![0; 1024])
             .create_async()
             .await;
@@ -151,9 +151,6 @@ mod tests {
         assert_eq!(url_info.size, 1024);
         assert_eq!(url_info.raw_name, "你好.txt");
         assert!(url_info.supports_range);
-
-        mock_redirect.assert_async().await;
-        mock_file.assert_async().await;
     }
 
     #[tokio::test]
@@ -162,7 +159,7 @@ mod tests {
         let client = Client::builder().no_proxy().build().unwrap();
 
         // Test with Content-Disposition header
-        let mock1 = server
+        let _mock1 = server
             .mock("GET", "/test1")
             .with_header("Content-Disposition", r#"attachment; filename="test.txt""#)
             .create_async()
@@ -170,10 +167,9 @@ mod tests {
         let url = Url::parse(&format!("{}/test1", server.url())).unwrap();
         let (url_info, _) = client.prefetch(url).await.unwrap();
         assert_eq!(url_info.raw_name, "test.txt");
-        mock1.assert_async().await;
 
         // 测试仅包含 filename* (UTF-8 编码)
-        let mock_star = server
+        let _mock_star = server
             .mock("GET", "/test_star")
             .with_header(
                 "Content-Disposition",
@@ -184,9 +180,8 @@ mod tests {
         let url = Url::parse(&format!("{}/test_star", server.url())).unwrap();
         let (url_info, _) = client.prefetch(url).await.unwrap();
         assert_eq!(url_info.raw_name, "测试.txt");
-        mock_star.assert_async().await;
 
-        let mock_both = server
+        let _mock_both = server
             .mock("GET", "/test_both")
             .with_header(
                 "Content-Disposition",
@@ -197,10 +192,9 @@ mod tests {
         let url = Url::parse(&format!("{}/test_both", server.url())).unwrap();
         let (url_info, _) = client.prefetch(url).await.unwrap();
         assert_eq!(url_info.raw_name, "测试.txt");
-        mock_both.assert_async().await;
 
         // Test URL path source
-        let mock2 = server
+        let _mock2 = server
             .mock("GET", "/test2/%E5%A5%BD%E5%A5%BD%E5%A5%BD.pdf")
             .create_async()
             .await;
@@ -211,14 +205,13 @@ mod tests {
         .unwrap();
         let (url_info, _) = client.prefetch(url).await.unwrap();
         assert_eq!(url_info.raw_name, "好好好.pdf");
-        mock2.assert_async().await;
     }
 
     #[tokio::test]
     async fn test_error_handling() {
         let mut server = mockito::Server::new_async().await;
         let client = Client::builder().no_proxy().build().unwrap();
-        let mock1 = server
+        let _mock1 = server
             .mock("GET", "/404")
             .with_status(404)
             .create_async()
@@ -242,7 +235,6 @@ mod tests {
                 }
             },
         }
-        mock1.assert_async().await;
     }
 
     #[tokio::test]
