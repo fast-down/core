@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "fast-down"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "bytes",
  "fast-pull",

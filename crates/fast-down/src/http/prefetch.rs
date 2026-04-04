@@ -31,14 +31,19 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
         .get("content-disposition")
         .ok()
         .and_then(|s| ContentDisposition::parse(s.as_ref()).filename)
-        .map(|s| urlencoding::decode(&s).map(String::from).unwrap_or(s))
+        .map(|s| {
+            let s = urlencoding::decode_binary(s.as_bytes());
+            String::from_utf8_lossy(&s).into_owned()
+        })
         .filter(|s| !s.trim().is_empty())
         .or_else(|| {
             url.path_segments()
                 .and_then(|mut segments| segments.next_back())
-                .map(|s| urlencoding::decode(s).unwrap_or_else(|_| s.into()))
+                .map(|s| {
+                    let s = urlencoding::decode_binary(s.as_bytes());
+                    String::from_utf8_lossy(&s).into_owned()
+                })
                 .filter(|s| !s.trim().is_empty())
-                .map(|s| s.to_string())
         })
         .or_else(|| url.domain().map(ToString::to_string))
         .unwrap_or_else(|| url.to_string())
