@@ -45,7 +45,7 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
                 })
                 .filter(|s| !s.trim().is_empty())
         })
-        .or_else(|| url.domain().map(ToString::to_string))
+        .or_else(|| url.host_str().map(ToString::to_string))
         .unwrap_or_else(|| url.to_string())
 }
 
