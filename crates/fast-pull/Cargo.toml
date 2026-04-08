@@ -19,7 +19,7 @@ fast-steal.workspace = true
 futures.workspace = true
 memmap2 = { version = "0.9.10", optional = true }
 parking_lot.workspace = true
-tokio = { version = "1.51.0", default-features = false, features = [
+tokio = { version = "1.51.1", default-features = false, features = [
   "macros",
   "rt",
   "sync",
@@ -28,7 +28,7 @@ tokio = { version = "1.51.0", default-features = false, features = [
 
 [dev-dependencies]
 tempfile = "3.27.0"
-tokio = { version = "1.51.0", default-features = false, features = [
+tokio = { version = "1.51.1", default-features = false, features = [
   "io-util",
   "rt-multi-thread",
 ] }

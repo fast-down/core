@@ -1,6 +1,6 @@
 [package]
 name = "fast-down"
-version = "4.0.3"
+version = "4.0.4"
 authors.workspace = true
 edition.workspace = true
 description = "Download everything fast"
@@ -21,7 +21,7 @@ parking_lot = { workspace = true, optional = true }
 path_helper = { version = "0.1.0", features = ["sanitize"], optional = true }
 serde = { version = "1.0.228", features = ["rc", "serde_derive"], optional = true }
 thiserror = { workspace = true, optional = true }
-tokio = { version = "1.51.0", default-features = false }
+tokio = { version = "1.51.1", default-features = false }
 url.workspace = true
 urlencoding = { version = "2.1.3", optional = true }
 
