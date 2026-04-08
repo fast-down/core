@@ -215,8 +215,8 @@ dependencies = [
  "httpdate",
  "mockito",
  "parking_lot",
+ "path_helper",
  "reqwest",
- "sanitize-filename",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -909,6 +909,15 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "path_helper"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba08028d808201b90da92575ca970734155923d889f8d4623378a170ac96f4ff"
+dependencies = [
+ "sanitize-filename",
 ]
 
 [[package]]

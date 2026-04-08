@@ -26,14 +26,7 @@ pub struct UrlInfo {
 impl UrlInfo {
     #[must_use]
     pub fn filename(&self) -> String {
-        sanitize_filename::sanitize_with_options(
-            &self.raw_name,
-            sanitize_filename::Options {
-                windows: cfg!(windows),
-                truncate: true,
-                replacement: "_",
-            },
-        )
+        path_helper::sanitize_filename(&self.raw_name, 255)
     }
 }
 

@@ -18,7 +18,7 @@ fast-pull.workspace = true
 futures.workspace = true
 httpdate = { version = "1.0.3", optional = true }
 parking_lot = { workspace = true, optional = true }
-sanitize-filename = { version = "0.6.0", optional = true }
+path_helper = { version = "0.1.0", features = ["sanitize"], optional = true }
 serde = { version = "1.0.228", features = ["rc", "serde_derive"], optional = true }
 thiserror = { workspace = true, optional = true }
 tokio = { version = "1.51.0", default-features = false }
@@ -35,11 +35,10 @@ mockito = "1.7.2"
 [features]
 http = ["dep:parking_lot", "dep:thiserror", "dep:urlencoding"]
 reqwest = ["dep:httpdate", "dep:reqwest", "http"]
-sanitize-filename = ["dep:sanitize-filename"]
+sanitize-filename = ["dep:path_helper"]
 serde = ["dep:serde", "url/serde"]
 getifaddrs = ["dep:getifaddrs"]
 fast-puller = ["reqwest"]
-unique-path = ["tokio/fs"]
 reqwest-tls = ["reqwest/default-tls"]
 
 # 来自 fast-pull

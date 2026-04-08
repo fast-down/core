@@ -30,16 +30,19 @@ jobs:
           components: clippy
       - uses: swatinem/rust-cache@v2
       - name: Install cargo-hack
-        run: cargo install cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
       - name: Run Clippy
         run: cargo hack clippy --feature-powerset
 
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }} - ${{ matrix.channel }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         channel: [stable, beta, nightly]
     steps:
       - uses: actions/checkout@v6
@@ -47,8 +50,12 @@ jobs:
         with:
           toolchain: ${{ matrix.channel }}
       - uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.channel }}
       - name: Install cargo-hack
-        run: cargo install cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
       - name: Run Tests
         run: cargo hack test --feature-powerset --depth 1 --verbose
 
@@ -60,7 +67,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
       - name: Install cargo-deny
-        run: cargo install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
       - name: Run Deny
         run: cargo deny --all-features check
 
@@ -72,9 +81,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: swatinem/rust-cache@v2
       - name: Install cargo-hack & cargo-udeps
-        run: |
-          cargo install cargo-hack
-          cargo install cargo-udeps
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack,cargo-udeps
       - name: Run Udeps
         run: cargo hack udeps --feature-powerset
 
@@ -86,7 +95,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
       - name: Install cargo-hack
-        run: cargo install cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
       - name: Run Doc Check
         env:
           RUSTDOCFLAGS: "-D warnings"
@@ -100,6 +111,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: swatinem/rust-cache@v2
       - name: Install cargo-hack
-        run: cargo install cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
       - name: Check with minimal versions
         run: cargo hack check --feature-powerset -Z minimal-versions
