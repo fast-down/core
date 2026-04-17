@@ -1,7 +1,7 @@
-mod content_pisposition;
+mod content_disposition;
 mod prefetch;
 mod puller;
-pub use content_pisposition::*;
+pub use content_disposition::*;
 pub use prefetch::*;
 pub use puller::*;
 
