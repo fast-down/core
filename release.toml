@@ -1,0 +1,2 @@
+pre-release-hook = ["cargo", "clippy", "--all-features"]
+allow-branch = ["main"]
