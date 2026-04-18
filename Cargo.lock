@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "fast-down"
-version = "4.0.4"
+version = "4.0.5"
 dependencies = [
  "bytes",
  "fast-pull",
@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "fast-pull"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "bytes",
  "crossfire",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "fast-steal"
-version = "6.5.1"
+version = "6.5.2"
 dependencies = [
  "parking_lot",
  "portable-atomic",
