@@ -1,111 +1,31 @@
 use crate::{ProgressEntry, Pusher};
 use bytes::Bytes;
 use std::{
-    collections::BTreeMap,
     fs::File,
-    io::{BufWriter, Seek, Write},
-    sync::Arc,
+    io::{Seek, Write},
 };
 use tokio::io::SeekFrom;
 
 #[derive(Debug)]
 pub struct FilePusher {
-    buffer: BufWriter<Arc<File>>,
-    file: Arc<File>,
-    cache: BTreeMap<u64, Bytes>,
-    p: u64,
-    cache_size: usize,
-    buffer_size: usize,
+    file: File,
 }
 
 impl FilePusher {
     /// # Errors
     /// 当 `fs::set_len` 失败时返回错误。
-    pub async fn new(
-        file: tokio::fs::File,
-        size: u64,
-        buffer_size: usize,
-    ) -> std::io::Result<Self> {
+    pub async fn new(file: tokio::fs::File, size: u64) -> std::io::Result<Self> {
         file.set_len(size).await?;
-        let file = Arc::new(file.into_std().await);
         Ok(Self {
-            buffer: BufWriter::with_capacity(buffer_size, file.clone()),
-            cache: BTreeMap::new(),
-            p: 0,
-            cache_size: 0,
-            file,
-            buffer_size,
+            file: file.into_std().await,
         })
     }
 
-    /// 当缓存满时调用：合并相邻的块，并优先写入最大的连续块，
-    /// 直到缓存大小回落到 "低水位线"
-    fn evict_some(&mut self) -> Result<(), std::io::Error> {
-        let low_watermark = self.buffer_size / 2;
-        if self.cache_size <= low_watermark {
-            return Ok(());
-        }
-        let mut runs: Vec<(usize, Vec<u64>)> = Vec::new();
-        let mut current_keys = Vec::new();
-        let mut current_len = 0;
-        let mut expected_next = 0;
-        for (&start, bytes) in &self.cache {
-            if current_keys.is_empty() {
-                current_keys.push(start);
-                current_len = bytes.len();
-            } else if start == expected_next {
-                current_keys.push(start);
-                current_len += bytes.len();
-            } else {
-                runs.push((current_len, current_keys));
-                current_keys = vec![start];
-                current_len = bytes.len();
-            }
-            expected_next = start + bytes.len() as u64;
-        }
-        if !current_keys.is_empty() {
-            runs.push((current_len, current_keys));
-        }
-        runs.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
-        for (_, keys) in runs {
-            let start = keys[0];
-            if start != self.p {
-                self.buffer.seek(SeekFrom::Start(start))?;
-                self.p = start;
-            }
-            for key in keys {
-                if let Some(bytes) = self.cache.remove(&key) {
-                    if let Err(e) = self.buffer.write_all(&bytes) {
-                        self.cache.insert(key, bytes);
-                        return Err(e);
-                    }
-                    self.cache_size -= bytes.len();
-                    self.p += bytes.len() as u64;
-                }
-            }
-            if self.cache_size <= low_watermark {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    /// 清空并写入全部剩余数据
-    fn flush_all(&mut self) -> Result<(), std::io::Error> {
-        while let Some(entry) = self.cache.first_entry() {
-            let start = *entry.key();
-            let bytes = entry.get();
-            let len = bytes.len();
-            if start != self.p {
-                self.buffer.seek(SeekFrom::Start(start))?;
-                self.p = start;
-            }
-            self.buffer.write_all(bytes)?;
-            entry.remove_entry();
-            self.cache_size -= len;
-            self.p += len as u64;
-        }
-        self.buffer.flush()?;
+    /// # Errors
+    /// 当 `Seek` 或 `Write` 失败时返回错误。
+    pub fn write_at(&mut self, start: u64, bytes: &[u8]) -> std::io::Result<()> {
+        self.file.seek(SeekFrom::Start(start))?;
+        self.file.write_all(bytes)?;
         Ok(())
     }
 }
@@ -116,18 +36,11 @@ impl Pusher for FilePusher {
         if bytes.is_empty() {
             return Ok(());
         }
-        self.cache_size += bytes.len();
-        if let Some(old_bytes) = self.cache.insert(range.start, bytes) {
-            self.cache_size -= old_bytes.len();
-        }
-        if self.cache_size >= self.buffer_size {
-            self.evict_some().map_err(|e| (e, Bytes::new()))?;
-        }
+        self.write_at(range.start, &bytes).map_err(|e| (e, bytes))?;
         Ok(())
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        self.flush_all()?;
         self.file.sync_all()
     }
 }
@@ -146,7 +59,7 @@ mod tests {
         let file_path = temp_file.path();
 
         // 初始化 RandFilePusher，假设文件大小为 10 字节
-        let mut pusher = FilePusher::new(temp_file.reopen().unwrap().into(), 10, 8 * 1024 * 1024)
+        let mut pusher = FilePusher::new(temp_file.reopen().unwrap().into(), 10)
             .await
             .unwrap();
 
