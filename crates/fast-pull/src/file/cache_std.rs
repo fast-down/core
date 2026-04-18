@@ -1,9 +1,9 @@
-use crate::{CacheSeqPusher, ProgressEntry, Pusher, file::FilePusher};
+use crate::{CacheSeqPusher, ProgressEntry, Pusher, file::StdFilePusher};
 use bytes::Bytes;
 
 #[derive(Debug)]
 pub struct CacheFilePusher {
-    inner: CacheSeqPusher<FilePusher>,
+    inner: CacheSeqPusher<StdFilePusher>,
 }
 
 impl CacheFilePusher {
@@ -17,7 +17,7 @@ impl CacheFilePusher {
         low_watermark: usize,
         buffer_size: usize,
     ) -> std::io::Result<Self> {
-        let file_pusher = FilePusher::new(file, size, buffer_size).await?;
+        let file_pusher = StdFilePusher::new(file, size, buffer_size).await?;
         let inner = CacheSeqPusher::new(file_pusher, high_watermark, low_watermark);
         Ok(Self { inner })
     }

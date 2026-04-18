@@ -7,12 +7,12 @@ use std::{
 use tokio::io::SeekFrom;
 
 #[derive(Debug)]
-pub struct FilePusher {
+pub struct StdFilePusher {
     buf: BufWriter<File>,
     p: u64,
 }
 
-impl FilePusher {
+impl StdFilePusher {
     /// # Errors
     /// 当 `fs::set_len` 失败时返回错误。
     pub async fn new(
@@ -60,7 +60,7 @@ impl FilePusher {
     }
 }
 
-impl Pusher for FilePusher {
+impl Pusher for StdFilePusher {
     type Error = std::io::Error;
     fn push(&mut self, range: &ProgressEntry, bytes: Bytes) -> Result<(), (Self::Error, Bytes)> {
         if bytes.is_empty() {
@@ -106,7 +106,7 @@ mod tests {
         let file_path = temp_file.path();
 
         // 初始化 RandFilePusher，假设文件大小为 10 字节
-        let mut pusher = FilePusher::new(temp_file.reopen().unwrap().into(), 10, 8 * 1024)
+        let mut pusher = StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, 8 * 1024)
             .await
             .unwrap();
 
