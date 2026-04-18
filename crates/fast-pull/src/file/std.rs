@@ -2,30 +2,60 @@ use crate::{ProgressEntry, Pusher};
 use bytes::Bytes;
 use std::{
     fs::File,
-    io::{Seek, Write},
+    io::{BufWriter, Seek, Write},
 };
 use tokio::io::SeekFrom;
 
 #[derive(Debug)]
 pub struct FilePusher {
-    file: File,
+    buf: BufWriter<File>,
+    p: u64,
 }
 
 impl FilePusher {
     /// # Errors
     /// 当 `fs::set_len` 失败时返回错误。
-    pub async fn new(file: tokio::fs::File, size: u64) -> std::io::Result<Self> {
+    pub async fn new(
+        file: tokio::fs::File,
+        size: u64,
+        buffer_size: usize,
+    ) -> std::io::Result<Self> {
         file.set_len(size).await?;
         Ok(Self {
-            file: file.into_std().await,
+            buf: BufWriter::with_capacity(buffer_size, file.into_std().await),
+            p: 0,
         })
     }
 
     /// # Errors
     /// 当 `Seek` 或 `Write` 失败时返回错误。
-    pub fn write_at(&mut self, start: u64, bytes: &[u8]) -> std::io::Result<()> {
-        self.file.seek(SeekFrom::Start(start))?;
-        self.file.write_all(bytes)?;
+    pub fn write_at(&mut self, start: u64, mut bytes: &[u8]) -> std::io::Result<()> {
+        if self.p != start {
+            if let Err(e) = self.buf.seek(SeekFrom::Start(start)) {
+                self.p = u64::MAX;
+                return Err(e);
+            }
+            self.p = start;
+        }
+        while !bytes.is_empty() {
+            match self.buf.write(bytes) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write any data",
+                    ));
+                }
+                Ok(n) => {
+                    self.p += n as u64;
+                    bytes = &bytes[n..];
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    self.p = u64::MAX;
+                    return Err(e);
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -36,12 +66,29 @@ impl Pusher for FilePusher {
         if bytes.is_empty() {
             return Ok(());
         }
-        self.write_at(range.start, &bytes).map_err(|e| (e, bytes))?;
-        Ok(())
+        let start = range.start;
+        match self.write_at(start, &bytes) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                #[allow(clippy::cast_possible_truncation)]
+                let written_len = if self.p >= start && self.p <= start + bytes.len() as u64 {
+                    (self.p - start) as usize
+                } else {
+                    0
+                };
+                let remaining_bytes = if written_len < bytes.len() {
+                    bytes.slice(written_len..)
+                } else {
+                    Bytes::new()
+                };
+                Err((e, remaining_bytes))
+            }
+        }
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        self.file.sync_all()
+        self.buf.flush()?;
+        self.buf.get_ref().sync_all()
     }
 }
 
@@ -59,7 +106,7 @@ mod tests {
         let file_path = temp_file.path();
 
         // 初始化 RandFilePusher，假设文件大小为 10 字节
-        let mut pusher = FilePusher::new(temp_file.reopen().unwrap().into(), 10)
+        let mut pusher = FilePusher::new(temp_file.reopen().unwrap().into(), 10, 8 * 1024)
             .await
             .unwrap();
 

@@ -2,21 +2,24 @@ use crate::{ProgressEntry, Pusher};
 use bytes::{Bytes, BytesMut};
 use std::collections::{BTreeMap, btree_map::Entry};
 
+/// 优先选择大块调用 push，并且会把大块合并成一个 Bytes
 #[derive(Debug)]
-pub struct CachePusher<P> {
+pub struct CacheMergePusher<P> {
     inner: P,
     cache: BTreeMap<u64, Bytes>,
     cache_size: usize,
-    buffer_size: usize,
+    high_watermark: usize,
+    low_watermark: usize,
 }
 
-impl<P: Pusher> CachePusher<P> {
-    pub const fn new(inner: P, buffer_size: usize) -> Self {
+impl<P: Pusher> CacheMergePusher<P> {
+    pub const fn new(inner: P, high_watermark: usize, low_watermark: usize) -> Self {
         Self {
             inner,
             cache: BTreeMap::new(),
             cache_size: 0,
-            buffer_size,
+            high_watermark,
+            low_watermark,
         }
     }
 
@@ -100,7 +103,7 @@ impl<P: Pusher> CachePusher<P> {
     }
 }
 
-impl<P: Pusher> Pusher for CachePusher<P> {
+impl<P: Pusher> Pusher for CacheMergePusher<P> {
     type Error = P::Error;
 
     fn push(&mut self, range: &ProgressEntry, bytes: Bytes) -> Result<(), (Self::Error, Bytes)> {
@@ -113,11 +116,10 @@ impl<P: Pusher> Pusher for CachePusher<P> {
             self.cache_size -= old_bytes.len();
         }
 
-        if self.cache_size >= self.buffer_size {
-            let low_watermark = self.buffer_size / 2;
-            if let Err(e) = self.evict_until(low_watermark) {
-                return Err((e, Bytes::new()));
-            }
+        if self.cache_size >= self.high_watermark
+            && let Err(e) = self.evict_until(self.low_watermark)
+        {
+            return Err((e, Bytes::new()));
         }
 
         Ok(())
