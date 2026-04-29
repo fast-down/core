@@ -5,6 +5,7 @@ use memmap2::MmapMut;
 #[derive(Debug)]
 pub struct MmapFilePusher {
     mmap: MmapMut,
+    sync_all: bool,
 }
 impl MmapFilePusher {
     /// # Errors
@@ -12,10 +13,10 @@ impl MmapFilePusher {
     /// 2. 当 `fs::open` 失败时返回错误。
     /// 3. 当 `fs::set_len` 失败时返回错误。
     /// 4. 当 `mmap_io::open` 失败时返回错误。
-    pub async fn new(file: tokio::fs::File, size: u64) -> std::io::Result<Self> {
+    pub async fn new(file: tokio::fs::File, size: u64, sync_all: bool) -> std::io::Result<Self> {
         file.set_len(size).await?;
         let mmap = unsafe { MmapMut::map_mut(&file)? };
-        Ok(Self { mmap })
+        Ok(Self { mmap, sync_all })
     }
 }
 impl Pusher for MmapFilePusher {
@@ -26,7 +27,11 @@ impl Pusher for MmapFilePusher {
         Ok(())
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
-        self.mmap.flush()
+        if self.sync_all {
+            self.mmap.flush()
+        } else {
+            self.mmap.flush_async()
+        }
     }
 }
 
@@ -44,7 +49,7 @@ mod tests {
         let file_path = temp_file.path();
 
         // 初始化 RandFilePusher，假设文件大小为 10 字节
-        let mut pusher = MmapFilePusher::new(temp_file.reopen().unwrap().into(), 10)
+        let mut pusher = MmapFilePusher::new(temp_file.reopen().unwrap().into(), 10, false)
             .await
             .unwrap();
 

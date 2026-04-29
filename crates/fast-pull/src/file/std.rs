@@ -10,6 +10,7 @@ use tokio::io::SeekFrom;
 pub struct StdFilePusher {
     buf: BufWriter<File>,
     p: u64,
+    sync_all: bool,
 }
 
 impl StdFilePusher {
@@ -19,11 +20,13 @@ impl StdFilePusher {
         file: tokio::fs::File,
         size: u64,
         buffer_size: usize,
+        sync_all: bool,
     ) -> std::io::Result<Self> {
         file.set_len(size).await?;
         Ok(Self {
             buf: BufWriter::with_capacity(buffer_size, file.into_std().await),
             p: 0,
+            sync_all,
         })
     }
 
@@ -88,7 +91,10 @@ impl Pusher for StdFilePusher {
 
     fn flush(&mut self) -> Result<(), Self::Error> {
         self.buf.flush()?;
-        self.buf.get_ref().sync_all()
+        if self.sync_all {
+            self.buf.get_ref().sync_all()?;
+        }
+        Ok(())
     }
 }
 
@@ -106,9 +112,10 @@ mod tests {
         let file_path = temp_file.path();
 
         // 初始化 RandFilePusher，假设文件大小为 10 字节
-        let mut pusher = StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, 8 * 1024)
-            .await
-            .unwrap();
+        let mut pusher =
+            StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, 8 * 1024, false)
+                .await
+                .unwrap();
 
         // 写入数据
         let data = b"234";

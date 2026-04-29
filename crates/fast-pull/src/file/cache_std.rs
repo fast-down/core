@@ -13,11 +13,12 @@ impl CacheFilePusher {
     pub async fn new(
         file: tokio::fs::File,
         size: u64,
+        sync_all: bool,
         high_watermark: usize,
         low_watermark: usize,
         buffer_size: usize,
     ) -> std::io::Result<Self> {
-        let file_pusher = StdFilePusher::new(file, size, buffer_size).await?;
+        let file_pusher = StdFilePusher::new(file, size, buffer_size, sync_all).await?;
         let inner = CacheSeqPusher::new(file_pusher, high_watermark, low_watermark);
         Ok(Self { inner })
     }
@@ -54,6 +55,7 @@ mod tests {
         let mut pusher = CacheFilePusher::new(
             temp_file.reopen().unwrap().into(),
             10,
+            false,
             1024 * 1024,
             512 * 1024,
             8 * 1024,
