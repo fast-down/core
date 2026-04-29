@@ -80,7 +80,7 @@ fn into_chunk_stream<Client: HttpClient>(resp: GetResponse<Client>) -> ChunkStre
         match r.chunk().await {
             Ok(Some(chunk)) => Ok(Some((chunk, r))),
             Ok(None) => Ok(None),
-            Err(e) => Err(HttpError::Chunk(e)),
+            Err(e) => Err(HttpError::Chunk(e, r)),
         }
     }))
 }
@@ -134,7 +134,10 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
                             continue;
                         }
                         self.state = ResponseState::None;
-                        Poll::Ready(Some(Err((HttpError::MismatchedBody(new_file_id), None))))
+                        Poll::Ready(Some(Err((
+                            HttpError::MismatchedBody(new_file_id, resp),
+                            None,
+                        ))))
                     }
                     Poll::Ready(Err((e, d))) => {
                         self.state = ResponseState::None;
@@ -194,6 +197,7 @@ mod tests {
             Ok(MockResponse::new())
         }
     }
+    #[derive(Debug)]
     struct MockResponse {
         headers: MockHeaders,
         url: Url,
@@ -219,6 +223,7 @@ mod tests {
             DelayChunk::new().await
         }
     }
+    #[derive(Debug)]
     struct MockHeaders;
     impl HttpHeaders for MockHeaders {
         type GetHeaderError = MockError;

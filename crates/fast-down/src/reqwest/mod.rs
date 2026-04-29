@@ -227,10 +227,10 @@ mod tests {
                         assert_eq!(status_code, StatusCode::NOT_FOUND);
                     }
                 },
-                HttpError::Chunk(_) | HttpError::GetHeader(_) | HttpError::Irrecoverable => {
+                HttpError::Chunk(_, _) | HttpError::Irrecoverable => {
                     unreachable!()
                 }
-                HttpError::MismatchedBody(file_id) => {
+                HttpError::MismatchedBody(file_id, _) => {
                     unreachable!("404 status code should not return mismatched body: {file_id:?}")
                 }
             },

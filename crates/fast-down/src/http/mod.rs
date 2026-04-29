@@ -22,7 +22,7 @@ pub trait HttpRequestBuilder {
         self,
     ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send;
 }
-pub trait HttpResponse: Send + Unpin {
+pub trait HttpResponse: Send + Debug + Unpin {
     type Headers: HttpHeaders;
     type ChunkError: Send + Debug + Unpin;
     fn headers(&self) -> &Self::Headers;
@@ -46,10 +46,9 @@ pub type GetHeaderError<Client> = <GetHeader<Client> as HttpHeaders>::GetHeaderE
 #[derive(thiserror::Error, Debug)]
 pub enum HttpError<Client: HttpClient> {
     Request(GetRequestError<Client>),
-    Chunk(GetChunkError<Client>),
-    GetHeader(GetHeaderError<Client>),
+    Chunk(GetChunkError<Client>, GetResponse<Client>),
     Irrecoverable,
-    MismatchedBody(FileId),
+    MismatchedBody(FileId, GetResponse<Client>),
 }
 
 impl<C: HttpClient> PullerError for HttpError<C> {
