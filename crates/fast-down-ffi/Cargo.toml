@@ -1,0 +1,43 @@
+[package]
+name = "fast-down-ffi"
+version = "0.4.1"
+authors.workspace = true
+edition.workspace = true
+description = "这个库旨在提供一个合适、易于使用的 fast-down 包装"
+documentation = "https://docs.rs/fast-down-ffi"
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["concurrency", "downloader", "parallel", "performance", "thread"]
+categories = ["network-programming"]
+
+[dependencies]
+fast-down = { workspace = true, features = ["fast-puller", "getifaddrs"] }
+parking_lot = { version = "0.12", features = ["serde"] }
+serde = { version = "1.0.156", optional = true }
+tokio = "1.39"
+tokio-util = "0.7"
+url = "2.5.8"
+reqwest = { version = "0.13.2", default-features = false, features = [
+    "brotli",
+    "default-tls",
+    "deflate",
+    "gzip",
+    "http2",
+    "socks",
+    "system-proxy",
+    "zstd",
+] }
+thiserror = "2.0"
+crossfire = "3.0"
+
+[features]
+serde = ["dep:serde", "fast-down/serde"]
+file = ["fast-down/file"]
+mem = ["fast-down/mem"]
+reqwest-tls = ["fast-down/reqwest-tls"]
+sanitize-filename = ["fast-down/sanitize-filename"]
+
+[lints]
+workspace = true

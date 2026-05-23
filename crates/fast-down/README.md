@@ -4,7 +4,7 @@
 [![Test](https://github.com/fast-down/core/workflows/Test/badge.svg)](https://github.com/fast-down/core/actions)
 [![Latest version](https://img.shields.io/crates/v/fast-down.svg)](https://crates.io/crates/fast-down)
 [![Documentation](https://docs.rs/fast-down/badge.svg)](https://docs.rs/fast-down)
-[![License](https://img.shields.io/crates/l/fast-down.svg)](https://github.com/fast-down/core/blob/main/crates/fast-down/LICENSE)
+[![License](https://img.shields.io/crates/l/fast-down.svg)](https://github.com/fast-down/core/blob/main/LICENSE)
 
 `fast-down` **Fastest** concurrent downloader!
 

@@ -4,7 +4,7 @@
 [![Test](https://github.com/fast-down/core/workflows/Test/badge.svg)](https://github.com/fast-down/core/actions)
 [![Latest version](https://img.shields.io/crates/v/fast-pull.svg)](https://crates.io/crates/fast-pull)
 [![Documentation](https://docs.rs/fast-pull/badge.svg)](https://docs.rs/fast-pull)
-[![License](https://img.shields.io/crates/l/fast-pull.svg)](https://github.com/fast-down/core/blob/main/crates/fast-pull/LICENSE)
+[![License](https://img.shields.io/crates/l/fast-pull.svg)](https://github.com/fast-down/core/blob/main/LICENSE)
 
 `fast-pull` **Fastest** concurrent downloader!
 
