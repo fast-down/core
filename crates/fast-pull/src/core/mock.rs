@@ -18,18 +18,18 @@ impl MockPuller {
 }
 impl Puller for MockPuller {
     type Error = ();
-    async fn pull(
+    fn pull(
         &mut self,
         range: Option<&ProgressEntry>,
-    ) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
+    ) -> impl Future<Output = PullResult<impl PullStream<Self::Error>, Self::Error>> {
         let data = match range {
             #[allow(clippy::cast_possible_truncation)]
             Some(r) => &self.0[r.start as usize..r.end as usize],
             None => &self.0,
         };
-        Ok(stream::iter(
+        std::future::ready(Ok(stream::iter(
             data.chunks(2).map(|c| Ok(c.iter().copied().collect())),
-        ))
+        )))
     }
 }
 impl PullerError for () {}
