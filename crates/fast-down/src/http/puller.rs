@@ -87,12 +87,12 @@ fn into_chunk_stream<Client: HttpClient>(resp: GetResponse<Client>) -> ChunkStre
 
 impl<Client: HttpClient> Puller for HttpPuller<Client> {
     type Error = HttpError<Client>;
-    async fn pull(
+    fn pull(
         &mut self,
         range: Option<&ProgressEntry>,
-    ) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
+    ) -> impl Future<Output = PullResult<impl PullStream<Self::Error>, Self::Error>> {
         let range = range.cloned().unwrap_or(0..u64::MAX);
-        Ok(RandRequestStream {
+        std::future::ready(Ok(RandRequestStream {
             client: self.client.clone(),
             url: self.url.clone(),
             state: if range.start == 0
@@ -108,7 +108,7 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
             },
             range,
             file_id: self.file_id.clone(),
-        })
+        }))
     }
 }
 struct RandRequestStream<Client: HttpClient> {
@@ -193,8 +193,11 @@ mod tests {
     impl HttpRequestBuilder for MockRequestBuilder {
         type Response = MockResponse;
         type RequestError = MockError;
-        async fn send(self) -> Result<Self::Response, (Self::RequestError, Option<Duration>)> {
-            Ok(MockResponse::new())
+        fn send(
+            self,
+        ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>>
+        {
+            std::future::ready(Ok(MockResponse::new()))
         }
     }
     #[derive(Debug)]
