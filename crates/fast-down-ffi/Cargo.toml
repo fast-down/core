@@ -1,6 +1,6 @@
 [package]
 name = "fast-down-ffi"
-version = "0.4.1"
+version = "0.4.2"
 authors.workspace = true
 edition.workspace = true
 description = "A convenient and easy-to-use FFI wrapper for fast-down"

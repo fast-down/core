@@ -1,6 +1,6 @@
 [package]
 name = "fast-steal"
-version = "6.5.3"
+version = "6.5.4"
 authors.workspace = true
 edition.workspace = true
 description = "An ultra-fast multi-threaded task scheduler with fine-grained work stealing"
