@@ -2,7 +2,7 @@ use crate::{ProgressEntry, Pusher};
 use bytes::Bytes;
 use std::collections::BTreeMap;
 
-/// 优先选择大块调用 push 但是不含合并过程
+/// Prefers pushing large contiguous runs without merging
 #[derive(Debug)]
 pub struct CacheDirectPusher<P> {
     inner: P,

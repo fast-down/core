@@ -32,7 +32,7 @@ pub trait HttpResponse: Send + Debug + Unpin {
 pub trait HttpHeaders {
     type GetHeaderError: Send + Debug + Unpin;
     /// # Errors
-    /// 当获取头信息报错时返回 Error
+    /// Returns an error if the header cannot be retrieved
     fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError>;
 }
 

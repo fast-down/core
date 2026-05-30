@@ -10,7 +10,7 @@ use std::sync::Arc;
 use url::Url;
 
 /// # Errors
-/// 当设置代理报错时返回 Error
+/// Returns an error if proxy configuration fails
 pub fn build_client(
     headers: &HeaderMap,
     proxy: Proxy<&str>,
@@ -63,7 +63,7 @@ pub struct FastDownPullerOptions<'a> {
 
 impl FastDownPuller {
     /// # Errors
-    /// 当设置代理报错时返回 Error
+    /// Returns an error if proxy configuration fails
     pub fn new(option: FastDownPullerOptions<'_>) -> Result<Self, reqwest::Error> {
         let turn = Arc::new(std::sync::atomic::AtomicUsize::new(1));
         let available_ips = option.available_ips;

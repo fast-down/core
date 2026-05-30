@@ -1,29 +1,29 @@
 use std::net::IpAddr;
 
 /// # Errors
-/// 无法读取网卡信息时报错
+/// Returns an error when network interface information cannot be read
 #[cfg(not(target_family = "wasm"))]
 pub fn get_available_local_ips() -> std::io::Result<Vec<InterfaceInfo>> {
     use getifaddrs::{InterfaceFlags, getifaddrs};
     const VIRTUAL_KEYWORDS: &[&str] = &[
-        // Docker 及其网桥
+        // Docker and its bridges
         "docker",
         "veth",
         "br-",
-        // VPN, 隧道, 虚拟机
+        // VPN, tunnels, VMs
         "utun",
         "tun",
         "tap",
         // VirtualBox, VMware
         "vboxnet",
         "vmnet",
-        // 虽然已经过滤了 LOOPBACK 标志，但双重保险
+        // LOOPBACK is already filtered by flags, but double-check
         "lo",
-        // 常见的组网软件
+        // Common networking software
         "tailscale",
         "zerotier",
         "bridge",
-        // 虚拟桥接和空设备
+        // Virtual bridges and dummy devices
         "dummy",
         "virtual",
         "pseudo",
@@ -51,10 +51,10 @@ pub fn get_available_local_ips() -> std::io::Result<Vec<InterfaceInfo>> {
     Ok(ips)
 }
 
-/// 无法在 wasm 上获取网卡信息，所以永远返回 `Ok(Vec::new())`
+/// Network interface info is unavailable on wasm, so this always returns `Ok(Vec::new())`
 ///
 /// # Errors
-/// 永远不会返回 Err
+/// Never returns Err
 #[cfg(target_family = "wasm")]
 pub const fn get_available_local_ips() -> std::io::Result<Vec<InterfaceInfo>> {
     Ok(Vec::new())

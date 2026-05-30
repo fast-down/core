@@ -87,7 +87,7 @@ impl<H: Handle> TaskQueue<H> {
         }
         found
     }
-    /// 当线程数需要增加时，但 executor 为空时，返回 None
+    /// Returns `None` when threads need to be increased but the executor is `None`
     #[must_use]
     pub fn set_threads<E: Executor<Handle = H>>(
         &self,
@@ -244,7 +244,7 @@ mod tests {
             println!("main: {i} = {res}");
             assert!(
                 data.insert(i, res).is_none(),
-                "数字 {i}，值为 {res} 重复计算"
+                "number {i} with value {res} was computed twice"
             );
         }
         dbg!(&data);
@@ -270,7 +270,7 @@ mod tests {
             println!("main: {i} = {res}");
             assert!(
                 data.insert(i, res).is_none(),
-                "数字 {i}，值为 {res} 重复计算"
+                "number {i} with value {res} was computed twice"
             );
         }
         dbg!(&data);

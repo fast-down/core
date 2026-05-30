@@ -38,12 +38,12 @@ fn parse_headers(headers: &HashMap<String, String>) -> Arc<HeaderMap> {
         .into()
 }
 
-/// 这个函数允许通过 drop Future 的方式来取消
+/// This function can be cancelled by dropping the returned Future.
 ///
 /// # Errors
 ///
-/// - 设置代理失败时返回 Err
-/// - 到达重试上限时返回 Err
+/// - Returns an error if proxy configuration fails.
+/// - Returns an error if the maximum number of retries is reached.
 pub async fn prefetch(url: Url, config: Config, tx: Tx) -> Result<DownloadTask, Error> {
     let headers = parse_headers(&config.headers);
     let local_addr: Arc<[_]> = config.local_address.clone().into();
@@ -85,14 +85,15 @@ impl Drop for RunGuard<'_> {
 }
 
 impl DownloadTask {
-    /// 不能通过 drop Future 来终止这个函数，否则写入内容将会不完整
-    /// 多次调用会在上次中断的地方继续
+    /// Cannot be cancelled by dropping the Future — doing so would leave the
+    /// written content incomplete.
+    /// Multiple calls will resume from where the last call left off.
     ///
     /// # Errors
     ///
-    /// - 如果已经在运行则返回 Err
-    /// - 设置代理报错时返回 Err
-    /// - 下载意外失败时返回 Err
+    /// - Returns `Err` if the task is already running.
+    /// - Returns `Err` if proxy configuration fails.
+    /// - Returns `Err` if the download fails unexpectedly.
     pub async fn start_with_pusher(
         &self,
         pusher: BoxPusher,
@@ -176,12 +177,14 @@ impl DownloadTask {
         Ok(())
     }
 
-    /// 不能通过 drop Future 来终止这个函数，否则写入内容将会不完整
-    /// pusher 由 [`crate::WriteMethod`] 指定
+    /// Cannot be cancelled by dropping the Future — doing so would leave the
+    /// written content incomplete.
+    /// The pusher is determined by [`crate::WriteMethod`].
     ///
     /// # Errors
     ///
-    /// 打开/创建文件失败时返回 Err，其余同 [`crate::DownloadTask::start_with_pusher`]
+    /// Returns `Err` if opening or creating the file fails. Otherwise see
+    /// [`crate::DownloadTask::start_with_pusher`].
     #[cfg(feature = "file")]
     pub async fn start(
         &self,
@@ -205,11 +208,12 @@ impl DownloadTask {
     }
 
     #[allow(clippy::missing_panics_doc)]
-    /// 不能通过 drop Future 来终止这个函数，否则写入内容将会不完整
+    /// Cannot be cancelled by dropping the Future — doing so would leave the
+    /// written content incomplete.
     ///
     /// # Errors
     ///
-    /// 同 [`crate::DownloadTask::start_with_pusher`]
+    /// Same as [`crate::DownloadTask::start_with_pusher`].
     #[cfg(feature = "mem")]
     pub async fn start_in_memory(&self, cancel_token: CancellationToken) -> Result<Vec<u8>, Error> {
         #[allow(clippy::cast_possible_truncation)]
@@ -223,7 +227,7 @@ impl DownloadTask {
 #[cfg(feature = "file")]
 /// # Errors
 ///
-/// 打开/创建文件失败时返回 Err
+/// Returns an error if opening or creating the file fails.
 pub async fn get_pusher(
     info: &UrlInfo,
     write_method: crate::WriteMethod,

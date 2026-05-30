@@ -22,10 +22,10 @@ where
     }
 
     /// # Panics
-    /// 当用于等待任务完成的后台线程意外退出时报错
+    /// Panics if the background task awaiting the handle exits unexpectedly
     ///
     /// # Errors
-    /// 当任务本身返回 `JoinError` 时，返回 `Arc<JoinError>`
+    /// Returns `Arc<JoinError>` if the task itself returns a `JoinError`
     pub async fn join(&self) -> Result<T, Arc<JoinError>> {
         let mut rx = self.rx.clone();
         loop {

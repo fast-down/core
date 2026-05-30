@@ -51,7 +51,7 @@ impl Task {
     }
 
     /// # Panics
-    /// 当 range.start > range.end
+    /// Panics when `range.start > range.end`
     #[must_use]
     pub fn new(range: Range<u64>) -> Self {
         assert!(range.start <= range.end);
@@ -69,8 +69,8 @@ impl Task {
         (self.state.load(Ordering::Acquire) >> 64) as u64
     }
     /// # Errors
-    /// 当 `start` + `bias` <= `old_start` 时返回 [`RangeError`]
-    /// 否则返回 `old_start..new_start.min(end)`
+    /// Returns [`RangeError`] when `start` + `bias` <= `old_start`
+    /// Otherwise returns `old_start..new_start.min(end)`
     pub fn safe_add_start(&self, start: u64, bias: u64) -> Result<Range<u64>, RangeError> {
         let new_start = start.checked_add(bias).ok_or(RangeError)?;
         let mut old_state = self.state.load(Ordering::Acquire);
@@ -107,8 +107,8 @@ impl Task {
         range.end.saturating_sub(range.start)
     }
     /// # Errors
-    /// 1. 当 start > end 时返回 [`RangeError`]
-    /// 2. 当 remain < 2 时返回 None 并且不会修改自己
+    /// 1. Returns [`RangeError`] when `start > end`
+    /// 2. Returns `None` when `remain < 2` without modifying itself
     pub fn split_two(&self) -> Result<Option<Range<u64>>, RangeError> {
         let mut old_state = self.state.load(Ordering::Acquire);
         loop {

@@ -9,8 +9,8 @@ impl ContentDisposition {
     pub fn parse(header_value: &str) -> Self {
         let mut filename = None;
         let mut filename_star = None;
-        // 1. 跳过 disposition-type (如 "attachment")
-        // 如果没有分号，说明没有参数，直接返回
+        // 1. Skip the disposition-type (e.g. "attachment")
+        // If there's no semicolon, there are no parameters
         let rest = match header_value.find(';') {
             Some(idx) => &header_value[idx + 1..],
             None => return Self { filename: None },
@@ -18,10 +18,10 @@ impl ContentDisposition {
         let mut chars = rest.chars().peekable();
         while chars.peek().is_some() {
             Self::consume_whitespace(&mut chars);
-            // 读取 Key
+            // Read the key
             let key = Self::read_key(&mut chars);
             if key.is_empty() {
-                // 处理连续分号情况 (e.g. ";;")
+                // Handle consecutive semicolons (e.g. ";;")
                 match chars.peek() {
                     Some(';') => {
                         chars.next();
@@ -30,40 +30,40 @@ impl ContentDisposition {
                     _ => break,
                 }
             }
-            // 检查 Key 后的分隔符
+            // Check for the separator after the key
             match chars.peek() {
                 Some('=') => {
-                    chars.next(); // 消费 '='
+                    chars.next(); // consume '='
                 }
                 Some(';') => {
-                    // Key 后面直接跟分号，说明是 Flag 参数 (如 "hidden;")
-                    // 忽略此参数，直接消费分号并进入下一次循环
+                    // Key is immediately followed by `;`, so it's a flag parameter (e.g. "hidden;")
+                    // Skip this parameter and continue to the next one
                     chars.next();
                     continue;
                 }
-                None => break, // 字符串结束
+                None => break, // end of string
                 _ => {
-                    // 遇到非法字符，尝试跳到下一个分号恢复
+                    // Invalid character encountered; skip to the next semicolon to recover
                     Self::skip_until(&mut chars, ';');
                     continue;
                 }
             }
             Self::consume_whitespace(&mut chars);
-            // 读取 Value
+            // Read the value
             let value = match chars.peek() {
                 Some('"') => {
-                    chars.next(); // 消费起始引号
+                    chars.next(); // consume the opening quote
                     Self::read_quoted_string(&mut chars)
                 }
                 _ => Self::read_token(&mut chars),
             };
-            // 如果 Value 后面紧跟分号，消费它
-            // 注意：如果 read_token 因为遇到空格停止，这里需要跳过可能的空格找到分号
+            // Consume the semicolon if it follows the value
+            // Note: if read_token stopped due to whitespace, skip spaces to find the semicolon
             Self::consume_whitespace(&mut chars);
             if matches!(chars.peek(), Some(';')) {
                 chars.next();
             }
-            // 匹配 Key
+            // Match the key
             if key.eq_ignore_ascii_case("filename") {
                 filename = Some(value);
             } else if key.eq_ignore_ascii_case("filename*") {
@@ -83,7 +83,7 @@ impl ContentDisposition {
         }
     }
 
-    /// 读取 Key，遇到 `=` 或 `;` 停止
+    /// Read a key, stopping at `=` or `;`
     fn read_key(chars: &mut Peekable<Chars<'_>>) -> String {
         let mut s = String::new();
         while let Some(&c) = chars.peek()
@@ -96,8 +96,8 @@ impl ContentDisposition {
         s.trim().to_string()
     }
 
-    /// 读取未加引号的 Token (Value)
-    /// 停止条件：遇到 `;` 或者 **空白字符**
+    /// Read an unquoted token (value)
+    /// Stops at `;` or **whitespace**
     fn read_token(chars: &mut Peekable<Chars<'_>>) -> String {
         let mut s = String::new();
         while let Some(&c) = chars.peek()
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_empty_values() {
-        let s = r#"attachment; filename=";\";;"; filename*=""#; // filename* 格式不对会被忽略
+        let s = r#"attachment; filename=";\";;"; filename*=""#; // invalid filename* will be ignored
         let cd = ContentDisposition::parse(s);
         assert_eq!(cd.filename.unwrap(), ";\";;");
     }

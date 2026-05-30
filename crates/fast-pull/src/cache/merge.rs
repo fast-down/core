@@ -2,7 +2,7 @@ use crate::{ProgressEntry, Pusher};
 use bytes::{Bytes, BytesMut};
 use std::collections::{BTreeMap, btree_map::Entry};
 
-/// 优先选择大块调用 push，并且会把大块合并成一个 Bytes
+/// Prefers pushing large contiguous runs and merges each run into a single `Bytes`
 #[derive(Debug)]
 pub struct CacheMergePusher<P> {
     inner: P,

@@ -249,12 +249,12 @@ mod tests {
         type Output = Result<Option<Bytes>, MockError>;
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             if !self.polled_once {
-                println!("Wait... [Mock: 模拟网络延迟 Pending]");
+                println!("Wait... [Mock: simulating network delay with Pending]");
                 self.polled_once = true;
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            println!("Done! [Mock: 数据到达 Ready]");
+            println!("Done! [Mock: data arrived, Ready]");
             Poll::Ready(Ok(Some(Bytes::from_static(b"success"))))
         }
     }
@@ -269,18 +269,18 @@ mod tests {
         let mut stream = Puller::pull(&mut puller, Some(&range))
             .await
             .expect("Failed to create stream");
-        println!("--- 开始测试 HttpPuller ---");
+        println!("--- Starting HttpPuller test ---");
         let result =
             tokio::time::timeout(Duration::from_secs(1), async { stream.try_next().await }).await;
         match result {
             Ok(Ok(Some(bytes))) => {
-                println!("收到数据: {bytes:?}");
+                println!("Received data: {bytes:?}");
                 assert_eq!(bytes, Bytes::from_static(b"success"));
-                println!("测试通过：HttpPuller 正确处理了 Pending 状态！");
+                println!("Test passed: HttpPuller correctly handled Pending state!");
             }
             e => {
                 panic!(
-                    "测试失败：超时！这表明 HttpPuller 可能在收到 Pending 后丢失了 Future 状态并陷入了死循环。 {e:?}"
+                    "Test failed: timeout! This indicates HttpPuller may have lost the Future state after receiving Pending and entered an infinite loop. {e:?}"
                 );
             }
         }

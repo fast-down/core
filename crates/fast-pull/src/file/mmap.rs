@@ -9,10 +9,10 @@ pub struct MmapFilePusher {
 }
 impl MmapFilePusher {
     /// # Errors
-    /// 1. 当 `fs::try_exists` 失败时返回错误。
-    /// 2. 当 `fs::open` 失败时返回错误。
-    /// 3. 当 `fs::set_len` 失败时返回错误。
-    /// 4. 当 `mmap_io::open` 失败时返回错误。
+    /// 1. Returns an error if `fs::try_exists` fails.
+    /// 2. Returns an error if `fs::open` fails.
+    /// 3. Returns an error if `fs::set_len` fails.
+    /// 4. Returns an error if `mmap_io::open` fails.
     pub async fn new(file: tokio::fs::File, size: u64, sync_all: bool) -> std::io::Result<Self> {
         file.set_len(size).await?;
         let mmap = unsafe { MmapMut::map_mut(&file)? };
@@ -44,22 +44,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_rand_file_pusher() {
-        // 创建一个临时文件用于测试
+        // Create a temp file for testing
         let temp_file = NamedTempFile::new().unwrap();
         let file_path = temp_file.path();
 
-        // 初始化 RandFilePusher，假设文件大小为 10 字节
+        // Initialize RandFilePusher with a file size of 10 bytes
         let mut pusher = MmapFilePusher::new(temp_file.reopen().unwrap().into(), 10, false)
             .await
             .unwrap();
 
-        // 写入数据
+        // Write data
         let data = b"234";
         let range = 2..5;
         pusher.push(&range, data[..].into()).unwrap();
         pusher.flush().unwrap();
 
-        // 验证文件内容
+        // Verify file content
         let mut file_content = Vec::new();
         File::open(file_path)
             .unwrap()

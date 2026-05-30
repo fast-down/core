@@ -6,4 +6,4 @@
 [![Documentation](https://docs.rs/fast-down-ffi/badge.svg)](https://docs.rs/fast-down-ffi)
 [![License](https://img.shields.io/crates/l/fast-down-ffi.svg)](https://github.com/fast-down/core/blob/main/LICENSE)
 
-这个库旨在提供一个合适、易于使用的 fast-down 包装
+This library provides a convenient and easy-to-use wrapper around fast-down

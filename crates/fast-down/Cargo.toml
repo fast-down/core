@@ -44,7 +44,7 @@ getifaddrs = ["dep:getifaddrs"]
 fast-puller = ["reqwest"]
 reqwest-tls = ["reqwest/default-tls"]
 
-# 来自 fast-pull
+# Features from fast-pull
 file = ["fast-pull/file"]
 mem = ["fast-pull/mem"]
 

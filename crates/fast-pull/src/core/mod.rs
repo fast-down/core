@@ -63,7 +63,7 @@ where
     }
 
     /// # Errors
-    /// 当写入线程意外退出时返回 `Arc<JoinError>`
+    /// Returns `Arc<JoinError>` if the writer thread exits unexpectedly
     pub async fn join(&self) -> Result<(), Arc<JoinError>> {
         self.handle.join().await
     }

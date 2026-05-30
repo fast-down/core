@@ -8,8 +8,8 @@ pub struct CacheFilePusher {
 
 impl CacheFilePusher {
     /// # Errors
-    /// 1. 当 `fs::set_len` 失败时返回错误。
-    /// 2. 当 `FilePusher` 初始化失败时返回错误。
+    /// 1. Returns an error if `fs::set_len` fails.
+    /// 2. Returns an error if `FilePusher` initialization fails.
     pub async fn new(
         file: tokio::fs::File,
         size: u64,
@@ -50,8 +50,8 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let file_path = temp_file.path();
 
-        // 初始化包装器：
-        // 内存缓存设为 1MB，水位线 512KB，BufWriter 设为 8KB
+        // Initialize the wrapper:
+        // cache size = 1MB, watermark = 512KB, BufWriter = 8KB
         let mut pusher = CacheFilePusher::new(
             temp_file.reopen().unwrap().into(),
             10,
@@ -63,13 +63,13 @@ mod tests {
         .await
         .unwrap();
 
-        // 写入数据
+        // Write data
         let data = b"234";
         let range = 2..5;
         pusher.push(&range, data[..].into()).unwrap();
         pusher.flush().unwrap();
 
-        // 验证文件内容
+        // Verify file content
         let mut file_content = Vec::new();
         File::open(file_path)
             .unwrap()

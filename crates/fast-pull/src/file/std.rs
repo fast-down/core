@@ -15,7 +15,7 @@ pub struct StdFilePusher {
 
 impl StdFilePusher {
     /// # Errors
-    /// 当 `fs::set_len` 失败时返回错误。
+    /// Returns an error if `fs::set_len` fails.
     pub async fn new(
         file: tokio::fs::File,
         size: u64,
@@ -31,7 +31,7 @@ impl StdFilePusher {
     }
 
     /// # Errors
-    /// 当 `Seek` 或 `Write` 失败时返回错误。
+    /// Returns an error if `Seek` or `Write` fails.
     pub fn write_at(&mut self, start: u64, mut bytes: &[u8]) -> std::io::Result<()> {
         if self.p != start {
             if let Err(e) = self.buf.seek(SeekFrom::Start(start)) {
@@ -107,23 +107,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_rand_file_pusher() {
-        // 创建一个临时文件用于测试
+        // Create a temp file for testing
         let temp_file = NamedTempFile::new().unwrap();
         let file_path = temp_file.path();
 
-        // 初始化 RandFilePusher，假设文件大小为 10 字节
+        // Initialize RandFilePusher with a file size of 10 bytes
         let mut pusher =
             StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, 8 * 1024, false)
                 .await
                 .unwrap();
 
-        // 写入数据
+        // Write data
         let data = b"234";
         let range = 2..5;
         pusher.push(&range, data[..].into()).unwrap();
         pusher.flush().unwrap();
 
-        // 验证文件内容
+        // Verify file content
         let mut file_content = Vec::new();
         File::open(file_path)
             .unwrap()

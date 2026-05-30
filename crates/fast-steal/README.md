@@ -1,4 +1,4 @@
-# fast-steal 神偷
+# fast-steal
 
 [![GitHub last commit](https://img.shields.io/github/last-commit/fast-down/core/main)](https://github.com/fast-down/core/commits/main)
 [![Test](https://github.com/fast-down/core/workflows/Test/badge.svg)](https://github.com/fast-down/core/actions)
@@ -6,14 +6,14 @@
 [![Documentation](https://docs.rs/fast-steal/badge.svg)](https://docs.rs/fast-steal)
 [![License](https://img.shields.io/crates/l/fast-steal.svg)](https://github.com/fast-down/core/blob/main/LICENSE)
 
-`fast-steal` 是一个特别快的多线程库，支持超细颗粒度的任务窃取。
+`fast-steal` is an ultra-fast multi-threaded library with fine-grained work stealing.
 
-## 优势
+## Highlights
 
-1. `no_std` 支持，不依赖于标准库
-2. 超细颗粒度任务窃取，速度非常快
-3. 安全的 Rust，库中没有使用任何 unsafe 的代码
-4. 测试完全覆盖，保证库的稳定性和可靠性
+1. `no_std` support
+2. Ultra-fine-grained work stealing for maximum throughput
+3. Safe Rust — no `unsafe` code
+4. Full test coverage for stability and reliability
 
 ```rust
 use fast_steal::{Executor, Handle, Task, TaskQueue};
@@ -102,7 +102,7 @@ async fn main() {
             println!("main: {i} = {res}");
             assert!(
                 data.insert(i, res).is_none(),
-                "数字 {i}，值为 {res} 重复计算"
+                "number {i} with value {res} was computed twice"
             );
         }
         dbg!(&data);
@@ -130,7 +130,7 @@ async fn main() {
             println!("main: {i} = {res}");
             assert!(
                 data.insert(i, res).is_none(),
-                "数字 {i}，值为 {res} 重复计算"
+                "number {i} with value {res} was computed twice"
             );
         }
         dbg!(&data);

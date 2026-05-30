@@ -22,7 +22,7 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
 }
 
 /// # Panics
-/// 当设置线程数，但 executor 意外为空时，panic
+/// Panics when setting threads but the executor is unexpectedly `None`
 pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     puller: R,
     mut pusher: W,

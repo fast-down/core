@@ -168,13 +168,13 @@ mod tests {
         let (url_info, _) = client.prefetch(url).await.unwrap();
         assert_eq!(url_info.raw_name, "test.txt");
 
-        // 测试仅包含 filename* (UTF-8 编码)
+        // Test filename* only (UTF-8 encoding)
         let _mock_star = server
             .mock("GET", "/test_star")
             .with_header(
                 "Content-Disposition",
                 "attachment; filename*=UTF-8''%E6%B5%8B%E8%AF%95.txt",
-            ) // "测试.txt"
+            ) // decodes to "测试.txt"
             .create_async()
             .await;
         let url = Url::parse(&format!("{}/test_star", server.url())).unwrap();
