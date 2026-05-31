@@ -1,6 +1,11 @@
 use crate::{CacheSeqPusher, ProgressEntry, Pusher, file::StdFilePusher};
 use bytes::Bytes;
 
+/// File pusher combining [`CacheSeqPusher`] with [`StdFilePusher`].
+///
+/// Provides out-of-order reordering on top of standard file I/O.
+/// The write buffer, watermark levels, and sync-all behavior are forwarded
+/// to [`StdFilePusher::new`].
 #[derive(Debug)]
 pub struct CacheFilePusher {
     inner: CacheSeqPusher<StdFilePusher>,
@@ -9,7 +14,7 @@ pub struct CacheFilePusher {
 impl CacheFilePusher {
     /// # Errors
     /// 1. Returns an error if `fs::set_len` fails.
-    /// 2. Returns an error if `FilePusher` initialization fails.
+    /// 2. Returns an error if [`StdFilePusher`] initialization fails.
     pub async fn new(
         file: tokio::fs::File,
         size: u64,

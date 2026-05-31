@@ -2,6 +2,12 @@ use crate::{ProgressEntry, Pusher};
 use bytes::Bytes;
 use memmap2::MmapMut;
 
+/// File pusher using memory-mapped I/O for zero-copy writes.
+///
+/// Delegates writes to the OS via `MmapMut`. The file size is fixed at
+/// construction time via `file.set_len(size)`. On [`flush`](Pusher::flush),
+/// if `sync_all` is true an `fsync` is performed; otherwise an async flush
+/// is issued.
 #[derive(Debug)]
 pub struct MmapFilePusher {
     mmap: MmapMut,

@@ -3,6 +3,10 @@ use bytes::Bytes;
 use parking_lot::Mutex;
 use std::{sync::Arc, vec::Vec};
 
+/// In-memory pusher for testing or buffer-based workflows.
+///
+/// All pushed data is stored in a shared `Vec<u8>` protected by a mutex.
+/// Supports random-access writes via `copy_from_slice` for non-sequential ranges.
 #[derive(Debug, Default, Clone)]
 pub struct MemPusher {
     pub receive: Arc<Mutex<Vec<u8>>>,

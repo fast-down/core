@@ -2,12 +2,16 @@ use crate::{ProgressEntry, PullResult, PullStream, Puller, PullerError};
 use futures::stream;
 use std::{sync::Arc, vec::Vec};
 
+/// Build a deterministic byte array for mock testing.
+///
+/// Each byte `i` has value `(i % 256)`.
 #[must_use]
 pub fn build_mock_data(size: usize) -> Vec<u8> {
     #[allow(clippy::cast_possible_truncation)]
     (0..size).map(|i| (i % 256) as u8).collect()
 }
 
+/// A [`Puller`] implementation backed by an in-memory byte slice, used for testing.
 #[derive(Debug, Clone)]
 pub struct MockPuller(pub Arc<[u8]>);
 impl MockPuller {

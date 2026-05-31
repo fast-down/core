@@ -1,7 +1,11 @@
 use core::ops::Range;
 
+/// A byte-range representing downloaded or to-be-downloaded progress.
+///
+/// Stored as a `Range<u64>` from `start` (inclusive) to `end` (exclusive).
 pub type ProgressEntry = Range<u64>;
 
+/// Trait for computing the total size from one or more [`ProgressEntry`] values.
 pub trait Total {
     fn total(&self) -> u64;
 }
