@@ -48,11 +48,12 @@ pub async fn prefetch(url: Url, config: Config, tx: Tx) -> Result<DownloadTask, 
     let headers = parse_headers(&config.headers);
     let local_addr: Arc<[_]> = config.local_address.clone().into();
     let client = build_client(
-        &headers,
+        headers.as_ref().clone(),
         config.proxy.as_deref(),
         config.accept_invalid_certs,
         config.accept_invalid_hostnames,
         local_addr.first().copied(),
+        config.max_redirects,
     )?;
     let mut retry_count = 0;
     let (info, resp) = loop {
@@ -117,6 +118,7 @@ impl DownloadTask {
             accept_invalid_hostnames: self.config.accept_invalid_hostnames,
             file_id: self.info.file_id.clone(),
             resp: self.resp.clone(),
+            max_redirects: self.config.max_redirects,
         })?;
         let threads = if self.info.fast_download {
             self.config.threads.max(1)

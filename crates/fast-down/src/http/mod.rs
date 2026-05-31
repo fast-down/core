@@ -1,7 +1,9 @@
 mod content_disposition;
+pub mod manual_redirect;
 mod prefetch;
 mod puller;
 pub use content_disposition::*;
+pub use manual_redirect::*;
 pub use prefetch::*;
 pub use puller::*;
 

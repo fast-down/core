@@ -1,5 +1,5 @@
 use fast_down::http::HttpError;
-use reqwest::Client;
+use fast_down::reqwest::SmartRedirectClient;
 use std::sync::Arc;
 use tokio::task::JoinError;
 
@@ -12,7 +12,7 @@ pub enum Error {
     #[error("Task error: {0:?}")]
     Task(#[from] Arc<JoinError>),
     #[error("Prefetch timeout: {0:?}")]
-    PrefetchTimeout(HttpError<Client>),
+    PrefetchTimeout(HttpError<SmartRedirectClient>),
     #[error("Task is already running")]
     AlreadyRunning,
 }

@@ -1,26 +1,33 @@
 use crate::Proxy;
 use crate::{
     FileId, ProgressEntry, PullResult, PullStream,
-    http::{HttpError, HttpPuller},
+    http::{HttpError, HttpPuller, ReferrerPolicy},
+    reqwest::SmartRedirectClient,
 };
 use fast_pull::Puller;
 use parking_lot::Mutex;
-use reqwest::{Client, ClientBuilder, Response, header::HeaderMap};
+use reqwest::{ClientBuilder, Response, header::HeaderMap, redirect::Policy};
 use std::sync::Arc;
 use url::Url;
 
 /// # Errors
 /// Returns an error if proxy configuration fails
 pub fn build_client(
-    headers: &HeaderMap,
+    mut headers: HeaderMap,
     proxy: Proxy<&str>,
     #[allow(unused)] accept_invalid_certs: bool,
     #[allow(unused)] accept_invalid_hostnames: bool,
     local_addr: Option<std::net::IpAddr>,
-) -> Result<Client, reqwest::Error> {
+    max_redirects: usize,
+) -> Result<SmartRedirectClient, reqwest::Error> {
+    let referer = headers.remove("referer");
+    let referrer_policy = headers
+        .remove("referrer-policy")
+        .and_then(|v| v.to_str().ok().and_then(ReferrerPolicy::parse));
     let mut client = ClientBuilder::new()
-        .default_headers(headers.clone())
-        .local_address(local_addr);
+        .default_headers(headers)
+        .local_address(local_addr)
+        .redirect(Policy::none());
     client = match proxy {
         Proxy::No => client.no_proxy(),
         Proxy::System => client,
@@ -32,12 +39,17 @@ pub fn build_client(
             .danger_accept_invalid_certs(accept_invalid_certs)
             .danger_accept_invalid_hostnames(accept_invalid_hostnames);
     }
-    client.build()
+    Ok(SmartRedirectClient::new(
+        client.build()?,
+        referer,
+        referrer_policy,
+        max_redirects,
+    ))
 }
 
 #[derive(Debug)]
 pub struct FastDownPuller {
-    inner: HttpPuller<Client>,
+    inner: HttpPuller<SmartRedirectClient>,
     headers: Arc<HeaderMap>,
     proxy: Proxy<Arc<str>>,
     url: Arc<Url>,
@@ -47,6 +59,7 @@ pub struct FastDownPuller {
     resp: Option<Arc<Mutex<Option<Response>>>>,
     available_ips: Arc<[std::net::IpAddr]>,
     turn: Arc<std::sync::atomic::AtomicUsize>,
+    max_redirects: usize,
 }
 
 #[derive(Debug)]
@@ -59,6 +72,7 @@ pub struct FastDownPullerOptions<'a> {
     pub file_id: FileId,
     pub resp: Option<Arc<Mutex<Option<Response>>>>,
     pub available_ips: Arc<[std::net::IpAddr]>,
+    pub max_redirects: usize,
 }
 
 impl FastDownPuller {
@@ -68,7 +82,7 @@ impl FastDownPuller {
         let turn = Arc::new(std::sync::atomic::AtomicUsize::new(1));
         let available_ips = option.available_ips;
         let client = build_client(
-            &option.headers,
+            option.headers.as_ref().clone(),
             option.proxy,
             option.accept_invalid_certs,
             option.accept_invalid_hostnames,
@@ -82,6 +96,7 @@ impl FastDownPuller {
                     )
                     .copied()
             },
+            option.max_redirects,
         )?;
         Ok(Self {
             inner: HttpPuller::new(
@@ -99,6 +114,7 @@ impl FastDownPuller {
             file_id: option.file_id,
             available_ips,
             turn,
+            max_redirects: option.max_redirects,
         })
     }
 }
@@ -109,7 +125,7 @@ impl Clone for FastDownPuller {
         let turn = self.turn.clone();
         Self {
             inner: build_client(
-                &self.headers,
+                self.headers.as_ref().clone(),
                 self.proxy.as_deref(),
                 self.accept_invalid_certs,
                 self.accept_invalid_hostnames,
@@ -123,6 +139,7 @@ impl Clone for FastDownPuller {
                         )
                         .copied()
                 },
+                self.max_redirects,
             )
             .map_or_else(
                 |_| self.inner.clone(),
@@ -144,12 +161,13 @@ impl Clone for FastDownPuller {
             file_id: self.file_id.clone(),
             available_ips,
             turn,
+            max_redirects: self.max_redirects,
         }
     }
 }
 
 impl Puller for FastDownPuller {
-    type Error = HttpError<Client>;
+    type Error = HttpError<SmartRedirectClient>;
     async fn pull(
         &mut self,
         range: Option<&ProgressEntry>,
