@@ -178,6 +178,18 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
                 .send()
                 .await
                 .map_err(|e| (ReqwestResponseError::Reqwest(e), None))?;
+
+            // DEBUG ASSERT: If reqwest auto-followed redirects, resp.url() will differ
+            // from the URL we sent the request to. This means the inner Client was NOT
+            // built with `redirect::Policy::none()`, which breaks manual redirect logic.
+            // This check is removed entirely in release builds (zero cost).
+            debug_assert!(
+                resp.url() == &self.url,
+                "ManualRedirectClient: inner reqwest::Client has auto-redirect ENABLED. \
+                 Build it with `.redirect(reqwest::redirect::Policy::none())`. \
+                 The Referer-Policy aware redirect logic requires full control over redirects."
+            );
+
             let status = resp.status();
             if !is_redirection(status) {
                 return if status.is_success() {

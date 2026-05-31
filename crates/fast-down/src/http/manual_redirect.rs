@@ -1,5 +1,17 @@
 use url::Url;
 
+/// Serialize a URL for use as a `Referer` header value,
+/// stripping `userinfo` and `fragment` per RFC 9110 §7.4.
+fn referer_url(url: &Url) -> String {
+    let mut cleaned = url.clone();
+    // Strip userinfo (username:password@)
+    let _ = cleaned.set_username("");
+    let _ = cleaned.set_password(None);
+    // Strip fragment (#section)
+    cleaned.set_fragment(None);
+    cleaned.to_string()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReferrerPolicy {
     NoReferrer,
@@ -15,22 +27,23 @@ pub enum ReferrerPolicy {
 impl ReferrerPolicy {
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
+        let mut last = None;
         for token in s.split(',') {
             match token.trim().to_lowercase().as_str() {
-                "no-referrer" => return Some(Self::NoReferrer),
-                "no-referrer-when-downgrade" => return Some(Self::NoReferrerWhenDowngrade),
-                "origin" => return Some(Self::Origin),
-                "origin-when-cross-origin" => return Some(Self::OriginWhenCrossOrigin),
-                "same-origin" => return Some(Self::SameOrigin),
-                "strict-origin" => return Some(Self::StrictOrigin),
+                "no-referrer" => last = Some(Self::NoReferrer),
+                "no-referrer-when-downgrade" => last = Some(Self::NoReferrerWhenDowngrade),
+                "origin" => last = Some(Self::Origin),
+                "origin-when-cross-origin" => last = Some(Self::OriginWhenCrossOrigin),
+                "same-origin" => last = Some(Self::SameOrigin),
+                "strict-origin" => last = Some(Self::StrictOrigin),
                 "strict-origin-when-cross-origin" => {
-                    return Some(Self::StrictOriginWhenCrossOrigin);
+                    last = Some(Self::StrictOriginWhenCrossOrigin);
                 }
-                "unsafe-url" => return Some(Self::UnsafeUrl),
+                "unsafe-url" => last = Some(Self::UnsafeUrl),
                 _ => {}
             }
         }
-        None
+        last
     }
 }
 
@@ -58,21 +71,21 @@ pub fn compute_referer(
             if downgrade {
                 None
             } else {
-                Some(prev_url.to_string())
+                Some(referer_url(prev_url))
             }
         }
         Some(ReferrerPolicy::NoReferrer) => None,
         Some(ReferrerPolicy::Origin) => Some(origin()),
         Some(ReferrerPolicy::OriginWhenCrossOrigin) => {
             if same {
-                Some(prev_url.to_string())
+                Some(referer_url(prev_url))
             } else {
                 Some(origin())
             }
         }
         Some(ReferrerPolicy::SameOrigin) => {
             if same {
-                Some(prev_url.to_string())
+                Some(referer_url(prev_url))
             } else {
                 None
             }
@@ -85,14 +98,14 @@ pub fn compute_referer(
             }
         }
         Some(ReferrerPolicy::StrictOriginWhenCrossOrigin) => {
-            if downgrade {
+            if same {
+                Some(referer_url(prev_url))
+            } else if downgrade {
                 None
-            } else if same {
-                Some(prev_url.to_string())
             } else {
                 Some(origin())
             }
         }
-        Some(ReferrerPolicy::UnsafeUrl) => Some(prev_url.to_string()),
+        Some(ReferrerPolicy::UnsafeUrl) => Some(referer_url(prev_url)),
     }
 }
