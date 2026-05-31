@@ -4,6 +4,11 @@ use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use core::ops::Range;
 use parking_lot::Mutex;
 
+/// A concurrent work-stealing queue that manages a set of [`Task`]s.
+///
+/// Workers created by [`Executor::execute`] call [`steal`](TaskQueue::steal) to obtain
+/// new work when their current task is exhausted. The queue supports splitting,
+/// speculative execution, and dynamic thread adjustment.
 #[derive(Debug)]
 pub struct TaskQueue<H: Handle> {
     inner: Arc<Mutex<TaskQueueInner<H>>>,

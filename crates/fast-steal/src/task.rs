@@ -3,10 +3,19 @@ use alloc::sync::{Arc, Weak};
 use core::{fmt, ops::Range, sync::atomic::Ordering};
 use portable_atomic::AtomicU128;
 
+/// A cancellable, concurrent-safe task that tracks a `start..end` range of work.
+///
+/// The range is stored as a single atomic `u128`, allowing lock-free reads and
+/// fine-grained progress updates. Multiple workers can safely steal sub-ranges
+/// from the same task via [`split_two`](Task::split_two).
 #[derive(Debug, Clone)]
 pub struct Task {
     pub state: Arc<AtomicU128>,
 }
+/// A weak reference to a [`Task`], obtained via [`Task::downgrade`].
+///
+/// Does not prevent the task from being deallocated. Use [`upgrade`](WeakTask::upgrade)
+/// to attempt to obtain a strong [`Task`] reference.
 #[derive(Debug, Clone)]
 pub struct WeakTask {
     pub state: Weak<AtomicU128>,
@@ -27,6 +36,7 @@ impl WeakTask {
     }
 }
 
+/// Error returned when a task range invariant is violated (`start > end` or overflow).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RangeError;
 
