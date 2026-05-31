@@ -1,6 +1,10 @@
 use std::sync::Arc;
 use url::Url;
 
+/// Metadata about a downloadable resource, gathered from the initial HTTP request.
+///
+/// Includes file size, filename, content type, range support, and file identity
+/// (ETag / Last-Modified) for incremental downloads.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UrlInfo {
@@ -30,6 +34,9 @@ impl UrlInfo {
     }
 }
 
+/// File identity used for incremental and resumable downloads.
+///
+/// Combines the `ETag` and `Last-Modified` headers into a stable identifier.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FileId {

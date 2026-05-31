@@ -17,6 +17,11 @@ use std::{
 };
 use url::Url;
 
+/// A [`Puller`] implementation that fetches data over HTTP.
+///
+/// Uses the generic [`HttpClient`] trait so it can work with any HTTP backend
+/// (e.g. reqwest, custom clients). Supports range requests, file identity
+/// checking, and reusing previously opened responses.
 pub struct HttpPuller<Client: HttpClient> {
     client: Client,
     url: Url,

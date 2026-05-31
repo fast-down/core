@@ -70,6 +70,7 @@ impl HttpHeaders for HeaderMap {
     }
 }
 
+/// Errors that can occur when getting a header value from a reqwest response.
 #[derive(thiserror::Error, Debug)]
 pub enum ReqwestGetHeaderError {
     #[error("Invalid header name {0:?}")]
@@ -78,6 +79,7 @@ pub enum ReqwestGetHeaderError {
     NotFound,
 }
 
+/// Errors that can occur when sending a reqwest request.
 #[derive(thiserror::Error, Debug)]
 pub enum ReqwestResponseError {
     #[error("Reqwest error {0:?}")]
@@ -86,6 +88,10 @@ pub enum ReqwestResponseError {
     StatusCode(reqwest::StatusCode),
 }
 
+/// Parse the `Retry-After` response header into a [`Duration`].
+///
+/// Supports both the delta-seconds format (integer) and the HTTP-date format.
+/// Returns `None` if the header is missing or unparseable.
 #[must_use]
 pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     let retry_after = headers.get(header::RETRY_AFTER)?;

@@ -12,6 +12,10 @@ fn referer_url(url: &Url) -> String {
     cleaned.to_string()
 }
 
+/// Referrer-Policy values as defined by the W3C Referrer Policy specification.
+///
+/// Used by [`compute_referer`] to determine the `Referer` header value during
+/// redirect following, in accordance with RFC 9110 §7.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReferrerPolicy {
     NoReferrer,
