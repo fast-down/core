@@ -2,6 +2,10 @@ use fast_down::{ProgressEntry, Proxy};
 use parking_lot::Mutex;
 use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
 
+/// File write method for downloaded data.
+///
+/// - `Mmap`: memory-mapped I/O (fastest, default)
+/// - `Std`: buffered standard file I/O
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum WriteMethod {
@@ -10,6 +14,9 @@ pub enum WriteMethod {
     Std,
 }
 
+/// Configuration for a download task.
+///
+/// All fields have sensible defaults; see [`Config::default`] for values.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -30,7 +37,8 @@ pub struct Config {
     pub sync_all: bool,
     /// Write buffer size in bytes. Recommended: `16 * 1024 * 1024`
     ///
-    /// - Only effective for [`WriteMethod::Std`]. Helps convert random writes into sequential writes.
+    /// - Only effective for [`WriteMethod::Std`]. Reduces the number of `write` syscalls
+    ///   by batching small writes into larger ones via `BufWriter`.
     /// - Not used for [`WriteMethod::Mmap`], as the buffer is managed by the OS.
     pub write_buffer_size: usize,
     /// Cache high watermark in bytes. Recommended: `16 * 1024 * 1024`
@@ -75,8 +83,8 @@ pub struct Config {
     ///     2. The file size must be known, otherwise it falls back to [`WriteMethod::Std`].
     ///     3. In rare cases, the OS may cache all data in memory and flush it all
     ///        at once after the download completes, causing a long post-download delay.
-    /// - [`WriteMethod::Std`] has the best compatibility. It sorts chunks within
-    ///   `write_buffer_size` to approximate sequential writes.
+    /// - [`WriteMethod::Std`] has the best compatibility. Out-of-order chunks are
+    ///   re-ordered into sequential order by the cache layer before being written.
     #[cfg(feature = "file")]
     pub write_method: WriteMethod,
     /// Number of retries for fetching metadata. Recommended: `10`. Note: this is not
@@ -85,7 +93,8 @@ pub struct Config {
     /// Local IP addresses to bind for outgoing requests. Recommended: `Vec::new()`
     ///
     /// If you have multiple network interfaces, you can provide their IP addresses;
-    /// requests will be rotated among them. This may not always improve speed.
+    /// each time the puller is cloned (e.g. on retry or work-stealing) the next
+    /// address in the list is used. This may not always improve speed.
     pub local_address: Vec<IpAddr>,
     /// Maximum number of speculative workers. Recommended: `3`
     ///

@@ -19,6 +19,12 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+/// A download task created by [`prefetch`], ready to be started.
+///
+/// Contains the resource metadata ([`UrlInfo`]), user configuration, and the
+/// initial HTTP response for resumption. Call `start` (requires `file` feature),
+/// `start_with_pusher`, or `start_in_memory` (requires `mem` feature) to begin
+/// the download.
 #[derive(Debug)]
 pub struct DownloadTask {
     pub info: UrlInfo,

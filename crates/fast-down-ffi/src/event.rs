@@ -1,6 +1,10 @@
 use fast_down::ProgressEntry;
 use std::fmt::Debug;
 
+/// FFI-friendly event type, converted from [`fast_down::Event`].
+///
+/// Error variants carry `String` descriptions instead of generic error types
+/// to simplify C/foreign-language bindings.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
