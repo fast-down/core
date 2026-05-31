@@ -15,7 +15,7 @@ pub type PrefetchResult<Client> =
 
 /// Trait for fetching resource metadata (size, filename, range support) from a URL.
 ///
-/// Implementors perform a HEAD or GET request to gather [`UrlInfo`] and
+/// Implementors perform a GET request to gather [`UrlInfo`] and
 /// the initial response for subsequent downloading.
 pub trait Prefetch<Client: HttpClient> {
     fn prefetch(&self, url: Url) -> impl Future<Output = PrefetchResult<Client>> + Send;

@@ -25,7 +25,8 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
 }
 
 /// # Panics
-/// Panics when setting threads but the executor is unexpectedly `None`
+/// Panics if the internal `TaskQueue::set_threads` returns `None`, which only
+/// happens when the executor passed to it is unexpectedly `None`.
 pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     puller: R,
     mut pusher: W,
@@ -73,7 +74,6 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         max_speculative: options.max_speculative,
     });
     let task_queue = TaskQueue::new(options.download_chunks);
-    #[allow(clippy::unwrap_used)]
     task_queue
         .set_threads(
             options.concurrent,

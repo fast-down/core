@@ -80,7 +80,9 @@ pub struct Config {
     /// - [`WriteMethod::Mmap`] is fastest — it delegates writes to the OS, but:
     ///     1. On 32-bit systems, the maximum file size is 4 GB, so it automatically
     ///        falls back to [`WriteMethod::Std`].
-    ///     2. The file size must be known, otherwise it falls back to [`WriteMethod::Std`].
+    ///     2. Mmap requires the file size to be known and byte-range support from
+    ///        the server; when the `fast_download` flag (set during prefetch) is false,
+    ///        it falls back to [`WriteMethod::Std`].
     ///     3. In rare cases, the OS may cache all data in memory and flush it all
     ///        at once after the download completes, causing a long post-download delay.
     /// - [`WriteMethod::Std`] has the best compatibility. Out-of-order chunks are

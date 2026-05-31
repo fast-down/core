@@ -13,9 +13,10 @@
 1. `no_std` support
 2. Ultra-fine-grained work stealing for maximum throughput
 3. Safe Rust — no `unsafe` code
-4. Full test coverage for stability and reliability
+4. Core paths covered by tests for stability and reliability
 
 ```rust
+extern crate std;
 use fast_steal::{Executor, Handle, Task, TaskQueue};
 use std::{collections::HashMap};
 use tokio::{

@@ -6,7 +6,7 @@
 [![Documentation](https://docs.rs/fast-pull/badge.svg)](https://docs.rs/fast-pull)
 [![License](https://img.shields.io/crates/l/fast-pull.svg)](https://github.com/fast-down/core/blob/main/LICENSE)
 
-`fast-pull` **Fastest** concurrent downloader!
+`fast-pull` **Fastest** concurrent pull/push engine for data streaming!
 
 **[Official Website (Simplified Chinese)](https://fd.s121.top/)**
 

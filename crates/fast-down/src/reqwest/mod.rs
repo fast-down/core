@@ -8,7 +8,7 @@ use fast_pull::ProgressEntry;
 use httpdate::parse_http_date;
 use reqwest::{
     Client, RequestBuilder, Response, StatusCode,
-    header::{self, HeaderMap, HeaderValue, InvalidHeaderName},
+    header::{self, HeaderMap, HeaderValue},
 };
 use std::{
     borrow::Cow,
@@ -73,8 +73,6 @@ impl HttpHeaders for HeaderMap {
 /// Errors that can occur when getting a header value from a reqwest response.
 #[derive(thiserror::Error, Debug)]
 pub enum ReqwestGetHeaderError {
-    #[error("Invalid header name {0:?}")]
-    InvalidHeaderName(InvalidHeaderName),
     #[error("Header not found")]
     NotFound,
 }
