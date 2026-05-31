@@ -101,14 +101,14 @@ pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
 /// A [`reqwest::Client`] wrapper that handles HTTP redirects manually,
 /// respecting the `Referrer-Policy` header per RFC 9110 §7.4.
 #[derive(Debug, Clone)]
-pub struct ManualRedirectClient {
+pub struct SmartRedirectClient {
     client: Client,
     initial_referer: Option<HeaderValue>,
     referrer_policy: Option<ReferrerPolicy>,
     max_redirects: usize,
 }
 
-impl ManualRedirectClient {
+impl SmartRedirectClient {
     #[must_use]
     pub const fn new(
         client: Client,
@@ -125,7 +125,7 @@ impl ManualRedirectClient {
     }
 }
 
-impl HttpClient for ManualRedirectClient {
+impl HttpClient for SmartRedirectClient {
     type RequestBuilder = ManualRedirectRequestBuilder;
 
     fn get(&self, url: Url, range: Option<ProgressEntry>) -> Self::RequestBuilder {
@@ -147,7 +147,6 @@ impl HttpClient for ManualRedirectClient {
 /// - Reads `Referrer-Policy` from the response (overriding the previous policy).
 /// - Applies the policy to compute the `Referer` for the next request.
 /// - Follows only 301, 302, 303, 307, 308 status codes.
-/// - Drops the `Range` header after a redirect.
 pub struct ManualRedirectRequestBuilder {
     client: Client,
     url: Url,
@@ -185,7 +184,7 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
             // This check is removed entirely in release builds (zero cost).
             debug_assert!(
                 resp.url() == &self.url,
-                "ManualRedirectClient: inner reqwest::Client has auto-redirect ENABLED. \
+                "SmartRedirectClient: inner reqwest::Client has auto-redirect ENABLED. \
                  Build it with `.redirect(reqwest::redirect::Policy::none())`. \
                  The Referer-Policy aware redirect logic requires full control over redirects."
             );

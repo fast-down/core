@@ -2,7 +2,7 @@ use crate::Proxy;
 use crate::{
     FileId, ProgressEntry, PullResult, PullStream,
     http::{HttpError, HttpPuller, ReferrerPolicy},
-    reqwest::ManualRedirectClient,
+    reqwest::SmartRedirectClient,
 };
 use fast_pull::Puller;
 use parking_lot::Mutex;
@@ -19,7 +19,7 @@ pub fn build_client(
     #[allow(unused)] accept_invalid_hostnames: bool,
     local_addr: Option<std::net::IpAddr>,
     max_redirects: usize,
-) -> Result<ManualRedirectClient, reqwest::Error> {
+) -> Result<SmartRedirectClient, reqwest::Error> {
     let referer = headers.remove("referer");
     let referrer_policy = headers
         .remove("referrer-policy")
@@ -39,7 +39,7 @@ pub fn build_client(
             .danger_accept_invalid_certs(accept_invalid_certs)
             .danger_accept_invalid_hostnames(accept_invalid_hostnames);
     }
-    Ok(ManualRedirectClient::new(
+    Ok(SmartRedirectClient::new(
         client.build()?,
         referer,
         referrer_policy,
@@ -49,7 +49,7 @@ pub fn build_client(
 
 #[derive(Debug)]
 pub struct FastDownPuller {
-    inner: HttpPuller<ManualRedirectClient>,
+    inner: HttpPuller<SmartRedirectClient>,
     headers: Arc<HeaderMap>,
     proxy: Proxy<Arc<str>>,
     url: Arc<Url>,
@@ -167,7 +167,7 @@ impl Clone for FastDownPuller {
 }
 
 impl Puller for FastDownPuller {
-    type Error = HttpError<ManualRedirectClient>;
+    type Error = HttpError<SmartRedirectClient>;
     async fn pull(
         &mut self,
         range: Option<&ProgressEntry>,
