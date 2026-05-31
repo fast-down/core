@@ -1,11 +1,14 @@
 #![cfg(not(target_family = "wasm"))]
 
-use crate::http::{HttpClient, HttpHeaders, HttpRequestBuilder, HttpResponse};
+use crate::http::{
+    HttpClient, HttpHeaders, HttpRequestBuilder, HttpResponse,
+    manual_redirect::{ReferrerPolicy, compute_referer},
+};
 use fast_pull::ProgressEntry;
 use httpdate::parse_http_date;
 use reqwest::{
-    Client, RequestBuilder, Response,
-    header::{self, HeaderMap, InvalidHeaderName},
+    Client, RequestBuilder, Response, StatusCode,
+    header::{self, HeaderMap, HeaderValue, InvalidHeaderName},
 };
 use std::{
     borrow::Cow,
@@ -39,20 +42,7 @@ impl HttpRequestBuilder for RequestBuilder {
         if status.is_success() {
             Ok(res)
         } else {
-            let retry_after = res
-                .headers()
-                .get(header::RETRY_AFTER)
-                .and_then(|r| r.to_str().ok())
-                .and_then(|r| {
-                    r.parse().map_or_else(
-                        |_| {
-                            parse_http_date(r).ok().and_then(|target_time| {
-                                target_time.duration_since(SystemTime::now()).ok()
-                            })
-                        },
-                        |r| Some(Duration::from_secs(r)),
-                    )
-                });
+            let retry_after = parse_retry_after(res.headers());
             Err((ReqwestResponseError::StatusCode(status), retry_after))
         }
     }
@@ -94,6 +84,148 @@ pub enum ReqwestResponseError {
     Reqwest(reqwest::Error),
     #[error("Status code {0:?}")]
     StatusCode(reqwest::StatusCode),
+}
+
+#[must_use]
+pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let retry_after = headers.get(header::RETRY_AFTER)?;
+    let retry_str = retry_after.to_str().ok()?;
+    if let Ok(secs) = retry_str.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    let target_time = parse_http_date(retry_str).ok()?;
+    let duration = target_time.duration_since(SystemTime::now()).ok()?;
+    Some(duration)
+}
+
+/// A [`reqwest::Client`] wrapper that handles HTTP redirects manually,
+/// respecting the `Referrer-Policy` header per RFC 9110 §7.4.
+#[derive(Debug, Clone)]
+pub struct ManualRedirectClient {
+    client: Client,
+    initial_referer: Option<HeaderValue>,
+    referrer_policy: Option<ReferrerPolicy>,
+    max_redirects: usize,
+}
+
+impl ManualRedirectClient {
+    #[must_use]
+    pub const fn new(
+        client: Client,
+        initial_referer: Option<HeaderValue>,
+        referrer_policy: Option<ReferrerPolicy>,
+        max_redirects: usize,
+    ) -> Self {
+        Self {
+            client,
+            initial_referer,
+            referrer_policy,
+            max_redirects,
+        }
+    }
+}
+
+impl HttpClient for ManualRedirectClient {
+    type RequestBuilder = ManualRedirectRequestBuilder;
+
+    fn get(&self, url: Url, range: Option<ProgressEntry>) -> Self::RequestBuilder {
+        ManualRedirectRequestBuilder {
+            client: self.client.clone(),
+            url,
+            range,
+            next_referer: self.initial_referer.clone(),
+            referrer_policy: self.referrer_policy,
+            max_redirects: self.max_redirects,
+            redirect_count: 0,
+        }
+    }
+}
+
+/// Request builder that follows redirects manually.
+///
+/// On each redirect it:
+/// - Reads `Referrer-Policy` from the response (overriding the previous policy).
+/// - Applies the policy to compute the `Referer` for the next request.
+/// - Follows only 301, 302, 303, 307, 308 status codes.
+/// - Drops the `Range` header after a redirect.
+pub struct ManualRedirectRequestBuilder {
+    client: Client,
+    url: Url,
+    range: Option<ProgressEntry>,
+    next_referer: Option<HeaderValue>,
+    referrer_policy: Option<ReferrerPolicy>,
+    max_redirects: usize,
+    redirect_count: usize,
+}
+
+impl HttpRequestBuilder for ManualRedirectRequestBuilder {
+    type Response = Response;
+    type RequestError = ReqwestResponseError;
+
+    async fn send(mut self) -> Result<Response, (Self::RequestError, Option<Duration>)> {
+        loop {
+            let mut req = self.client.get(self.url.clone());
+            if let Some(ref range) = self.range {
+                req = req.header(
+                    header::RANGE,
+                    format!("bytes={}-{}", range.start, range.end - 1),
+                );
+            }
+            if let Some(ref referer) = self.next_referer {
+                req = req.header(header::REFERER, referer);
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| (ReqwestResponseError::Reqwest(e), None))?;
+            let status = resp.status();
+            if !is_redirection(status) {
+                return if status.is_success() {
+                    Ok(resp)
+                } else {
+                    let retry_after = parse_retry_after(resp.headers());
+                    Err((ReqwestResponseError::StatusCode(status), retry_after))
+                };
+            }
+            if self.redirect_count >= self.max_redirects {
+                let retry_after = parse_retry_after(resp.headers());
+                return Err((ReqwestResponseError::StatusCode(status), retry_after));
+            }
+            let location = if let Some(v) = resp.headers().get(header::LOCATION)
+                && let Ok(s) = v.to_str()
+            {
+                s
+            } else {
+                let retry_after = parse_retry_after(resp.headers());
+                return Err((ReqwestResponseError::StatusCode(status), retry_after));
+            };
+            let Ok(next_url) = self.url.join(location) else {
+                let retry_after = parse_retry_after(resp.headers());
+                return Err((ReqwestResponseError::StatusCode(status), retry_after));
+            };
+            if let Some(policy_header) = resp.headers().get("referrer-policy")
+                && let Ok(s) = policy_header.to_str()
+                && let Some(p) = ReferrerPolicy::parse(s)
+            {
+                self.referrer_policy = Some(p);
+            }
+            self.next_referer = compute_referer(self.referrer_policy, &self.url, &next_url)
+                .and_then(|s| HeaderValue::from_str(&s).ok());
+            self.url = next_url;
+            self.redirect_count += 1;
+        }
+    }
+}
+
+fn is_redirection(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    )
 }
 
 #[cfg(test)]

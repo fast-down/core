@@ -100,6 +100,8 @@ pub struct Config {
     /// Filters out small gaps in `downloaded_chunk` that are smaller than
     /// `chunk_window` to reduce the number of HTTP requests.
     pub chunk_window: u64,
+    /// Maximum number of redirects. Recommended value: `20`
+    pub max_redirects: usize,
 }
 
 impl Default for Config {
@@ -125,6 +127,7 @@ impl Default for Config {
             write_method: WriteMethod::Mmap,
             downloaded_chunk: Arc::default(),
             chunk_window: 8 * 1024,
+            max_redirects: 20,
         }
     }
 }
