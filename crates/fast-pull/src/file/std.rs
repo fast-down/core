@@ -111,7 +111,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let file_path = temp_file.path();
 
-        // Initialize RandFilePusher with a file size of 10 bytes
+        // Initialize StdFilePusher with a file size of 10 bytes
         let mut pusher =
             StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, 8 * 1024, false)
                 .await

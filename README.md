@@ -27,7 +27,7 @@
    The code stays free and open-source. Thanks to [share121](https://github.com/share121), [Cyan](https://github.com/CyanChanges) and other fast-down contributors.
 6. **💻 Cross platform**
 
-   | Arch   | Windows       | Linux         | Mac OS           |
+   | Arch   | Windows       | Linux         | macOS            |
    | ------ | ------------- | ------------- | ---------------- |
    | 64 bit | [Download][1] | [Download][2] | [Download][3]    |
    | 32 bit | [Download][4] | [Download][8] | ❌ Not Supported |

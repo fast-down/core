@@ -9,10 +9,8 @@ pub struct MmapFilePusher {
 }
 impl MmapFilePusher {
     /// # Errors
-    /// 1. Returns an error if `fs::try_exists` fails.
-    /// 2. Returns an error if `fs::open` fails.
-    /// 3. Returns an error if `fs::set_len` fails.
-    /// 4. Returns an error if `mmap_io::open` fails.
+    /// 1. Returns an error if `fs::set_len` fails.
+    /// 2. Returns an error if `MmapMut::map_mut` fails.
     pub async fn new(file: tokio::fs::File, size: u64, sync_all: bool) -> std::io::Result<Self> {
         file.set_len(size).await?;
         let mmap = unsafe { MmapMut::map_mut(&file)? };
@@ -48,7 +46,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let file_path = temp_file.path();
 
-        // Initialize RandFilePusher with a file size of 10 bytes
+        // Initialize MmapFilePusher with a file size of 10 bytes
         let mut pusher = MmapFilePusher::new(temp_file.reopen().unwrap().into(), 10, false)
             .await
             .unwrap();

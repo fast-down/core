@@ -10,7 +10,7 @@ homepage.workspace = true
 repository.workspace = true
 license.workspace = true
 keywords = ["concurrency", "fast", "multiplex", "parallel", "performance"]
-categories = ["asynchronous", "concurrency", "no-std"]
+categories = ["asynchronous", "concurrency"]
 
 [dependencies]
 bytes.workspace = true
