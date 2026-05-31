@@ -4,7 +4,7 @@ use url::Url;
 /// Metadata about a downloadable resource, gathered from the initial HTTP request.
 ///
 /// Includes file size, filename, content type, range support, and file identity
-/// (ETag / Last-Modified) for incremental downloads.
+/// (`ETag` / `Last-Modified`) for incremental downloads.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UrlInfo {
