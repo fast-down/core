@@ -18,6 +18,7 @@ pub fn build_client(
     proxy: Proxy<&str>,
     #[allow(unused)] accept_invalid_certs: bool,
     #[allow(unused)] accept_invalid_hostnames: bool,
+    #[allow(unused)] cookie_store: bool,
     local_addr: Option<std::net::IpAddr>,
     max_redirects: usize,
 ) -> Result<SmartRedirectClient, reqwest::Error> {
@@ -45,6 +46,10 @@ pub fn build_client(
             .danger_accept_invalid_certs(accept_invalid_certs)
             .danger_accept_invalid_hostnames(accept_invalid_hostnames);
     }
+    #[cfg(feature = "cookie-store")]
+    {
+        client = client.cookie_store(cookie_store);
+    }
     Ok(SmartRedirectClient::new(
         client.build()?,
         referer,
@@ -69,6 +74,7 @@ pub struct FastDownPuller {
     url: Arc<Url>,
     accept_invalid_certs: bool,
     accept_invalid_hostnames: bool,
+    cookie_store: bool,
     file_id: FileId,
     resp: Option<Arc<Mutex<Option<Response>>>>,
     available_ips: Arc<[std::net::IpAddr]>,
@@ -84,6 +90,7 @@ pub struct FastDownPullerOptions<'a> {
     pub proxy: Proxy<&'a str>,
     pub accept_invalid_certs: bool,
     pub accept_invalid_hostnames: bool,
+    pub cookie_store: bool,
     pub file_id: FileId,
     pub resp: Option<Arc<Mutex<Option<Response>>>>,
     pub available_ips: Arc<[std::net::IpAddr]>,
@@ -102,6 +109,7 @@ impl FastDownPuller {
             option.proxy,
             option.accept_invalid_certs,
             option.accept_invalid_hostnames,
+            option.cookie_store,
             if available_ips.is_empty() {
                 None
             } else {
@@ -127,6 +135,7 @@ impl FastDownPuller {
             url: Arc::new(option.url),
             accept_invalid_certs: option.accept_invalid_certs,
             accept_invalid_hostnames: option.accept_invalid_hostnames,
+            cookie_store: option.cookie_store,
             file_id: option.file_id,
             available_ips,
             turn,
@@ -145,6 +154,7 @@ impl Clone for FastDownPuller {
                 self.proxy.as_deref(),
                 self.accept_invalid_certs,
                 self.accept_invalid_hostnames,
+                self.cookie_store,
                 if available_ips.is_empty() {
                     None
                 } else {
@@ -174,6 +184,7 @@ impl Clone for FastDownPuller {
             url: self.url.clone(),
             accept_invalid_certs: self.accept_invalid_certs,
             accept_invalid_hostnames: self.accept_invalid_hostnames,
+            cookie_store: self.cookie_store,
             file_id: self.file_id.clone(),
             available_ips,
             turn,

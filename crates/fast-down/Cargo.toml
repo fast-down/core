@@ -43,6 +43,7 @@ serde = ["dep:serde", "url/serde"]
 getifaddrs = ["dep:getifaddrs"]
 fast-puller = ["reqwest"]
 reqwest-tls = ["reqwest/default-tls"]
+cookie-store = ["reqwest/cookies"]
 
 # Features from fast-pull
 file = ["fast-pull/file"]

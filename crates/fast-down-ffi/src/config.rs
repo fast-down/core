@@ -19,6 +19,7 @@ pub enum WriteMethod {
 /// All fields have sensible defaults; see [`Config::default`] for values.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     /// Number of threads. Recommended: `32` / `16` / `8`. More threads does not always mean faster.
     pub threads: usize,
@@ -113,6 +114,13 @@ pub struct Config {
     pub chunk_window: u64,
     /// Maximum number of redirects. Recommended value: `20`
     pub max_redirects: usize,
+    /// Enable cookie store. When `true`, the client will automatically save
+    /// `Set-Cookie` headers from responses and send matching cookies in
+    /// subsequent requests (including across redirects).
+    ///
+    /// Requires the `cookie-store` feature. When the feature is disabled,
+    /// setting this to `true` has no effect.
+    pub cookie_store: bool,
 }
 
 impl Default for Config {
@@ -139,6 +147,7 @@ impl Default for Config {
             downloaded_chunk: Arc::default(),
             chunk_window: 8 * 1024,
             max_redirects: 20,
+            cookie_store: false,
         }
     }
 }

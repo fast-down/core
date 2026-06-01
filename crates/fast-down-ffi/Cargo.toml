@@ -28,6 +28,7 @@ reqwest = { version = "0.13.2", default-features = false, features = [
     "socks",
     "system-proxy",
     "zstd",
+    "cookies",
 ] }
 thiserror = "2.0"
 crossfire = "3.0"
@@ -36,7 +37,6 @@ crossfire = "3.0"
 serde = ["dep:serde", "fast-down/serde"]
 file = ["fast-down/file"]
 mem = ["fast-down/mem"]
-reqwest-tls = ["fast-down/reqwest-tls"]
 sanitize-filename = ["fast-down/sanitize-filename"]
 
 [lints]
