@@ -25,6 +25,11 @@ pub fn build_client(
     let referrer_policy = headers
         .remove("referrer-policy")
         .and_then(|v| v.to_str().ok().and_then(ReferrerPolicy::parse));
+    // Per RFC 9110 §15.4 item 2.5, resource-specific headers MUST be stripped
+    // on redirect. Extract them so they can be injected only on the first hop.
+    let origin = headers.remove("origin");
+    let authorization = headers.remove("authorization");
+    let cookie = headers.remove("cookie");
     let mut client = ClientBuilder::new()
         .default_headers(headers)
         .local_address(local_addr)
@@ -44,6 +49,9 @@ pub fn build_client(
         client.build()?,
         referer,
         referrer_policy,
+        origin,
+        authorization,
+        cookie,
         max_redirects,
     ))
 }

@@ -103,12 +103,17 @@ pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
 }
 
 /// A [`reqwest::Client`] wrapper that handles HTTP redirects manually,
-/// respecting the `Referrer-Policy` header per RFC 9110 §7.4.
+/// respecting the `Referrer-Policy` header and RFC 9110 §15.4 redirect rules.
 #[derive(Debug, Clone)]
 pub struct SmartRedirectClient {
     client: Client,
     initial_referer: Option<HeaderValue>,
     referrer_policy: Option<ReferrerPolicy>,
+    /// Per RFC 9110 §15.4 item 2.5, resource-specific headers that are
+    /// stripped on redirect and injected only on the first request hop.
+    origin: Option<HeaderValue>,
+    authorization: Option<HeaderValue>,
+    cookie: Option<HeaderValue>,
     max_redirects: usize,
 }
 
@@ -118,12 +123,18 @@ impl SmartRedirectClient {
         client: Client,
         initial_referer: Option<HeaderValue>,
         referrer_policy: Option<ReferrerPolicy>,
+        origin: Option<HeaderValue>,
+        authorization: Option<HeaderValue>,
+        cookie: Option<HeaderValue>,
         max_redirects: usize,
     ) -> Self {
         Self {
             client,
             initial_referer,
             referrer_policy,
+            origin,
+            authorization,
+            cookie,
             max_redirects,
         }
     }
@@ -139,6 +150,9 @@ impl HttpClient for SmartRedirectClient {
             range,
             next_referer: self.initial_referer.clone(),
             referrer_policy: self.referrer_policy,
+            origin: self.origin.clone(),
+            authorization: self.authorization.clone(),
+            cookie: self.cookie.clone(),
             max_redirects: self.max_redirects,
             redirect_count: 0,
         }
@@ -150,6 +164,10 @@ impl HttpClient for SmartRedirectClient {
 /// On each redirect it:
 /// - Reads `Referrer-Policy` from the response (overriding the previous policy).
 /// - Applies the policy to compute the `Referer` for the next request.
+/// - Strips resource-specific headers (Origin, Authorization, Cookie) per
+///   RFC 9110 §15.4 item 2.5.
+/// - Inherits the fragment from the original URL if the Location header
+///   lacks one, per RFC 9110 §10.2.2.
 /// - Follows only 301, 302, 303, 307, 308 status codes.
 pub struct ManualRedirectRequestBuilder {
     client: Client,
@@ -157,6 +175,10 @@ pub struct ManualRedirectRequestBuilder {
     range: Option<ProgressEntry>,
     next_referer: Option<HeaderValue>,
     referrer_policy: Option<ReferrerPolicy>,
+    /// Resource-specific headers injected only on the first hop.
+    origin: Option<HeaderValue>,
+    authorization: Option<HeaderValue>,
+    cookie: Option<HeaderValue>,
     max_redirects: usize,
     redirect_count: usize,
 }
@@ -176,6 +198,19 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
             }
             if let Some(ref referer) = self.next_referer {
                 req = req.header(header::REFERER, referer);
+            }
+            // Per RFC 9110 §15.4 item 2.5, resource-specific headers are
+            // only sent on the first hop and stripped on redirect.
+            if self.redirect_count == 0 {
+                if let Some(ref origin) = self.origin {
+                    req = req.header(header::ORIGIN, origin);
+                }
+                if let Some(ref auth) = self.authorization {
+                    req = req.header(header::AUTHORIZATION, auth);
+                }
+                if let Some(ref cookie) = self.cookie {
+                    req = req.header(header::COOKIE, cookie);
+                }
             }
             let resp = req
                 .send()
@@ -214,10 +249,17 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
                 let retry_after = parse_retry_after(resp.headers());
                 return Err((ReqwestResponseError::StatusCode(status), retry_after));
             };
-            let Ok(next_url) = self.url.join(location) else {
+            let Ok(mut next_url) = self.url.join(location) else {
                 let retry_after = parse_retry_after(resp.headers());
                 return Err((ReqwestResponseError::StatusCode(status), retry_after));
             };
+            // RFC 9110 §10.2.2: If the Location header lacks a fragment,
+            // inherit it from the original request URI.
+            if next_url.fragment().is_none()
+                && let Some(fragment) = self.url.fragment()
+            {
+                next_url.set_fragment(Some(fragment));
+            }
             if let Some(policy_header) = resp.headers().get("referrer-policy")
                 && let Ok(s) = policy_header.to_str()
                 && let Some(p) = ReferrerPolicy::parse(s)
