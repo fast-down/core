@@ -68,6 +68,7 @@ const fn is_link_local(ip: &IpAddr) -> bool {
     }
 }
 
+/// A network interface with its name and assigned IP address.
 #[derive(Debug)]
 pub struct InterfaceInfo {
     pub name: String,

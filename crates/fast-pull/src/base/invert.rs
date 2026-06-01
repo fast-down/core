@@ -1,5 +1,8 @@
 use crate::ProgressEntry;
 
+/// Iterator that yields the *gaps* (non-downloaded ranges) from a list of [`ProgressEntry`]s.
+///
+/// Entries shorter than `window` are merged into adjacent gaps to reduce fragmentation.
 #[derive(Debug)]
 pub struct InvertIter<I: Iterator<Item = ProgressEntry>> {
     iter: I,

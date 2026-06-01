@@ -2,6 +2,11 @@ use crate::{ProgressEntry, Pusher};
 use bytes::Bytes;
 use std::collections::BTreeMap;
 
+/// Pusher wrapper that reorders out-of-order chunks into sequential order.
+///
+/// Buffers chunks in a `BTreeMap` and flushes them in sequential order once gaps
+/// are filled. When the cache exceeds `high_watermark`, a flush is triggered
+/// to bring it down to `low_watermark`.
 #[derive(Debug)]
 pub struct CacheSeqPusher<P> {
     inner: P,

@@ -6,6 +6,10 @@ use std::{
 };
 use tokio::io::SeekFrom;
 
+/// File pusher using standard `BufWriter<File>` with random-access writes.
+///
+/// Writes are buffered and optionally flushed to disk on [`flush`](Pusher::flush).
+/// The  `sync_all` flag controls whether `fsync` is called after each flush.
 #[derive(Debug)]
 pub struct StdFilePusher {
     buf: BufWriter<File>,
@@ -31,7 +35,7 @@ impl StdFilePusher {
     }
 
     /// # Errors
-    /// Returns an error if `Seek` or `Write` fails.
+    /// Returns an error if `Seek`, `Write`, or `WriteZero` occurs.
     pub fn write_at(&mut self, start: u64, mut bytes: &[u8]) -> std::io::Result<()> {
         if self.p != start {
             if let Err(e) = self.buf.seek(SeekFrom::Start(start)) {
@@ -111,7 +115,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let file_path = temp_file.path();
 
-        // Initialize RandFilePusher with a file size of 10 bytes
+        // Initialize StdFilePusher with a file size of 10 bytes
         let mut pusher =
             StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, 8 * 1024, false)
                 .await

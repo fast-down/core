@@ -3,6 +3,7 @@ use fast_down::reqwest::SmartRedirectClient;
 use std::sync::Arc;
 use tokio::task::JoinError;
 
+/// Errors returned by fast-down-ffi download operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("IO error: {0}")]

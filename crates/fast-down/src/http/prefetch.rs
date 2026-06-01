@@ -9,9 +9,14 @@ use crate::{
 use std::{borrow::Borrow, future::Future, time::Duration};
 use url::Url;
 
+/// Result of a prefetch operation: the metadata ([`UrlInfo`]) and the initial HTTP response.
 pub type PrefetchResult<Client> =
     Result<(UrlInfo, GetResponse<Client>), (HttpError<Client>, Option<Duration>)>;
 
+/// Trait for fetching resource metadata (size, filename, range support) from a URL.
+///
+/// Implementors perform a GET request to gather [`UrlInfo`] and
+/// the initial response for subsequent downloading.
 pub trait Prefetch<Client: HttpClient> {
     fn prefetch(&self, url: Url) -> impl Future<Output = PrefetchResult<Client>> + Send;
 }

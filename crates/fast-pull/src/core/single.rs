@@ -6,12 +6,17 @@ use core::time::Duration;
 use crossfire::{mpmc, spsc};
 use futures::TryStreamExt;
 
+/// Options for a single-threaded download.
 #[derive(Debug, Clone, Copy)]
 pub struct DownloadOptions {
     pub retry_gap: Duration,
     pub push_queue_cap: usize,
 }
 
+/// Start a single-threaded sequential download.
+///
+/// The puller fetches the entire file sequentially, chunk by chunk.
+/// Supports retries and progress events via [`DownloadResult`].
 pub fn download_single<R: Puller, W: Pusher>(
     mut puller: R,
     mut pusher: W,

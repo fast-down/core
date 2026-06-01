@@ -10,6 +10,9 @@ use futures::TryStreamExt;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+/// Options for a multi-threaded concurrent download.
+///
+/// Controls chunk splitting, speculation, pull timeouts, and write queue capacity.
 #[derive(Debug, Clone)]
 pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
     pub download_chunks: I,
@@ -22,7 +25,8 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
 }
 
 /// # Panics
-/// Panics when setting threads but the executor is unexpectedly `None`
+/// Panics if the internal `TaskQueue::set_threads` returns `None`, which only
+/// happens when the executor passed to it is unexpectedly `None`.
 pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     puller: R,
     mut pusher: W,
@@ -70,7 +74,6 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         max_speculative: options.max_speculative,
     });
     let task_queue = TaskQueue::new(options.download_chunks);
-    #[allow(clippy::unwrap_used)]
     task_queue
         .set_threads(
             options.concurrent,
@@ -86,6 +89,7 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     )
 }
 
+/// A [`Handle`] implementation using tokio's [`Notify`] for cancellation.
 #[derive(Debug, Clone)]
 pub struct TokioHandle {
     id: usize,
@@ -101,6 +105,10 @@ impl Handle for TokioHandle {
         self.id == *id
     }
 }
+/// A built-in [`Executor`] implementation based on tokio tasks.
+///
+/// Each worker is a `tokio::spawn`-ed task that pulls chunks from the puller,
+/// sends them to the write queue, and steals new work via [`TaskQueue`].
 #[derive(Debug)]
 pub struct TokioExecutor<R, WE>
 where

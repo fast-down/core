@@ -6,7 +6,7 @@
 [![Documentation](https://docs.rs/fast-pull/badge.svg)](https://docs.rs/fast-pull)
 [![License](https://img.shields.io/crates/l/fast-pull.svg)](https://github.com/fast-down/core/blob/main/LICENSE)
 
-`fast-pull` **Fastest** concurrent downloader!
+`fast-pull` **Fastest** concurrent pull/push engine for data streaming!
 
 **[Official Website (Simplified Chinese)](https://fd.s121.top/)**
 
@@ -23,4 +23,3 @@
    1000 more lines server logs? Don't worry, we **only download new lines**.
 5. **💰 Free and open-source**\
    The code stays free and open-source. Thanks to [share121](https://github.com/share121), [Cyan](https://github.com/CyanChanges) and other fast-down contributors.
-6. **No std support**

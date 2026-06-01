@@ -4,6 +4,11 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 
+/// A shareable handle to a tokio task that can be awaited from multiple consumers.
+///
+/// Unlike a raw [`JoinHandle`], [`SharedHandle`] can be cloned and awaited
+/// concurrently without consuming the result. The first awaiter gets the result,
+/// subsequent awaiters will see the same cached result.
 #[derive(Debug)]
 pub struct SharedHandle<T> {
     rx: watch::Receiver<Option<Result<T, Arc<JoinError>>>>,

@@ -2,6 +2,12 @@ use crate::{ProgressEntry, Pusher};
 use bytes::Bytes;
 use memmap2::MmapMut;
 
+/// File pusher using memory-mapped I/O for zero-copy writes.
+///
+/// Delegates writes to the OS via `MmapMut`. The file size is fixed at
+/// construction time via `file.set_len(size)`. On [`flush`](Pusher::flush),
+/// if `sync_all` is true an `fsync` is performed; otherwise an async flush
+/// is issued.
 #[derive(Debug)]
 pub struct MmapFilePusher {
     mmap: MmapMut,
@@ -9,10 +15,8 @@ pub struct MmapFilePusher {
 }
 impl MmapFilePusher {
     /// # Errors
-    /// 1. Returns an error if `fs::try_exists` fails.
-    /// 2. Returns an error if `fs::open` fails.
-    /// 3. Returns an error if `fs::set_len` fails.
-    /// 4. Returns an error if `mmap_io::open` fails.
+    /// 1. Returns an error if `fs::set_len` fails.
+    /// 2. Returns an error if `MmapMut::map_mut` fails.
     pub async fn new(file: tokio::fs::File, size: u64, sync_all: bool) -> std::io::Result<Self> {
         file.set_len(size).await?;
         let mmap = unsafe { MmapMut::map_mut(&file)? };
@@ -48,7 +52,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let file_path = temp_file.path();
 
-        // Initialize RandFilePusher with a file size of 10 bytes
+        // Initialize MmapFilePusher with a file size of 10 bytes
         let mut pusher = MmapFilePusher::new(temp_file.reopen().unwrap().into(), 10, false)
             .await
             .unwrap();

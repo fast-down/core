@@ -1,5 +1,9 @@
 use std::ops::Deref;
 
+/// Proxy configuration for outgoing HTTP requests.
+///
+/// Supports no proxy, system-configured proxy, or a custom proxy URL.
+/// The `Custom` variant is unconstrained but is typically used with string-like types.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Proxy<T> {

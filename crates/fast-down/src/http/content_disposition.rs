@@ -1,5 +1,9 @@
 use std::{iter::Peekable, str::Chars};
 
+/// Parsed `Content-Disposition` header, extracting the `filename` parameter.
+///
+/// Supports both `filename="..."` (quoted) and `filename*=UTF-8''...` (RFC 5987)
+/// encoding. When both are present, `filename*` takes precedence.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ContentDisposition {
     pub filename: Option<String>,

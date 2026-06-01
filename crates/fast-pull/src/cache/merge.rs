@@ -2,7 +2,12 @@ use crate::{ProgressEntry, Pusher};
 use bytes::{Bytes, BytesMut};
 use std::collections::{BTreeMap, btree_map::Entry};
 
-/// Prefers pushing large contiguous runs and merges each run into a single `Bytes`
+/// Pusher wrapper that buffers chunks and merges each flush run into a single [`Bytes`].
+///
+/// Out-of-order chunks are stored in a `BTreeMap`. When a contiguous run reaches
+/// the high watermark, all chunks in that run are coalesced into one contiguous
+/// [`BytesMut`] before being pushed. This minimizes write calls to the inner pusher
+/// at the cost of an extra memory copy.
 #[derive(Debug)]
 pub struct CacheMergePusher<P> {
     inner: P,

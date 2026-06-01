@@ -11,7 +11,8 @@ use std::sync::Arc;
 use url::Url;
 
 /// # Errors
-/// Returns an error if proxy configuration fails
+/// Returns an error if the HTTP client cannot be built (invalid proxy URL,
+/// TLS backend failure, or other `reqwest::ClientBuilder` errors).
 pub fn build_client(
     mut headers: HeaderMap,
     proxy: Proxy<&str>,
@@ -47,6 +48,11 @@ pub fn build_client(
     ))
 }
 
+/// The default [`Puller`] implementation for the fast-down crate.
+///
+/// Wraps an [`HttpPuller`] with a [`SmartRedirectClient`], IP rotation,
+/// and proxy support. Cloning creates a new HTTP client with an optionally
+/// rotated local address for multi-interface setups.
 #[derive(Debug)]
 pub struct FastDownPuller {
     inner: HttpPuller<SmartRedirectClient>,
@@ -62,6 +68,7 @@ pub struct FastDownPuller {
     max_redirects: usize,
 }
 
+/// Options for constructing a [`FastDownPuller`].
 #[derive(Debug)]
 pub struct FastDownPullerOptions<'a> {
     pub url: Url,
@@ -77,7 +84,8 @@ pub struct FastDownPullerOptions<'a> {
 
 impl FastDownPuller {
     /// # Errors
-    /// Returns an error if proxy configuration fails
+    /// Returns an error if the underlying HTTP client cannot be built (invalid
+    /// proxy, TLS setup failure, etc.).
     pub fn new(option: FastDownPullerOptions<'_>) -> Result<Self, reqwest::Error> {
         let turn = Arc::new(std::sync::atomic::AtomicUsize::new(1));
         let available_ips = option.available_ips;

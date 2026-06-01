@@ -2,6 +2,9 @@ use crate::ProgressEntry;
 use bytes::Bytes;
 use core::fmt::Debug;
 
+/// Abstraction over a data sink that receives pushed byte chunks.
+///
+/// The pusher writes data to its destination and can optionally flush.
 pub trait Pusher: Send + 'static {
     type Error: Send + Unpin + 'static;
     #[allow(clippy::missing_errors_doc)]
@@ -12,9 +15,13 @@ pub trait Pusher: Send + 'static {
     }
 }
 
+/// Marker trait for type-erased error types.
 pub trait AnyError: Debug + Send + Unpin + 'static {}
 impl<T: Debug + Send + Unpin + 'static> AnyError for T {}
 
+/// A type-erased pusher that boxes both the pusher and its error type.
+///
+/// Useful for FFI boundaries or heterogeneous collections of pushers.
 #[allow(missing_debug_implementations)]
 pub struct BoxPusher {
     pub pusher: Box<dyn Pusher<Error = Box<dyn AnyError>>>,

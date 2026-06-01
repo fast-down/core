@@ -10,6 +10,13 @@ pub mod mock;
 pub mod multi;
 pub mod single;
 
+/// Handle to an active download session.
+///
+/// Provides access to:
+/// - `event_chain` — a multi-consumer channel of [`Event`]s for progress monitoring
+/// - `abort()` — cancel all workers
+/// - `join()` — wait for the writer thread to finish
+/// - `set_threads()` — dynamically adjust concurrency
 #[derive(Debug)]
 pub struct DownloadResult<E, PullError, PushError>
 where

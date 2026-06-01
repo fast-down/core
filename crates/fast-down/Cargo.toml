@@ -10,7 +10,7 @@ homepage.workspace = true
 repository.workspace = true
 license.workspace = true
 keywords = ["concurrency", "download", "fast", "parallel"]
-categories = ["asynchronous", "concurrency", "network-programming", "no-std"]
+categories = ["asynchronous", "concurrency", "network-programming"]
 
 [dependencies]
 tokio.workspace = true
