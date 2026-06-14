@@ -46,6 +46,8 @@ impl fmt::Display for RangeError {
     }
 }
 
+impl core::error::Error for RangeError {}
+
 impl Task {
     #[allow(clippy::inline_always)]
     #[inline(always)]

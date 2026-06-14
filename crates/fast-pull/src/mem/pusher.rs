@@ -26,7 +26,7 @@ impl MemPusher {
     }
 }
 impl Pusher for MemPusher {
-    type Error = ();
+    type Error = std::convert::Infallible;
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)> {
         #![allow(clippy::significant_drop_tightening, clippy::cast_possible_truncation)]
         let mut guard = self.receive.lock();

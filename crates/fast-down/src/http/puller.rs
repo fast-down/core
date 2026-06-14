@@ -239,7 +239,8 @@ mod tests {
             Err(MockError)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, thiserror::Error)]
+    #[error("MockError")]
     struct MockError;
 
     struct DelayChunk {

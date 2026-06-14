@@ -1,12 +1,11 @@
 use crate::ProgressEntry;
 use bytes::Bytes;
-use core::fmt::Debug;
 
 /// Abstraction over a data sink that receives pushed byte chunks.
 ///
 /// The pusher writes data to its destination and can optionally flush.
 pub trait Pusher: Send + 'static {
-    type Error: Send + Unpin + 'static;
+    type Error: std::error::Error + Send + Sync + Unpin + 'static;
     #[allow(clippy::missing_errors_doc)]
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)>;
     #[allow(clippy::missing_errors_doc)]
@@ -16,8 +15,10 @@ pub trait Pusher: Send + 'static {
 }
 
 /// Marker trait for type-erased error types.
-pub trait AnyError: Debug + Send + Unpin + 'static {}
-impl<T: Debug + Send + Unpin + 'static> AnyError for T {}
+pub trait AnyError: std::error::Error + Send + Sync + Unpin + 'static {}
+impl<T: std::error::Error + Send + Sync + Unpin + 'static> AnyError for T {}
+
+impl std::error::Error for Box<dyn AnyError> {}
 
 /// A type-erased pusher that boxes both the pusher and its error type.
 ///
@@ -39,10 +40,7 @@ impl Pusher for BoxPusher {
 struct PusherAdapter<P: Pusher> {
     inner: P,
 }
-impl<P: Pusher> Pusher for PusherAdapter<P>
-where
-    P::Error: Debug,
-{
+impl<P: Pusher> Pusher for PusherAdapter<P> {
     type Error = Box<dyn AnyError>;
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)> {
         self.inner
@@ -55,10 +53,7 @@ where
 }
 
 impl BoxPusher {
-    pub fn new<P: Pusher>(pusher: P) -> Self
-    where
-        P::Error: Debug,
-    {
+    pub fn new<P: Pusher>(pusher: P) -> Self {
         Self {
             pusher: Box::new(PusherAdapter { inner: pusher }),
         }

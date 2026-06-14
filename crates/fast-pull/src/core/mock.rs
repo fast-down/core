@@ -1,4 +1,4 @@
-use crate::{ProgressEntry, PullResult, PullStream, Puller, PullerError};
+use crate::{ProgressEntry, PullResult, PullStream, Puller};
 use futures::stream;
 use std::{sync::Arc, vec::Vec};
 
@@ -21,7 +21,7 @@ impl MockPuller {
     }
 }
 impl Puller for MockPuller {
-    type Error = ();
+    type Error = std::convert::Infallible;
     fn pull(
         &mut self,
         range: Option<&ProgressEntry>,
@@ -36,4 +36,3 @@ impl Puller for MockPuller {
         )))
     }
 }
-impl PullerError for () {}

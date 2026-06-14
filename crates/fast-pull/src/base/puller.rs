@@ -32,8 +32,15 @@ pub trait Puller: Send + Sync + Clone + 'static {
 }
 
 /// Extension trait for pull errors, distinguishing recoverable from irrecoverable failures.
-pub trait PullerError: Send + Unpin + 'static {
+pub trait PullerError: std::error::Error + Send + Sync + Unpin + 'static {
     fn is_irrecoverable(&self) -> bool {
         false
+    }
+}
+
+impl PullerError for std::convert::Infallible {
+    fn is_irrecoverable(&self) -> bool {
+        #[allow(clippy::uninhabited_references)]
+        match *self {}
     }
 }

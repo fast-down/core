@@ -4,7 +4,7 @@ members = [
     "crates/fast-down",
     "crates/fast-pull",
     "crates/fast-steal",
-    "crates/fast-down-ffi",
+    "crates/fast-down-api",
 ]
 
 [workspace.package]
