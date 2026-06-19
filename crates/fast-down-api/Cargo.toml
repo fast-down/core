@@ -1,0 +1,40 @@
+[package]
+name = "fast-down-api"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+description = "A convenient and easy-to-use FFI wrapper for fast-down"
+documentation = "https://docs.rs/fast-down-api"
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["concurrency", "downloader", "parallel", "performance", "thread"]
+categories = ["network-programming"]
+
+[dependencies]
+fast-down = { workspace = true, features = ["cookie-store", "fast-puller", "file", "getifaddrs", "mem", "reqwest-tls", "serde"] }
+parking_lot = { version = "0.12", features = ["serde"] }
+serde = "1.0.156"
+tokio = "1.39"
+tokio-util = "0.7"
+url = "2.5.8"
+reqwest = { version = "0.13.2", default-features = false, features = [
+    "brotli",
+    "default-tls",
+    "deflate",
+    "gzip",
+    "http2",
+    "socks",
+    "system-proxy",
+    "zstd",
+    "cookies",
+] }
+thiserror = "2.0"
+crossfire = "3.0"
+toml = "1.1.2"
+anyhow = "1.0.102"
+mime_guess = "2.0.5"
+
+[lints]
+workspace = true
