@@ -10,12 +10,6 @@ pub use core::*;
 pub use event::*;
 
 pub use fast_down;
-pub use fast_down::{
-    AnyError, BoxPusher, CacheDirectPusher, CacheMergePusher, CacheSeqPusher, DownloadResult,
-    Event as RawEvent, FileId, InvertIter, Merge, ProgressEntry, Proxy, PullResult, PullStream,
-    Puller, PullerError, Pusher, Total, UrlInfo, WorkerId, fast_puller, file, getifaddrs, handle,
-    http, invert, mem, mock, multi, reqwest as reqwest_adapter, single,
-};
 
 use tokio_util::sync::CancellationToken;
 

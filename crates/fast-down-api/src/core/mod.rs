@@ -1,4 +1,6 @@
 mod download;
-pub(crate) mod prefetch;
+pub mod prefetch;
+mod state;
 
 pub use download::*;
+pub use state::*;
