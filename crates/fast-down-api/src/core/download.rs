@@ -14,8 +14,9 @@ use fast_down::{
 };
 use inherit_config::ConfigLayer;
 use parking_lot::Mutex;
-use path_helper::FileStemExt;
+use path_helper::{FileStemExt, tokio::gen_unique_path};
 use reqwest::Response;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::{
     fs::{self, File, OpenOptions},
@@ -23,6 +24,24 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
+
+/// Per-task context that stays constant across all resume/attempt iterations.
+struct Ctx {
+    url: Url,
+    info: UrlInfo,
+    tx: Tx,
+    cancel_token: CancellationToken,
+}
+
+/// Paths used by a single download attempt.
+struct AttemptPaths<'a> {
+    tmp: &'a Path,
+    config_path: &'a Path,
+    final_path: &'a Path,
+    /// When true (unique mode), regenerate a fresh unique destination right
+    /// before rename so a concurrently-created final file is never overwritten.
+    unique: bool,
+}
 
 pub struct DownloadHandle {
     handle: SharedHandle<()>,
@@ -32,7 +51,7 @@ impl DownloadHandle {
     /// # Errors
     pub fn download(
         url: Url,
-        mut partial_config: PartialConfig,
+        partial_config: PartialConfig,
         tx: Tx,
         cancel_token: CancellationToken,
     ) -> anyhow::Result<Self> {
@@ -50,142 +69,176 @@ impl DownloadHandle {
             let Some((info, resp)) = prefetch(&url, &config, &client, &tx).await else {
                 return;
             };
-            let origin_final_path = tx_err!(gen_path(&url, &info, &config).await, tx, GenPathError);
-            let mut tmp_path = origin_final_path.with_added_extension("part");
-            let mut config_path = origin_final_path.with_added_extension("fd");
-            let can_resume = config.resume && info.fast_download;
-            let mut no_create_option = OpenOptions::new();
-            no_create_option
-                .read(true)
-                .write(true)
-                .truncate(false)
-                .create(false);
-            let mut create_option = OpenOptions::new();
-            create_option
-                .read(true)
-                .write(true)
-                .truncate(false)
-                .create(true);
-            let mut only_create_option = OpenOptions::new();
-            only_create_option
-                .read(true)
-                .write(true)
-                .truncate(false)
-                .create_new(true);
+            let origin_final = tx_err!(gen_path(&url, &info, &config).await, tx, GenPathError);
+            let ctx = Ctx {
+                url,
+                info,
+                tx,
+                cancel_token,
+            };
+            let resp = Some(Arc::new(Mutex::new(Some(resp))));
             if config.overwrite {
-                if can_resume
-                    && let (Ok(file), Ok(state)) = tokio::join!(
-                        no_create_option.open(&tmp_path),
-                        DownloadState::load(&config_path)
-                    )
-                {
-                    if let Some(config) = &state.config {
-                        partial_config.inherit_from(config);
-                    }
-                    let _ = tx.send(Event::Start {
-                        tmp_path: tmp_path.clone(),
-                        config_path,
-                        url_info: info.clone(),
-                        parsed_config: partial_config.clone(),
-                    });
-                    Self::overwrite(
-                        file,
-                        url,
-                        partial_config.build(),
-                        info,
-                        Some(Arc::new(Mutex::new(Some(resp)))),
-                        tx.clone(),
-                        cancel_token,
-                    )
-                    .force_send()
-                    .await;
-                } else {
-                    let file = tx_err!(create_option.open(&tmp_path).await, tx, BuildPusherError);
-                    let _ = tx.send(Event::Start {
-                        tmp_path: tmp_path.clone(),
-                        config_path,
-                        url_info: info.clone(),
-                        parsed_config: partial_config,
-                    });
-                    Self::overwrite(
-                        file,
-                        url,
-                        config,
-                        info,
-                        Some(Arc::new(Mutex::new(Some(resp)))),
-                        tx.clone(),
-                        cancel_token,
-                    )
-                    .force_send()
-                    .await;
-                }
-                tx_err!(
-                    fs::rename(tmp_path, origin_final_path).await,
-                    tx,
-                    RenameFailed
-                );
-                return;
-            }
-            let mut i = 0;
-            let mut final_path = origin_final_path.clone();
-            loop {
-                if can_resume
-                    && let (Ok(file), Ok(state)) = tokio::join!(
-                        no_create_option.open(&tmp_path),
-                        DownloadState::load(&config_path)
-                    )
-                {
-                    if let Some(config) = &state.config {
-                        partial_config.inherit_from(config);
-                    }
-                    let _ = tx.send(Event::Start {
-                        tmp_path: tmp_path.clone(),
-                        config_path,
-                        url_info: info.clone(),
-                        parsed_config: partial_config.clone(),
-                    });
-                    Self::overwrite(
-                        file,
-                        url,
-                        partial_config.build(),
-                        info,
-                        Some(Arc::new(Mutex::new(Some(resp)))),
-                        tx.clone(),
-                        cancel_token,
-                    )
-                    .force_send()
-                    .await;
-                    tx_err!(fs::rename(tmp_path, final_path).await, tx, RenameFailed);
-                    return;
-                } else if let Ok(file) = only_create_option.open(&tmp_path).await {
-                    let _ = tx.send(Event::Start {
-                        tmp_path: tmp_path.clone(),
-                        config_path,
-                        url_info: info.clone(),
-                        parsed_config: partial_config,
-                    });
-                    Self::overwrite(
-                        file,
-                        url,
-                        config,
-                        info,
-                        Some(Arc::new(Mutex::new(Some(resp)))),
-                        tx.clone(),
-                        cancel_token,
-                    )
-                    .force_send()
-                    .await;
-                    tx_err!(fs::rename(tmp_path, final_path).await, tx, RenameFailed);
-                    return;
-                }
-                i += 1;
-                final_path = origin_final_path.with_added_file_stem_prefix(format!(" {i}"));
-                tmp_path = final_path.with_added_extension("part");
-                config_path = final_path.with_added_extension("fd");
+                Self::run_overwrite(&ctx, config, partial_config, resp, origin_final).await;
+            } else {
+                Self::run_unique(&ctx, config, partial_config, resp, origin_final).await;
             }
         });
         let handle = SharedHandle::new(handle);
         Ok(Self { handle })
+    }
+
+    async fn run_overwrite(
+        ctx: &Ctx,
+        config: Config,
+        partial_config: PartialConfig,
+        resp: Option<Arc<Mutex<Option<Response>>>>,
+        origin_final: PathBuf,
+    ) {
+        let can_resume = config.resume && ctx.info.fast_download;
+        let tmp = origin_final.with_added_extension("part");
+        let cfg = origin_final.with_added_extension("fd");
+
+        if can_resume
+            && let no_create = Self::open_existing()
+            && let (Ok(file), Ok(state)) =
+                tokio::join!(no_create.open(&tmp), DownloadState::load(&cfg))
+        {
+            let mut partial_config = partial_config;
+            if let Some(config) = &state.config {
+                partial_config.inherit_from(config);
+            }
+            let parsed = partial_config.clone();
+            let effective = partial_config.build();
+            let paths = AttemptPaths {
+                tmp: &tmp,
+                config_path: &cfg,
+                final_path: &origin_final,
+                unique: false,
+            };
+            Self::attempt(ctx, file, &paths, effective, parsed, resp).await;
+            return;
+        }
+        let create = Self::open_create();
+        let file = tx_err!(create.open(&tmp).await, ctx.tx, BuildPusherError);
+        let paths = AttemptPaths {
+            tmp: &tmp,
+            config_path: &cfg,
+            final_path: &origin_final,
+            unique: false,
+        };
+        Self::attempt(ctx, file, &paths, config, partial_config, resp).await;
+    }
+
+    async fn run_unique(
+        ctx: &Ctx,
+        config: Config,
+        partial_config: PartialConfig,
+        resp: Option<Arc<Mutex<Option<Response>>>>,
+        origin_final: PathBuf,
+    ) {
+        let can_resume = config.resume && ctx.info.fast_download;
+        let mut i = 0;
+        let mut final_path = origin_final.clone();
+        let mut tmp = origin_final.with_added_extension("part");
+        let mut cfg = origin_final.with_added_extension("fd");
+        let no_create = Self::open_existing();
+        let only_create = Self::open_create_new();
+
+        loop {
+            if can_resume
+                && let (Ok(file), Ok(state)) =
+                    tokio::join!(no_create.open(&tmp), DownloadState::load(&cfg))
+            {
+                let mut partial_config = partial_config;
+                if let Some(config) = &state.config {
+                    partial_config.inherit_from(config);
+                }
+                let parsed = partial_config.clone();
+                let effective = partial_config.build();
+                let paths = AttemptPaths {
+                    tmp: &tmp,
+                    config_path: &cfg,
+                    final_path: &final_path,
+                    unique: true,
+                };
+                Self::attempt(ctx, file, &paths, effective, parsed, resp).await;
+                return;
+            }
+            if let Ok(file) = only_create.open(&tmp).await {
+                let paths = AttemptPaths {
+                    tmp: &tmp,
+                    config_path: &cfg,
+                    final_path: &final_path,
+                    unique: true,
+                };
+                Self::attempt(
+                    ctx,
+                    file,
+                    &paths,
+                    config.clone(),
+                    partial_config.clone(),
+                    resp,
+                )
+                .await;
+                return;
+            }
+            i += 1;
+            final_path = origin_final.with_added_file_stem_prefix(format!(" {i}"));
+            tmp = final_path.with_added_extension("part");
+            cfg = final_path.with_added_extension("fd");
+        }
+    }
+
+    /// Emit `Event::Start`, run the actual download, then rename `.part` to its
+    /// final destination and emit `Event::Renamed` with the real landing path.
+    /// In unique mode the destination is regenerated via `gen_unique_path` right
+    /// before rename, so a final file created concurrently during the download is
+    /// never overwritten (it lands as `xxx (1).mp4` instead). `resp` is consumed
+    /// here exactly once.
+    async fn attempt(
+        ctx: &Ctx,
+        file: File,
+        paths: &AttemptPaths<'_>,
+        effective: Config,
+        parsed: PartialConfig,
+        resp: Option<Arc<Mutex<Option<Response>>>>,
+    ) {
+        let _ = ctx.tx.send(Event::Start {
+            tmp_path: paths.tmp.to_path_buf(),
+            config_path: paths.config_path.to_path_buf(),
+            url_info: ctx.info.clone(),
+            parsed_config: parsed,
+        });
+        Self::overwrite(
+            file,
+            ctx.url.clone(),
+            effective,
+            ctx.info.clone(),
+            resp,
+            ctx.tx.clone(),
+            ctx.cancel_token.clone(),
+        )
+        .force_send()
+        .await;
+        // In unique mode, reserve a fresh unique destination right before rename:
+        // the final file may have been created by someone else while we were
+        // downloading. `gen_unique_path` atomically creates an empty placeholder
+        // (create_new) which the rename below then replaces, closing the TOCTOU gap.
+        let dest = if paths.unique {
+            tx_err!(gen_unique_path(paths.final_path).await, ctx.tx, GenPathError)
+        } else {
+            paths.final_path.to_path_buf()
+        };
+        if let Err(e) = fs::rename(paths.tmp, &dest).await {
+            // Best-effort: drop the empty placeholder we just reserved so a failed
+            // rename doesn't leave an orphan `xxx (1).mp4` behind.
+            if paths.unique {
+                let _ = fs::remove_file(&dest).await;
+            }
+            let _ = ctx.tx.send(Event::RenameFailed(e));
+            return;
+        }
+        let _ = ctx.tx.send(Event::Renamed(dest));
     }
 
     // pub fn resume() {}
@@ -199,55 +252,83 @@ impl DownloadHandle {
         tx: Tx,
         cancel_token: CancellationToken,
     ) {
-        let res = cancel_token
+        let url_ref = &url;
+        let config_ref = &config;
+        let info_ref = &info;
+        let built = cancel_token
             .run_until_cancelled(async move {
-                let puller = FastDownPuller::new(FastDownPullerOptions {
-                    url,
-                    headers: build_header(&config.headers).into(),
-                    proxy: config.proxy.as_deref(),
-                    accept_invalid_certs: config.accept_invalid_certs,
-                    accept_invalid_hostnames: config.accept_invalid_hostnames,
-                    cookie_store: config.cookie_store,
-                    file_id: info.file_id.clone(),
-                    resp,
-                    available_ips: config.local_address.into(),
-                    max_redirects: config.max_redirects,
-                })
-                .map_err(Event::BuildClientError)?;
-
-                let pusher = if cfg!(target_pointer_width = "64")
-                    && info.fast_download
-                    && config.write_method == WriteMethod::Mmap
-                {
-                    MmapFilePusher::new(&file, info.size, config.sync_all)
-                        .await
-                        .map(BoxPusher::new)
-                } else {
-                    CacheFilePusher::new(
-                        file,
-                        info.size,
-                        config.sync_all,
-                        config.cache_high_watermark,
-                        config.cache_low_watermark,
-                        config.write_buffer_size,
-                    )
-                    .await
-                    .map(BoxPusher::new)
-                }
-                .map_err(Event::BuildPusherError)?;
-
-                Ok::<_, Event>((puller, pusher))
+                let puller = Self::build_puller(url_ref, config_ref, info_ref, resp)?;
+                let pusher = Self::build_pusher(file, config_ref, info_ref).await?;
+                Ok::<_, Box<Event>>((puller, pusher))
             })
             .await;
-        let (puller, pusher) = match res {
-            Some(Ok(res)) => res,
+        let (puller, pusher) = match built {
+            Some(Ok(built)) => built,
             Some(Err(e)) => {
-                let _ = tx.send(e);
+                let _ = tx.send(*e);
                 return;
             }
             None => return,
         };
+        Self::run_download(puller, pusher, config, info, tx, cancel_token).await;
+    }
 
+    fn build_puller(
+        url: &Url,
+        config: &Config,
+        info: &UrlInfo,
+        resp: Option<Arc<Mutex<Option<Response>>>>,
+    ) -> Result<FastDownPuller, Box<Event>> {
+        FastDownPuller::new(FastDownPullerOptions {
+            url: url.clone(),
+            headers: build_header(&config.headers).into(),
+            proxy: config.proxy.as_deref(),
+            accept_invalid_certs: config.accept_invalid_certs,
+            accept_invalid_hostnames: config.accept_invalid_hostnames,
+            cookie_store: config.cookie_store,
+            file_id: info.file_id.clone(),
+            resp,
+            available_ips: config.local_address.clone().into(),
+            max_redirects: config.max_redirects,
+        })
+        .map_err(|e| Box::new(Event::BuildClientError(e)))
+    }
+
+    async fn build_pusher(
+        file: File,
+        config: &Config,
+        info: &UrlInfo,
+    ) -> Result<BoxPusher, Box<Event>> {
+        if cfg!(target_pointer_width = "64")
+            && info.fast_download
+            && config.write_method == WriteMethod::Mmap
+        {
+            MmapFilePusher::new(&file, info.size, config.sync_all)
+                .await
+                .map(BoxPusher::new)
+        } else {
+            CacheFilePusher::new(
+                file,
+                info.size,
+                config.sync_all,
+                config.cache_high_watermark,
+                config.cache_low_watermark,
+                config.write_buffer_size,
+            )
+            .await
+            .map(BoxPusher::new)
+        }
+        .map_err(|e| Box::new(Event::BuildPusherError(e)))
+    }
+
+    async fn run_download(
+        puller: FastDownPuller,
+        pusher: BoxPusher,
+        config: Config,
+        info: UrlInfo,
+        tx: Tx,
+        cancel_token: CancellationToken,
+    ) {
         let res = if info.fast_download {
             download_multi(
                 puller,
@@ -301,5 +382,23 @@ impl DownloadHandle {
         if let Err(e) = res.join().await {
             let _ = tx.send(Event::JoinError(e));
         }
+    }
+
+    fn open_existing() -> OpenOptions {
+        let mut o = OpenOptions::new();
+        o.read(true).write(true).truncate(false).create(false);
+        o
+    }
+
+    fn open_create() -> OpenOptions {
+        let mut o = OpenOptions::new();
+        o.read(true).write(true).truncate(false).create(true);
+        o
+    }
+
+    fn open_create_new() -> OpenOptions {
+        let mut o = OpenOptions::new();
+        o.read(true).write(true).truncate(false).create_new(true);
+        o
     }
 }

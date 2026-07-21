@@ -13,11 +13,11 @@ keywords = ["concurrency", "downloader", "parallel", "performance", "thread"]
 categories = ["network-programming"]
 
 [dependencies]
-fast-down = { workspace = true, features = ["cookie-store", "fast-puller", "file", "getifaddrs", "mem", "reqwest-tls"] }
+fast-down = { workspace = true, features = ["cookie-store", "fast-puller", "file", "getifaddrs", "mem", "reqwest-tls", "serde"] }
 parking_lot.workspace = true
 tokio.workspace = true
 tokio-util = "0.7"
-url.workspace = true
+url = { workspace = true, features = ["serde"] }
 serde = { version = "1.0.228", features = ["serde_derive"] }
 reqwest = { version = "0.13.4", default-features = false, features = [
     "brotli",

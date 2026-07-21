@@ -44,6 +44,10 @@ impl DownloadState {
         }
     }
 
+    /// Load a download state from disk.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be read or deserialized.
     pub async fn load(config_path: &Path) -> anyhow::Result<Self> {
         let inner = fs::read(&config_path).await?;
         let inner: PartialDownloadStateInner = toml::from_slice(&inner)?;
@@ -54,6 +58,10 @@ impl DownloadState {
         })
     }
 
+    /// Persist the download state to disk when it is dirty.
+    ///
+    /// # Errors
+    /// Returns an error if serializing or writing the state fails.
     pub async fn store(&mut self) -> anyhow::Result<()> {
         if self.is_dirty {
             self.inner
