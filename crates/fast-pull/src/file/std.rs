@@ -2,17 +2,24 @@ use crate::{ProgressEntry, Pusher};
 use bytes::Bytes;
 use std::{
     fs::File,
-    io::{BufWriter, Seek, Write},
+    io::{Seek, Write},
 };
 use tokio::io::SeekFrom;
 
-/// File pusher using standard `BufWriter<File>` with random-access writes.
+/// File pusher using a raw `std::fs::File` with random-access writes and **no**
+/// userspace write buffer.
 ///
-/// Writes are buffered and optionally flushed to disk on [`flush`](Pusher::flush).
-/// The  `sync_all` flag controls whether `fsync` is called after each flush.
+/// Every [`push`](Pusher::push) seeks to `range.start` and writes directly to the
+/// OS. It is intended to be wrapped by a buffering decorator such as
+/// [`crate::BufWriterPusher`] when syscall batching is desired, or used directly
+/// when writes are already large/sequential.
+///
+/// The `sync_all` flag controls whether `fsync` is called on
+/// [`flush`](Pusher::flush). A bare `std::fs::File` has no userspace buffer, so
+/// `flush` itself performs no copying — it only issues `fsync` when requested.
 #[derive(Debug)]
 pub struct StdFilePusher {
-    buf: BufWriter<File>,
+    file: File,
     p: u64,
     sync_all: bool,
 }
@@ -20,15 +27,10 @@ pub struct StdFilePusher {
 impl StdFilePusher {
     /// # Errors
     /// Returns an error if `fs::set_len` fails.
-    pub async fn new(
-        file: tokio::fs::File,
-        size: u64,
-        buffer_size: usize,
-        sync_all: bool,
-    ) -> std::io::Result<Self> {
+    pub async fn new(file: tokio::fs::File, size: u64, sync_all: bool) -> std::io::Result<Self> {
         file.set_len(size).await?;
         Ok(Self {
-            buf: BufWriter::with_capacity(buffer_size, file.into_std().await),
+            file: file.into_std().await,
             p: 0,
             sync_all,
         })
@@ -38,14 +40,14 @@ impl StdFilePusher {
     /// Returns an error if `Seek`, `Write`, or `WriteZero` occurs.
     pub fn write_at(&mut self, start: u64, mut bytes: &[u8]) -> std::io::Result<()> {
         if self.p != start {
-            if let Err(e) = self.buf.seek(SeekFrom::Start(start)) {
+            if let Err(e) = self.file.seek(SeekFrom::Start(start)) {
                 self.p = u64::MAX;
                 return Err(e);
             }
             self.p = start;
         }
         while !bytes.is_empty() {
-            match self.buf.write(bytes) {
+            match self.file.write(bytes) {
                 Ok(0) => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WriteZero,
@@ -94,9 +96,8 @@ impl Pusher for StdFilePusher {
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        self.buf.flush()?;
         if self.sync_all {
-            self.buf.get_ref().sync_all()?;
+            self.file.sync_all()?;
         }
         Ok(())
     }
@@ -116,10 +117,9 @@ mod tests {
         let file_path = temp_file.path();
 
         // Initialize StdFilePusher with a file size of 10 bytes
-        let mut pusher =
-            StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, 8 * 1024, false)
-                .await
-                .unwrap();
+        let mut pusher = StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, false)
+            .await
+            .unwrap();
 
         // Write data
         let data = b"234";
