@@ -2,6 +2,8 @@ use crate::{Event, handle::SharedHandle};
 use core::sync::atomic::{AtomicBool, Ordering};
 use crossfire::{MAsyncRx, mpmc};
 use fast_steal::{Executor, Handle, TaskQueue};
+use std::fmt;
+use std::ops::Deref;
 use std::sync::{Arc, Weak};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 
@@ -10,85 +12,73 @@ pub mod mock;
 pub mod multi;
 pub mod single;
 
-/// Handle to an active download session.
+/// Shared state of an active download session.
 ///
-/// Provides access to:
-/// - `event_chain` — a multi-consumer channel of [`Event`]s for progress monitoring
-/// - `abort()` — cancel all workers
-/// - `join()` — wait for the writer thread to finish
-/// - `set_threads()` — dynamically adjust concurrency
-#[derive(Debug)]
-pub struct DownloadResult<E, PullError, PushError>
+/// Owned inside an `Arc` by [`DownloadResult`]. Because all clones of a
+/// `DownloadResult` share the **same** `Arc<DownloadResultInner>`, the `Drop`
+/// impl below runs exactly once — when the last clone is dropped. That is where
+/// cancellation happens, giving `DownloadResult` `Arc`-style "last owner gone →
+/// release" semantics: the download keeps running as long as any handle is
+/// alive, and is cancelled only when the final one is dropped.
+pub struct DownloadResultInner<E, PullError, PushError>
 where
     E: Executor + Send + Sync,
     PullError: Send + Unpin + 'static,
     PushError: Send + Unpin + 'static,
 {
     pub event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
-    handle: Arc<SharedHandle<()>>,
+    handle: SharedHandle<()>,
     abort_handles: Option<Arc<[AbortHandle]>>,
     task_queue: Option<(Weak<E>, TaskQueue<E::Handle>)>,
-    is_aborted: Arc<AtomicBool>,
+    is_aborted: AtomicBool,
 }
 
-impl<E, PullError, PushError> Clone for DownloadResult<E, PullError, PushError>
+impl<E, PullError, PushError> fmt::Debug for DownloadResultInner<E, PullError, PushError>
 where
     E: Executor + Send + Sync,
     PullError: Send + Unpin + 'static,
     PushError: Send + Unpin + 'static,
 {
-    fn clone(&self) -> Self {
-        Self {
-            event_chain: self.event_chain.clone(),
-            handle: self.handle.clone(),
-            abort_handles: self.abort_handles.clone(),
-            task_queue: self.task_queue.clone(),
-            is_aborted: self.is_aborted.clone(),
-        }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DownloadResultInner")
+            .field("event_chain", &self.event_chain)
+            .field("is_aborted", &self.is_aborted.load(Ordering::Acquire))
+            .finish_non_exhaustive()
     }
 }
 
-impl<E, PullError, PushError> DownloadResult<E, PullError, PushError>
+impl<E, PullError, PushError> DownloadResultInner<E, PullError, PushError>
 where
     E: Executor + Send + Sync,
     PullError: Send + Unpin + 'static,
     PushError: Send + Unpin + 'static,
 {
-    pub fn new(
-        event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
-        handle: JoinHandle<()>,
-        abort_handles: Option<&[AbortHandle]>,
-        task_queue: Option<(Weak<E>, TaskQueue<E::Handle>)>,
-    ) -> Self {
-        Self {
-            event_chain,
-            handle: Arc::new(SharedHandle::new(handle)),
-            abort_handles: abort_handles.map(Arc::from),
-            task_queue,
-            is_aborted: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
     /// # Errors
     /// Returns `Arc<JoinError>` if the writer thread exits unexpectedly
     pub async fn join(&self) -> Result<(), Arc<JoinError>> {
         self.handle.join().await
     }
 
+    /// Cancel all workers immediately.
+    ///
+    /// Safe to call multiple times and safe to call while other clones of the
+    /// owning [`DownloadResult`] are still alive. The implicit drop-based
+    /// cancellation (on the last clone) becomes a no-op once this has run.
     pub fn abort(&self) {
-        if let Some(handles) = &self.abort_handles {
-            for handle in handles.iter() {
-                handle.abort();
-            }
-        }
-        if let Some((_, task_queue)) = &self.task_queue {
-            task_queue.handles(|iter| {
-                for handle in iter {
+        if !self.is_aborted.swap(true, Ordering::Release) {
+            if let Some(handles) = &self.abort_handles {
+                for handle in handles.iter() {
                     handle.abort();
                 }
-            });
+            }
+            if let Some((_, task_queue)) = &self.task_queue {
+                task_queue.handles(|iter| {
+                    for handle in iter {
+                        handle.abort();
+                    }
+                });
+            }
         }
-        self.is_aborted.store(true, Ordering::Release);
     }
 
     pub fn set_threads(&self, threads: usize, min_chunk_size: u64) {
@@ -111,7 +101,7 @@ where
     }
 }
 
-impl<E, PullError, PushError> Drop for DownloadResult<E, PullError, PushError>
+impl<E, PullError, PushError> Drop for DownloadResultInner<E, PullError, PushError>
 where
     E: Executor + Send + Sync,
     PullError: Send + Unpin + 'static,
@@ -119,5 +109,74 @@ where
 {
     fn drop(&mut self) {
         self.abort();
+    }
+}
+
+/// Handle to an active download session.
+///
+/// Cheaply cloneable shared handle. The underlying download keeps running as
+/// long as **any** clone is alive, and is cancelled only once the last clone is
+/// dropped. An explicit [`DownloadResult::abort`] cancels immediately.
+///
+/// `DownloadResult` derefs to [`DownloadResultInner`], so all session methods
+/// (`join`, `abort`, `set_threads`, `is_aborted`) and the `event_chain` field
+/// are reachable directly on the handle.
+#[derive(Debug)]
+pub struct DownloadResult<E, PullError, PushError>
+where
+    E: Executor + Send + Sync,
+    PullError: Send + Unpin + 'static,
+    PushError: Send + Unpin + 'static,
+{
+    inner: Arc<DownloadResultInner<E, PullError, PushError>>,
+}
+
+impl<E, PullError, PushError> Clone for DownloadResult<E, PullError, PushError>
+where
+    E: Executor + Send + Sync,
+    PullError: Send + Unpin + 'static,
+    PushError: Send + Unpin + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<E, PullError, PushError> Deref for DownloadResult<E, PullError, PushError>
+where
+    E: Executor + Send + Sync,
+    PullError: Send + Unpin + 'static,
+    PushError: Send + Unpin + 'static,
+{
+    type Target = DownloadResultInner<E, PullError, PushError>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<E, PullError, PushError> DownloadResult<E, PullError, PushError>
+where
+    E: Executor + Send + Sync,
+    PullError: Send + Unpin + 'static,
+    PushError: Send + Unpin + 'static,
+{
+    pub fn new(
+        event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
+        handle: JoinHandle<()>,
+        abort_handles: Option<&[AbortHandle]>,
+        task_queue: Option<(Weak<E>, TaskQueue<E::Handle>)>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(DownloadResultInner {
+                event_chain,
+                handle: SharedHandle::new(handle),
+                abort_handles: abort_handles.map(Arc::from),
+                task_queue,
+                is_aborted: AtomicBool::new(false),
+            }),
+        }
     }
 }
