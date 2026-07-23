@@ -467,11 +467,16 @@ mod tests {
             FileId::default(),
         );
         let pusher = MemPusher::with_capacity(mock_data.len());
+        // Keep only the data handle for the final assertion; the whole `pusher`
+        // (whose listener holds a clone of the `event_chain` sender) is moved into
+        // the download, so `event_chain` closes once the push thread finishes,
+        // terminating the single drain loop below.
+        let receive = pusher.receive.clone();
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_multi(
             puller,
-            pusher.clone(),
+            pusher,
             multi::DownloadOptions {
                 concurrent: 32,
                 retry_gap: Duration::from_secs(1),
@@ -485,14 +490,13 @@ mod tests {
 
         let mut pull_progress: Vec<ProgressEntry> = Vec::new();
         let mut push_progress: Vec<ProgressEntry> = Vec::new();
+        // `PushProgress` now flows on the same `event_chain` as the engine events
+        // (the sink's listener emits it the moment data is actually written), so a
+        // single drain collects both pull and push progress.
         while let Ok(e) = result.event_chain.recv().await {
             match e {
-                Event::PullProgress(_, p) => {
-                    pull_progress.merge_progress(p);
-                }
-                Event::PushProgress(_, p) => {
-                    push_progress.merge_progress(p);
-                }
+                Event::PullProgress(_, p) => pull_progress.merge_progress(p),
+                Event::PushProgress(p) => push_progress.merge_progress(p),
                 _ => {}
             }
         }
@@ -502,7 +506,7 @@ mod tests {
         assert_eq!(push_progress, download_chunks);
 
         result.join().await.unwrap();
-        assert_eq!(&**pusher.receive.lock(), mock_data);
+        assert_eq!(&**receive.lock(), mock_data);
     }
 
     #[tokio::test]
@@ -523,11 +527,16 @@ mod tests {
             FileId::default(),
         );
         let pusher = MemPusher::with_capacity(mock_data.len());
+        // Keep only the data handle for the final assertion; the whole `pusher`
+        // (whose listener holds a clone of the `event_chain` sender) is moved into
+        // the download, so `event_chain` closes once the push thread finishes,
+        // terminating the single drain loop below.
+        let receive = pusher.receive.clone();
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_single(
             puller,
-            pusher.clone(),
+            pusher,
             single::DownloadOptions {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
@@ -536,14 +545,13 @@ mod tests {
 
         let mut pull_progress: Vec<ProgressEntry> = Vec::new();
         let mut push_progress: Vec<ProgressEntry> = Vec::new();
+        // `PushProgress` now flows on the same `event_chain` as the engine events
+        // (the sink's listener emits it the moment data is actually written), so a
+        // single drain collects both pull and push progress.
         while let Ok(e) = result.event_chain.recv().await {
             match e {
-                Event::PullProgress(_, p) => {
-                    pull_progress.merge_progress(p);
-                }
-                Event::PushProgress(_, p) => {
-                    push_progress.merge_progress(p);
-                }
+                Event::PullProgress(_, p) => pull_progress.merge_progress(p),
+                Event::PushProgress(p) => push_progress.merge_progress(p),
                 _ => {}
             }
         }
@@ -553,6 +561,6 @@ mod tests {
         assert_eq!(push_progress, download_chunks);
 
         result.join().await.unwrap();
-        assert_eq!(&**pusher.receive.lock(), mock_data);
+        assert_eq!(&**receive.lock(), mock_data);
     }
 }

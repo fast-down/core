@@ -261,9 +261,9 @@ mod tests {
         let puller = MockPuller::new(&mock_data);
         let pusher = MemPusher::with_capacity(mock_data.len());
         // Keep only the data handle for the final assertion; the whole `pusher`
-        // (which installs a listener holding a `tx_disk` clone) is moved into the
-        // download so `rx_disk` closes once the push thread finishes, terminating
-        // the drain loop.
+        // (whose listener holds a clone of the `event_chain` sender) is moved into
+        // the download, so `event_chain` closes once the push thread finishes,
+        // terminating the single drain loop below.
         let receive = pusher.receive.clone();
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
