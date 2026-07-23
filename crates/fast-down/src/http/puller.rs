@@ -24,7 +24,7 @@ use url::Url;
 /// checking, and reusing previously opened responses.
 pub struct HttpPuller<Client: HttpClient> {
     client: Client,
-    url: Url,
+    url: Arc<Url>,
     resp: Option<Arc<Mutex<Option<GetResponse<Client>>>>>,
     file_id: FileId,
 }
@@ -40,7 +40,7 @@ impl<C: HttpClient> Clone for HttpPuller<C> {
 }
 impl<Client: HttpClient> HttpPuller<Client> {
     pub const fn new(
-        url: Url,
+        url: Arc<Url>,
         client: Client,
         resp: Option<Arc<Mutex<Option<GetResponse<Client>>>>>,
         file_id: FileId,
@@ -106,7 +106,7 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
             {
                 ResponseState::Streaming(into_chunk_stream(resp))
             } else if range.end == u64::MAX {
-                let req = self.client.get(self.url.clone(), None).send();
+                let req = self.client.get((*self.url).clone(), None).send();
                 ResponseState::Pending(Box::pin(req))
             } else {
                 ResponseState::None
@@ -118,7 +118,7 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
 }
 struct RandRequestStream<Client: HttpClient> {
     client: Client,
-    url: Url,
+    url: Arc<Url>,
     range: Range<u64>,
     state: ResponseState<Client>,
     file_id: FileId,
@@ -156,7 +156,7 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
                     }
                     let resp = self
                         .client
-                        .get(self.url.clone(), Some(self.range.clone()))
+                        .get((*self.url).clone(), Some(self.range.clone()))
                         .send();
                     self.state = ResponseState::Pending(Box::pin(resp));
                     continue;
@@ -270,7 +270,7 @@ mod tests {
         let url = Url::parse("http://localhost").unwrap();
         let client = MockClient;
         let file_id = FileId::new(None, None);
-        let mut puller = HttpPuller::new(url, client, None, file_id);
+        let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
         let range = 0..7;
         let mut stream = Puller::pull(&mut puller, Some(&range))
             .await
