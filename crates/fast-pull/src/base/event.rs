@@ -14,7 +14,7 @@ pub enum Event<PullError, PushError> {
     PullProgress(WorkerId, ProgressEntry),
     Pushing(WorkerId, ProgressEntry),
     PushError(WorkerId, ProgressEntry, PushError),
-    PushProgress(WorkerId, ProgressEntry),
+    PushProgress(ProgressEntry),
     Flushing,
     FlushError(PushError),
     Finished(WorkerId),

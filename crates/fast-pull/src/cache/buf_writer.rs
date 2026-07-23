@@ -1,4 +1,4 @@
-use crate::{ProgressEntry, Pusher};
+use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::{Bytes, BytesMut};
 
 /// Pusher decorator that provides `std::io::BufWriter`-style linear write buffering.
@@ -76,6 +76,10 @@ impl<P: Pusher> BufWriterPusher<P> {
 
 impl<P: Pusher> Pusher for BufWriterPusher<P> {
     type Error = P::Error;
+
+    fn set_listener(&mut self, cb: ProgressListener) {
+        self.inner.set_listener(cb);
+    }
 
     fn push(&mut self, range: &ProgressEntry, bytes: Bytes) -> Result<(), (Self::Error, Bytes)> {
         if bytes.is_empty() {

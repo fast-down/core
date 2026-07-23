@@ -33,6 +33,10 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     options: DownloadOptions<I>,
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     let (tx, event_chain) = mpmc::unbounded_async();
+    let tx_listener = tx.clone();
+    pusher.set_listener(Box::new(move |p: ProgressEntry| {
+        let _ = tx_listener.send(Event::PushProgress(p));
+    }));
     let (tx_push, rx_push) =
         mpsc::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
@@ -50,7 +54,6 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
                 }
                 std::thread::sleep(options.retry_gap);
             }
-            let _ = tx_clone.send(Event::PushProgress(id, spin));
         }
         loop {
             let _ = tx_clone.send(Event::Flushing);
@@ -257,11 +260,16 @@ mod tests {
         let mock_data = build_mock_data(3 * 1024);
         let puller = MockPuller::new(&mock_data);
         let pusher = MemPusher::with_capacity(mock_data.len());
+        // Keep only the data handle for the final assertion; the whole `pusher`
+        // (which installs a listener holding a `tx_disk` clone) is moved into the
+        // download so `rx_disk` closes once the push thread finishes, terminating
+        // the drain loop.
+        let receive = pusher.receive.clone();
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_multi(
             puller,
-            pusher.clone(),
+            pusher,
             DownloadOptions {
                 concurrent: 32,
                 retry_gap: Duration::from_secs(1),
@@ -276,17 +284,13 @@ mod tests {
         let mut pull_progress: Vec<ProgressEntry> = Vec::new();
         let mut push_progress: Vec<ProgressEntry> = Vec::new();
         let mut pull_ids = [false; 32];
-        let mut push_ids = [false; 32];
         while let Ok(e) = result.event_chain.recv().await {
             match e {
                 Event::PullProgress(id, p) => {
                     pull_ids[id] = true;
                     pull_progress.merge_progress(p);
                 }
-                Event::PushProgress(id, p) => {
-                    push_ids[id] = true;
-                    push_progress.merge_progress(p);
-                }
+                Event::PushProgress(p) => push_progress.merge_progress(p),
                 _ => {}
             }
         }
@@ -295,10 +299,9 @@ mod tests {
         assert_eq!(pull_progress, download_chunks);
         assert_eq!(push_progress, download_chunks);
         assert!(pull_ids.iter().any(|x| *x));
-        assert!(push_ids.iter().any(|x| *x));
 
         #[allow(clippy::unwrap_used)]
         result.join().await.unwrap();
-        assert_eq!(&**pusher.receive.lock(), mock_data);
+        assert_eq!(&**receive.lock(), mock_data);
     }
 }

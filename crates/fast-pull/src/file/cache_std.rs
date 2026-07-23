@@ -1,4 +1,4 @@
-use crate::{BufWriterPusher, CacheSeqPusher, ProgressEntry, Pusher, file::StdFilePusher};
+use crate::{BufWriterPusher, CacheSeqPusher, ProgressEntry, ProgressListener, Pusher, file::StdFilePusher};
 use bytes::Bytes;
 
 /// File pusher combining [`CacheSeqPusher`] with [`StdFilePusher`].
@@ -32,6 +32,10 @@ impl CacheFilePusher {
 
 impl Pusher for CacheFilePusher {
     type Error = std::io::Error;
+
+    fn set_listener(&mut self, cb: ProgressListener) {
+        self.inner.set_listener(cb);
+    }
 
     #[inline]
     fn push(&mut self, range: &ProgressEntry, bytes: Bytes) -> Result<(), (Self::Error, Bytes)> {

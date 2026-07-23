@@ -1,6 +1,4 @@
-use crate::{
-    DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, multi::TokioExecutor,
-};
+use crate::{DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, multi::TokioExecutor};
 use bytes::Bytes;
 use core::time::Duration;
 use crossfire::{mpmc, spsc};
@@ -24,6 +22,10 @@ pub fn download_single<R: Puller, W: Pusher>(
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     const ID: usize = 0;
     let (tx, event_chain) = mpmc::unbounded_async();
+    let tx_listener = tx.clone();
+    pusher.set_listener(Box::new(move |p: ProgressEntry| {
+        let _ = tx_listener.send(Event::PushProgress(p));
+    }));
     let (tx_push, rx_push) = spsc::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     let rx_push = rx_push.into_blocking();
@@ -40,7 +42,6 @@ pub fn download_single<R: Puller, W: Pusher>(
                 }
                 std::thread::sleep(options.retry_gap);
             }
-            let _ = tx_clone.send(Event::PushProgress(ID, spin));
         }
         loop {
             let _ = tx_clone.send(Event::Flushing);
@@ -114,11 +115,16 @@ mod tests {
         let mock_data = build_mock_data(3 * 1024);
         let puller = MockPuller::new(&mock_data);
         let pusher = MemPusher::with_capacity(mock_data.len());
+        // Keep only the data handle for the final assertion; the whole `pusher`
+        // (which installs a listener holding a `tx_disk` clone) is moved into the
+        // download so `rx_disk` closes once the push thread finishes, terminating
+        // the drain loop.
+        let receive = pusher.receive.clone();
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_single(
             puller,
-            pusher.clone(),
+            pusher,
             DownloadOptions {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
@@ -129,12 +135,8 @@ mod tests {
         let mut push_progress: Vec<ProgressEntry> = Vec::new();
         while let Ok(e) = result.event_chain.recv().await {
             match e {
-                Event::PullProgress(_, p) => {
-                    pull_progress.merge_progress(p);
-                }
-                Event::PushProgress(_, p) => {
-                    push_progress.merge_progress(p);
-                }
+                Event::PullProgress(_, p) => pull_progress.merge_progress(p),
+                Event::PushProgress(p) => push_progress.merge_progress(p),
                 _ => {}
             }
         }
@@ -145,6 +147,6 @@ mod tests {
 
         #[allow(clippy::unwrap_used)]
         result.join().await.unwrap();
-        assert_eq!(&**pusher.receive.lock(), mock_data);
+        assert_eq!(&**receive.lock(), mock_data);
     }
 }

@@ -1,4 +1,4 @@
-use crate::{ProgressEntry, Pusher};
+use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::Bytes;
 use std::{
     fs::File,
@@ -17,11 +17,20 @@ use tokio::io::SeekFrom;
 /// The `sync_all` flag controls whether `fsync` is called on
 /// [`flush`](Pusher::flush). A bare `std::fs::File` has no userspace buffer, so
 /// `flush` itself performs no copying — it only issues `fsync` when requested.
-#[derive(Debug)]
 pub struct StdFilePusher {
     file: File,
     p: u64,
     sync_all: bool,
+    listener: Option<ProgressListener>,
+}
+
+impl std::fmt::Debug for StdFilePusher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StdFilePusher")
+            .field("p", &self.p)
+            .field("sync_all", &self.sync_all)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StdFilePusher {
@@ -33,6 +42,7 @@ impl StdFilePusher {
             file: file.into_std().await,
             p: 0,
             sync_all,
+            listener: None,
         })
     }
 
@@ -55,7 +65,11 @@ impl StdFilePusher {
                     ));
                 }
                 Ok(n) => {
+                    let old = self.p;
                     self.p += n as u64;
+                    if let Some(l) = &mut self.listener {
+                        l(old..self.p);
+                    }
                     bytes = &bytes[n..];
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -71,28 +85,31 @@ impl StdFilePusher {
 
 impl Pusher for StdFilePusher {
     type Error = std::io::Error;
+
+    fn set_listener(&mut self, cb: ProgressListener) {
+        self.listener = Some(cb);
+    }
+
     fn push(&mut self, range: &ProgressEntry, bytes: Bytes) -> Result<(), (Self::Error, Bytes)> {
         if bytes.is_empty() {
             return Ok(());
         }
         let start = range.start;
-        match self.write_at(start, &bytes) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                #[allow(clippy::cast_possible_truncation)]
-                let written_len = if self.p >= start && self.p <= start + bytes.len() as u64 {
-                    (self.p - start) as usize
-                } else {
-                    0
-                };
-                let remaining_bytes = if written_len < bytes.len() {
-                    bytes.slice(written_len..)
-                } else {
-                    Bytes::new()
-                };
-                Err((e, remaining_bytes))
-            }
+        if let Err(e) = self.write_at(start, &bytes) {
+            #[allow(clippy::cast_possible_truncation)]
+            let written_len = if self.p >= start && self.p <= start + bytes.len() as u64 {
+                (self.p - start) as usize
+            } else {
+                0
+            };
+            let remaining_bytes = if written_len < bytes.len() {
+                bytes.slice(written_len..)
+            } else {
+                Bytes::new()
+            };
+            return Err((e, remaining_bytes));
         }
+        Ok(())
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {

@@ -1,6 +1,14 @@
 use crate::ProgressEntry;
 use bytes::Bytes;
 
+/// A callback invoked whenever a chunk has been successfully written to its
+/// destination (disk / memory).
+///
+/// Leaf sinks (`StdFilePusher`, `MmapFilePusher`, `MemPusher`) store this and
+/// call it from their [`Pusher::push`] success path. The alias exists so the
+/// `Box<dyn Fn ...>` parameter does not trip `clippy::type_complexity`.
+pub type ProgressListener = Box<dyn FnMut(ProgressEntry) + Send + 'static>;
+
 /// Abstraction over a data sink that receives pushed byte chunks.
 ///
 /// The pusher writes data to its destination and can optionally flush.
@@ -12,6 +20,14 @@ pub trait Pusher: Send + 'static {
     fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
+    /// Install a callback that fires whenever a chunk has been successfully
+    /// pushed to its destination.
+    ///
+    /// The default implementation is a no-op. Leaf sinks override this to store
+    /// the callback; every wrapper overrides this to forward it to its inner
+    /// pusher. Omitting the forwarding in any wrapper silently drops progress.
+    #[allow(clippy::needless_pass_by_value)]
+    fn set_listener(&mut self, _cb: ProgressListener) {}
 }
 
 /// Marker trait for type-erased error types.
@@ -29,6 +45,9 @@ pub struct BoxPusher {
 }
 impl Pusher for BoxPusher {
     type Error = Box<dyn AnyError>;
+    fn set_listener(&mut self, cb: ProgressListener) {
+        self.pusher.set_listener(cb);
+    }
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)> {
         self.pusher.push(range, content)
     }
@@ -42,6 +61,9 @@ struct PusherAdapter<P: Pusher> {
 }
 impl<P: Pusher> Pusher for PusherAdapter<P> {
     type Error = Box<dyn AnyError>;
+    fn set_listener(&mut self, cb: ProgressListener) {
+        self.inner.set_listener(cb);
+    }
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)> {
         self.inner
             .push(range, content)
