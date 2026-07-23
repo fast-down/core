@@ -35,7 +35,12 @@ pub fn download_single<R: Puller, W: Pusher>(
     let rx_push = rx_push.into_blocking();
     let abort_flag = Arc::new(AtomicBool::new(false));
     let abort_flag_clone = abort_flag.clone();
+    let push_worker = Arc::new(std::sync::OnceLock::new());
+    let push_worker_clone = push_worker.clone();
     let push_handle = tokio::task::spawn_blocking(move || {
+        // Publish our thread handle first so `abort()` can `unpark()` us out
+        // of a `park_timeout` retry backoff.
+        let _ = push_worker_clone.set(std::thread::current());
         'outer: while let Ok((spin, mut data)) = rx_push.recv() {
             loop {
                 if abort_flag_clone.load(Ordering::Relaxed) {
@@ -49,7 +54,7 @@ pub fn download_single<R: Puller, W: Pusher>(
                         let _ = tx_clone.send(Event::PushError(ID, spin.clone(), err));
                     }
                 }
-                std::thread::sleep(options.retry_gap);
+                std::thread::park_timeout(options.retry_gap);
             }
         }
         loop {
@@ -63,7 +68,7 @@ pub fn download_single<R: Puller, W: Pusher>(
                     let _ = tx_clone.send(Event::FlushError(err));
                 }
             }
-            std::thread::sleep(options.retry_gap);
+            std::thread::park_timeout(options.retry_gap);
         }
     });
     let handle = tokio::spawn(async move {
@@ -108,6 +113,7 @@ pub fn download_single<R: Puller, W: Pusher>(
         Some(&[handle.abort_handle()]),
         None,
         abort_flag,
+        push_worker,
     )
 }
 

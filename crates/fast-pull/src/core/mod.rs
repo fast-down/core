@@ -4,7 +4,8 @@ use crossfire::{MAsyncRx, mpmc};
 use fast_steal::{Executor, Handle, TaskQueue};
 use std::fmt;
 use std::ops::Deref;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
+use std::thread::Thread;
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 
 pub mod handle;
@@ -35,6 +36,14 @@ where
     /// it) while `abort()` (which writes it) keeps a clone. `Arc` derefs to
     /// `AtomicBool`, so every `.swap`/`.load`/`.store` call below is unchanged.
     is_aborted: Arc<AtomicBool>,
+    /// Handle of the blocking push/flush worker thread, set by the worker
+    /// itself as its first action. `abort()` uses it to `unpark()` the worker
+    /// so a retry backoff (`std::thread::park_timeout`) is cut short instead
+    /// of sleeping out the full `retry_gap`. `unpark()` on an already-exited
+    /// thread is safe, and a stored "unpark token" (from an unpark racing
+    /// ahead of the park) only causes one spurious wakeup, after which the
+    /// worker re-checks `is_aborted` at the top of its loop.
+    push_worker: Arc<OnceLock<Thread>>,
 }
 
 impl<E, PullError, PushError> fmt::Debug for DownloadResultInner<E, PullError, PushError>
@@ -81,6 +90,12 @@ where
                         handle.abort();
                     }
                 });
+            }
+            // Wake the push worker if it is sleeping in `park_timeout`
+            // between retries, so `join()` returns promptly instead of
+            // waiting out the remaining `retry_gap`.
+            if let Some(worker) = self.push_worker.get() {
+                worker.unpark();
             }
         }
     }
@@ -173,6 +188,7 @@ where
         abort_handles: Option<&[AbortHandle]>,
         task_queue: Option<(Weak<E>, TaskQueue<E::Handle>)>,
         abort_flag: Arc<AtomicBool>,
+        push_worker: Arc<OnceLock<Thread>>,
     ) -> Self {
         Self {
             inner: Arc::new(DownloadResultInner {
@@ -181,6 +197,7 @@ where
                 abort_handles: abort_handles.map(Arc::from),
                 task_queue,
                 is_aborted: abort_flag,
+                push_worker,
             }),
         }
     }
