@@ -30,7 +30,11 @@ where
     handle: SharedHandle<()>,
     abort_handles: Option<Arc<[AbortHandle]>>,
     task_queue: Option<(Weak<E>, TaskQueue<E::Handle>)>,
-    is_aborted: AtomicBool,
+    /// Shared abort signal. Wrapped in `Arc` so the very same `AtomicBool`
+    /// instance can be handed to the `spawn_blocking` push driver (which reads
+    /// it) while `abort()` (which writes it) keeps a clone. `Arc` derefs to
+    /// `AtomicBool`, so every `.swap`/`.load`/`.store` call below is unchanged.
+    is_aborted: Arc<AtomicBool>,
 }
 
 impl<E, PullError, PushError> fmt::Debug for DownloadResultInner<E, PullError, PushError>
@@ -168,6 +172,7 @@ where
         handle: JoinHandle<()>,
         abort_handles: Option<&[AbortHandle]>,
         task_queue: Option<(Weak<E>, TaskQueue<E::Handle>)>,
+        abort_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
             inner: Arc::new(DownloadResultInner {
@@ -175,7 +180,7 @@ where
                 handle: SharedHandle::new(handle),
                 abort_handles: abort_handles.map(Arc::from),
                 task_queue,
-                is_aborted: AtomicBool::new(false),
+                is_aborted: abort_flag,
             }),
         }
     }

@@ -1,7 +1,7 @@
 use crate::{DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, WorkerId};
 use bytes::Bytes;
 use core::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Duration,
 };
 use crossfire::{MAsyncTx, MTx, mpmc, mpsc};
@@ -41,9 +41,14 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         mpsc::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     let rx_push = rx_push.into_blocking();
+    let abort_flag = Arc::new(AtomicBool::new(false));
+    let abort_flag_clone = abort_flag.clone();
     let push_handle = tokio::task::spawn_blocking(move || {
-        while let Ok((id, spin, mut data)) = rx_push.recv() {
+        'outer: while let Ok((id, spin, mut data)) = rx_push.recv() {
             loop {
+                if abort_flag_clone.load(Ordering::Relaxed) {
+                    break 'outer;
+                }
                 let _ = tx_clone.send(Event::Pushing(id, spin.clone()));
                 match pusher.push(&spin, data) {
                     Ok(()) => break,
@@ -56,6 +61,9 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
             }
         }
         loop {
+            if abort_flag_clone.load(Ordering::Relaxed) {
+                break;
+            }
             let _ = tx_clone.send(Event::Flushing);
             match pusher.flush() {
                 Ok(()) => break,
@@ -89,6 +97,7 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         push_handle,
         None,
         Some((Arc::downgrade(&executor), task_queue)),
+        abort_flag,
     )
 }
 
@@ -248,12 +257,15 @@ mod tests {
     use vec::Vec;
 
     use super::*;
+    use crate::BufWriterPusher;
     use crate::{
         Merge, ProgressEntry,
         mem::MemPusher,
         mock::{MockPuller, build_mock_data},
     };
+    use futures::stream;
     use std::{dbg, vec};
+    use tokio::time::{sleep, timeout};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_concurrent_download() {
@@ -266,7 +278,7 @@ mod tests {
         // terminating the single drain loop below.
         let receive = pusher.receive.clone();
         #[allow(clippy::single_range_in_vec_init)]
-        let download_chunks = vec![0..mock_data.len() as u64];
+        let download_chunks = [0..mock_data.len() as u64];
         let result = download_multi(
             puller,
             pusher,
@@ -303,5 +315,143 @@ mod tests {
         #[allow(clippy::unwrap_used)]
         result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_download_abort_discards() {
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = MockPuller::new(&mock_data);
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::from_secs(1),
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+
+        // Abort immediately. The push driver must observe the shared flag, break
+        // out WITHOUT flushing, and let `join()` return promptly.
+        result.abort();
+        assert!(result.is_aborted());
+
+        let joined = tokio::time::timeout(Duration::from_secs(10), result.join())
+            .await
+            .expect("join() hung after abort");
+        assert!(joined.is_ok());
+
+        let written = receive.lock().len();
+        assert!(
+            written <= mock_data.len(),
+            "abort must not write beyond the source"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Strengthened abort coverage.
+    //
+    // `BufWriterPusher` only forwards buffered bytes to its inner sink on
+    // `flush()` (or overflow). Wrapping `MemPusher` with capacity > source lets
+    // us prove that, on abort, the *un-flushed* buffer is discarded — i.e. the
+    // download stops strictly before the full source is written (the bare
+    // `MemPusher` test's `written <= source` would also pass if abort missed).
+    // -------------------------------------------------------------------------
+
+    /// A [`Puller`] that stalls for `delay` before yielding any data, so a test
+    /// can deterministically abort *mid-flight*.
+    #[derive(Debug, Clone)]
+    struct SlowMockPuller {
+        data: Arc<[u8]>,
+        delay: Duration,
+    }
+    impl Puller for SlowMockPuller {
+        type Error = std::convert::Infallible;
+        #[allow(clippy::cast_possible_truncation)]
+        fn pull(
+            &mut self,
+            range: Option<&ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            type PullItem = Result<Bytes, (std::convert::Infallible, Option<Duration>)>;
+            let owned: Vec<u8> = match range {
+                Some(r) => self.data[r.start as usize..r.end as usize].to_vec(),
+                None => self.data.to_vec(),
+            };
+            let delay = self.delay;
+            async move {
+                sleep(delay).await;
+                let items: Vec<PullItem> = owned
+                    .chunks(2)
+                    .map(|c| Ok(Bytes::from(c.to_vec())))
+                    .collect();
+                Ok(stream::iter(items))
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_download_abort_discards_buffered() {
+        // 64 KiB source; the slow puller stalls so the test can abort mid-flight.
+        let mock_data = build_mock_data(64 * 1024);
+        let puller = SlowMockPuller {
+            data: Arc::from(mock_data.as_slice()),
+            delay: Duration::from_millis(50),
+        };
+        // Capacity > source: nothing reaches `MemPusher` until `flush()`.
+        let inner = MemPusher::with_capacity(mock_data.len());
+        let receive = inner.receive.clone();
+        let pusher = BufWriterPusher::new(inner, mock_data.len() + 1);
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::from_secs(1),
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+
+        // Abort as soon as the push driver starts processing (first `Pushing`).
+        let mut aborted = false;
+        while let Ok(e) = result.event_chain.recv().await {
+            if matches!(e, Event::Pushing(_, _)) {
+                result.abort();
+                assert!(result.is_aborted());
+                aborted = true;
+                break;
+            }
+        }
+        assert!(aborted, "expected a Pushing event before aborting");
+
+        let joined = timeout(Duration::from_secs(10), result.join())
+            .await
+            .expect("join() hung after abort");
+        assert!(joined.is_ok());
+
+        // Abort stops the download well before completion, so the inner sink
+        // must hold strictly less than the full source (some out-of-order runs
+        // may have been flushed, but completion is impossible after this abort).
+        let written = receive.lock().len();
+        assert!(
+            written < mock_data.len(),
+            "abort must stop before the full source is written (got {written} of {})",
+            mock_data.len()
+        );
     }
 }
