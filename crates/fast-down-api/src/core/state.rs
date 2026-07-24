@@ -12,7 +12,7 @@ use url::Url;
 
 #[derive(Debug, Clone, InheritConfig)]
 pub struct DownloadStateInner {
-    #[config(default = Url::parse("http://localhost/").unwrap())]
+    #[config(default = Url::parse("about:blank").unwrap())]
     pub url: Url,
     pub etag: Option<Arc<str>>,
     pub last_modified: Option<Arc<str>>,
@@ -104,11 +104,7 @@ impl DownloadState {
             etag: self.etag.clone().flatten(),
             last_modified: self.last_modified.clone().flatten(),
         };
-        let both_missing = saved.etag.is_none()
-            && saved.last_modified.is_none()
-            && info.file_id.etag.is_none()
-            && info.file_id.last_modified.is_none();
-        if !both_missing && saved != info.file_id {
+        if saved != info.file_id {
             return false;
         }
         true
