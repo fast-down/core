@@ -1,7 +1,7 @@
 use crate::{DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, WorkerId};
 use bytes::Bytes;
 use core::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Duration,
 };
 use crossfire::{MAsyncTx, MTx, mpmc, mpsc};
@@ -33,13 +33,27 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     options: DownloadOptions<I>,
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     let (tx, event_chain) = mpmc::unbounded_async();
+    let tx_listener = tx.clone();
+    pusher.set_listener(Box::new(move |p| {
+        let _ = tx_listener.send(Event::PushProgress(p));
+    }));
     let (tx_push, rx_push) =
         mpsc::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     let rx_push = rx_push.into_blocking();
+    let abort_flag = Arc::new(AtomicBool::new(false));
+    let abort_flag_clone = abort_flag.clone();
+    let push_worker = Arc::new(std::sync::OnceLock::new());
+    let push_worker_clone = push_worker.clone();
     let push_handle = tokio::task::spawn_blocking(move || {
-        while let Ok((id, spin, mut data)) = rx_push.recv() {
+        // Publish our thread handle first so `abort()` can `unpark()` us out
+        // of a `park_timeout` retry backoff.
+        let _ = push_worker_clone.set(std::thread::current());
+        'outer: while let Ok((id, spin, mut data)) = rx_push.recv() {
             loop {
+                if abort_flag_clone.load(Ordering::Relaxed) {
+                    break 'outer;
+                }
                 let _ = tx_clone.send(Event::Pushing(id, spin.clone()));
                 match pusher.push(&spin, data) {
                     Ok(()) => break,
@@ -48,11 +62,13 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
                         let _ = tx_clone.send(Event::PushError(id, spin.clone(), err));
                     }
                 }
-                std::thread::sleep(options.retry_gap);
+                std::thread::park_timeout(options.retry_gap);
             }
-            let _ = tx_clone.send(Event::PushProgress(id, spin));
         }
         loop {
+            if abort_flag_clone.load(Ordering::Relaxed) {
+                break;
+            }
             let _ = tx_clone.send(Event::Flushing);
             match pusher.flush() {
                 Ok(()) => break,
@@ -60,7 +76,7 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
                     let _ = tx_clone.send(Event::FlushError(err));
                 }
             }
-            std::thread::sleep(options.retry_gap);
+            std::thread::park_timeout(options.retry_gap);
         }
     });
     let executor: Arc<TokioExecutor<R, W::Error>> = Arc::new(TokioExecutor {
@@ -86,6 +102,8 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         push_handle,
         None,
         Some((Arc::downgrade(&executor), task_queue)),
+        abort_flag,
+        push_worker,
     )
 }
 
@@ -245,23 +263,31 @@ mod tests {
     use vec::Vec;
 
     use super::*;
+    use crate::{BufWriterPusher, CacheSeqPusher};
     use crate::{
         Merge, ProgressEntry,
         mem::MemPusher,
         mock::{MockPuller, build_mock_data},
     };
+    use futures::stream;
     use std::{dbg, vec};
+    use tokio::time::{sleep, timeout};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_concurrent_download() {
         let mock_data = build_mock_data(3 * 1024);
         let puller = MockPuller::new(&mock_data);
         let pusher = MemPusher::with_capacity(mock_data.len());
+        // Keep only the data handle for the final assertion; the whole `pusher`
+        // (whose listener holds a clone of the `event_chain` sender) is moved into
+        // the download, so `event_chain` closes once the push thread finishes,
+        // terminating the single drain loop below.
+        let receive = pusher.receive.clone();
         #[allow(clippy::single_range_in_vec_init)]
-        let download_chunks = vec![0..mock_data.len() as u64];
+        let download_chunks = [0..mock_data.len() as u64];
         let result = download_multi(
             puller,
-            pusher.clone(),
+            pusher,
             DownloadOptions {
                 concurrent: 32,
                 retry_gap: Duration::from_secs(1),
@@ -276,17 +302,13 @@ mod tests {
         let mut pull_progress: Vec<ProgressEntry> = Vec::new();
         let mut push_progress: Vec<ProgressEntry> = Vec::new();
         let mut pull_ids = [false; 32];
-        let mut push_ids = [false; 32];
         while let Ok(e) = result.event_chain.recv().await {
             match e {
                 Event::PullProgress(id, p) => {
                     pull_ids[id] = true;
                     pull_progress.merge_progress(p);
                 }
-                Event::PushProgress(id, p) => {
-                    push_ids[id] = true;
-                    push_progress.merge_progress(p);
-                }
+                Event::PushProgress(p) => push_progress.merge_progress(p),
                 _ => {}
             }
         }
@@ -295,10 +317,159 @@ mod tests {
         assert_eq!(pull_progress, download_chunks);
         assert_eq!(push_progress, download_chunks);
         assert!(pull_ids.iter().any(|x| *x));
-        assert!(push_ids.iter().any(|x| *x));
 
         #[allow(clippy::unwrap_used)]
         result.join().await.unwrap();
-        assert_eq!(&**pusher.receive.lock(), mock_data);
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_download_abort_discards() {
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = MockPuller::new(&mock_data);
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::from_secs(1),
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+
+        // Abort immediately. The push driver must observe the shared flag, break
+        // out WITHOUT flushing, and let `join()` return promptly.
+        result.abort();
+        assert!(result.is_aborted());
+
+        let joined = tokio::time::timeout(Duration::from_secs(10), result.join())
+            .await
+            .expect("join() hung after abort");
+        assert!(joined.is_ok());
+
+        let written = receive.lock().len();
+        assert!(
+            written <= mock_data.len(),
+            "abort must not write beyond the source"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Strengthened abort coverage.
+    //
+    // `BufWriterPusher` only forwards buffered bytes to its inner sink on
+    // `flush()` (or overflow). This concurrent test wraps `MemPusher` with
+    // `CacheSeqPusher<BufWriterPusher<_>>` — the same layering `CacheFilePusher`
+    // uses in production — so out-of-order chunks are reordered into a
+    // contiguous stream *before* `BufWriterPusher` coalesces them. On abort the
+    // un-flushed buffer (CacheSeqPusher's BTreeMap + BufWriterPusher's BytesMut)
+    // is discarded, so the inner sink sees strictly less than the full source
+    // (the bare `MemPusher` test's `written <= source` would also pass if abort
+    // missed). Layering also removes the old flakiness: without `CacheSeqPusher`
+    // the interleaved concurrent writes were all non-contiguous and every piece
+    // was flushed straight through, so a slow abort could drain the whole source.
+    // -------------------------------------------------------------------------
+
+    /// A [`Puller`] that stalls for `delay` before yielding any data, so a test
+    /// can deterministically abort *mid-flight*.
+    #[derive(Debug, Clone)]
+    struct SlowMockPuller {
+        data: Arc<[u8]>,
+        delay: Duration,
+    }
+    impl Puller for SlowMockPuller {
+        type Error = std::convert::Infallible;
+        #[allow(clippy::cast_possible_truncation)]
+        fn pull(
+            &mut self,
+            range: Option<&ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            type PullItem = Result<Bytes, (std::convert::Infallible, Option<Duration>)>;
+            let owned: Vec<u8> = match range {
+                Some(r) => self.data[r.start as usize..r.end as usize].to_vec(),
+                None => self.data.to_vec(),
+            };
+            let delay = self.delay;
+            async move {
+                sleep(delay).await;
+                let items: Vec<PullItem> = owned
+                    .chunks(2)
+                    .map(|c| Ok(Bytes::from(c.to_vec())))
+                    .collect();
+                Ok(stream::iter(items))
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_download_abort_discards_buffered() {
+        // 64 KiB source; the slow puller stalls so the test can abort mid-flight.
+        let mock_data = build_mock_data(64 * 1024);
+        let puller = SlowMockPuller {
+            data: Arc::from(mock_data.as_slice()),
+            delay: Duration::from_millis(50),
+        };
+        // Restore the production reordering layer (CacheFilePusher = CacheSeqPusher<BufWriterPusher<...>>):
+        // concurrent out-of-order chunks are first reordered into contiguous runs inside CacheSeqPusher's BTreeMap,
+        // then fed contiguously to BufWriterPusher (which only coalesces contiguous writes). On abort, the
+        // un-flushed buffer (CacheSeqPusher's BTreeMap + BufWriterPusher's BytesMut) is discarded as a whole,
+        // so the inner MemPusher receives zero bytes -> written is deterministically == 0.
+        // high_watermark is set to source+1 so CacheSeqPusher never proactively evicts and holds everything.
+        let inner = MemPusher::with_capacity(mock_data.len());
+        let receive = inner.receive.clone();
+        let buf = BufWriterPusher::new(inner, mock_data.len() + 1);
+        let pusher = CacheSeqPusher::new(buf, mock_data.len() + 1, 0);
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::from_secs(1),
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+
+        // Abort as soon as the push driver starts processing (first `Pushing`).
+        let mut aborted = false;
+        while let Ok(e) = result.event_chain.recv().await {
+            if matches!(e, Event::Pushing(_, _)) {
+                result.abort();
+                assert!(result.is_aborted());
+                aborted = true;
+                break;
+            }
+        }
+        assert!(aborted, "expected a Pushing event before aborting");
+
+        let joined = timeout(Duration::from_secs(10), result.join())
+            .await
+            .expect("join() hung after abort");
+        assert!(joined.is_ok());
+
+        // Abort stops the download well before completion, so the inner sink
+        // must hold strictly less than the full source (some out-of-order runs
+        // may have been flushed, but completion is impossible after this abort).
+        let written = receive.lock().len();
+        assert!(
+            written < mock_data.len(),
+            "abort must stop before the full source is written (got {written} of {})",
+            mock_data.len()
+        );
     }
 }

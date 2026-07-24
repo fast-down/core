@@ -1,4 +1,4 @@
-use crate::{ProgressEntry, Pusher};
+use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::{Bytes, BytesMut};
 use std::collections::{BTreeMap, btree_map::Entry};
 
@@ -110,6 +110,10 @@ impl<P: Pusher> CacheMergePusher<P> {
 
 impl<P: Pusher> Pusher for CacheMergePusher<P> {
     type Error = P::Error;
+
+    fn set_listener(&mut self, cb: ProgressListener) {
+        self.inner.set_listener(cb);
+    }
 
     fn push(&mut self, range: &ProgressEntry, bytes: Bytes) -> Result<(), (Self::Error, Bytes)> {
         if bytes.is_empty() {

@@ -1,4 +1,4 @@
-use crate::{ProgressEntry, Pusher};
+use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::Bytes;
 use std::collections::BTreeMap;
 
@@ -88,6 +88,10 @@ impl<P: Pusher> CacheDirectPusher<P> {
 
 impl<P: Pusher> Pusher for CacheDirectPusher<P> {
     type Error = P::Error;
+
+    fn set_listener(&mut self, cb: ProgressListener) {
+        self.inner.set_listener(cb);
+    }
 
     fn push(&mut self, range: &ProgressEntry, bytes: Bytes) -> Result<(), (Self::Error, Bytes)> {
         if bytes.is_empty() {

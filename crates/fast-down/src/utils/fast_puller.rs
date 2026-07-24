@@ -122,9 +122,10 @@ impl FastDownPuller {
             },
             option.max_redirects,
         )?;
+        let url = Arc::new(option.url);
         Ok(Self {
             inner: HttpPuller::new(
-                option.url.clone(),
+                url.clone(),
                 client,
                 option.resp.clone(),
                 option.file_id.clone(),
@@ -132,7 +133,7 @@ impl FastDownPuller {
             resp: option.resp,
             headers: option.headers,
             proxy: option.proxy.map(Arc::from),
-            url: Arc::new(option.url),
+            url,
             accept_invalid_certs: option.accept_invalid_certs,
             accept_invalid_hostnames: option.accept_invalid_hostnames,
             cookie_store: option.cookie_store,
@@ -171,7 +172,7 @@ impl Clone for FastDownPuller {
                 |_| self.inner.clone(),
                 |client| {
                     HttpPuller::new(
-                        self.url.as_ref().clone(),
+                        self.url.clone(),
                         client,
                         self.resp.clone(),
                         self.file_id.clone(),
@@ -200,5 +201,41 @@ impl Puller for FastDownPuller {
         range: Option<&ProgressEntry>,
     ) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
         Puller::pull(&mut self.inner, range).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    fn make_options(url: Url) -> FastDownPullerOptions<'static> {
+        FastDownPullerOptions {
+            url,
+            headers: Arc::new(HeaderMap::new()),
+            proxy: Proxy::No,
+            accept_invalid_certs: false,
+            accept_invalid_hostnames: false,
+            cookie_store: false,
+            file_id: FileId::default(),
+            resp: None,
+            available_ips: Arc::from(Vec::<std::net::IpAddr>::new()),
+            max_redirects: 10,
+        }
+    }
+
+    /// Plan A stores the URL in a single `Arc<Url>` shared between the
+    /// `FastDownPuller` and its `HttpPuller` inner, and carried across `Clone`.
+    /// This asserts that cloning a `FastDownPuller` shares the exact same
+    /// `Arc<Url>` (i.e. the URL is stored only once).
+    #[test]
+    fn test_fast_down_puller_clone_shares_url_arc() {
+        let opts = make_options(Url::parse("http://example.com/a.bin").unwrap());
+        let puller = FastDownPuller::new(opts).expect("FastDownPuller::new must succeed");
+        let cloned = puller.clone();
+        assert!(
+            Arc::ptr_eq(&puller.url, &cloned.url),
+            "clone() must share the same Arc<Url> (URL stored once)"
+        );
     }
 }

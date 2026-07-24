@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn test_merge() {
-        #[allow(clippy::single_range_in_vec_init)]
+        #![allow(clippy::single_range_in_vec_init)]
         let mut v = vec![1..5, 8..10];
         v.merge_progress(5..10);
         assert_eq!(v, vec![1..10]);

@@ -307,6 +307,7 @@ mod tests {
         single::{self, download_single},
     };
     use reqwest::{Client, StatusCode};
+    use std::sync::Arc;
     use std::time::Duration;
 
     #[tokio::test]
@@ -461,17 +462,22 @@ mod tests {
             .create_async()
             .await;
         let puller = HttpPuller::new(
-            format!("{}/concurrent", server.url()).parse().unwrap(),
+            Arc::new(format!("{}/concurrent", server.url()).parse().unwrap()),
             client,
             None,
             FileId::default(),
         );
         let pusher = MemPusher::with_capacity(mock_data.len());
+        // Keep only the data handle for the final assertion; the whole `pusher`
+        // (whose listener holds a clone of the `event_chain` sender) is moved into
+        // the download, so `event_chain` closes once the push thread finishes,
+        // terminating the single drain loop below.
+        let receive = pusher.receive.clone();
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_multi(
             puller,
-            pusher.clone(),
+            pusher,
             multi::DownloadOptions {
                 concurrent: 32,
                 retry_gap: Duration::from_secs(1),
@@ -485,14 +491,13 @@ mod tests {
 
         let mut pull_progress: Vec<ProgressEntry> = Vec::new();
         let mut push_progress: Vec<ProgressEntry> = Vec::new();
+        // `PushProgress` now flows on the same `event_chain` as the engine events
+        // (the sink's listener emits it the moment data is actually written), so a
+        // single drain collects both pull and push progress.
         while let Ok(e) = result.event_chain.recv().await {
             match e {
-                Event::PullProgress(_, p) => {
-                    pull_progress.merge_progress(p);
-                }
-                Event::PushProgress(_, p) => {
-                    push_progress.merge_progress(p);
-                }
+                Event::PullProgress(_, p) => pull_progress.merge_progress(p),
+                Event::PushProgress(p) => push_progress.merge_progress(p),
                 _ => {}
             }
         }
@@ -502,7 +507,7 @@ mod tests {
         assert_eq!(push_progress, download_chunks);
 
         result.join().await.unwrap();
-        assert_eq!(&**pusher.receive.lock(), mock_data);
+        assert_eq!(&**receive.lock(), mock_data);
     }
 
     #[tokio::test]
@@ -517,17 +522,22 @@ mod tests {
             .create_async()
             .await;
         let puller = HttpPuller::new(
-            format!("{}/sequential", server.url()).parse().unwrap(),
+            Arc::new(format!("{}/sequential", server.url()).parse().unwrap()),
             client,
             None,
             FileId::default(),
         );
         let pusher = MemPusher::with_capacity(mock_data.len());
+        // Keep only the data handle for the final assertion; the whole `pusher`
+        // (whose listener holds a clone of the `event_chain` sender) is moved into
+        // the download, so `event_chain` closes once the push thread finishes,
+        // terminating the single drain loop below.
+        let receive = pusher.receive.clone();
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = vec![0..mock_data.len() as u64];
         let result = download_single(
             puller,
-            pusher.clone(),
+            pusher,
             single::DownloadOptions {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
@@ -536,14 +546,13 @@ mod tests {
 
         let mut pull_progress: Vec<ProgressEntry> = Vec::new();
         let mut push_progress: Vec<ProgressEntry> = Vec::new();
+        // `PushProgress` now flows on the same `event_chain` as the engine events
+        // (the sink's listener emits it the moment data is actually written), so a
+        // single drain collects both pull and push progress.
         while let Ok(e) = result.event_chain.recv().await {
             match e {
-                Event::PullProgress(_, p) => {
-                    pull_progress.merge_progress(p);
-                }
-                Event::PushProgress(_, p) => {
-                    push_progress.merge_progress(p);
-                }
+                Event::PullProgress(_, p) => pull_progress.merge_progress(p),
+                Event::PushProgress(p) => push_progress.merge_progress(p),
                 _ => {}
             }
         }
@@ -553,6 +562,78 @@ mod tests {
         assert_eq!(push_progress, download_chunks);
 
         result.join().await.unwrap();
-        assert_eq!(&**pusher.receive.lock(), mock_data);
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    /// Drives `ManualRedirectRequestBuilder::send` directly via `SmartRedirectClient`
+    /// (the production code path, as opposed to the plain `reqwest::Client` impl that
+    /// relies on reqwest's native auto-redirect). Confirms that `self.url = next_url`
+    /// correctly advances the request URL across a manual redirect so the final
+    /// response lands on the redirected location.
+    #[tokio::test]
+    async fn test_smart_redirect_follows_redirect() {
+        let mut server = mockito::Server::new_async().await;
+        // The inner reqwest client MUST use Policy::none() so that the manual
+        // redirect logic in `ManualRedirectRequestBuilder` is the one driving
+        // following (this is what `build_client` does in production).
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let _mock_redirect = server
+            .mock("GET", "/src")
+            .with_status(302)
+            .with_header("Location", "/dst")
+            .create_async()
+            .await;
+        let _mock_dst = server
+            .mock("GET", "/dst")
+            .with_status(200)
+            .with_header("Content-Length", "11")
+            .with_body("hello world")
+            .create_async()
+            .await;
+
+        let redirect_client = SmartRedirectClient::new(client, None, None, None, None, None, 10);
+        let url = Url::parse(&format!("{}/src", server.url())).unwrap();
+        let resp = redirect_client
+            .get(url, None)
+            .send()
+            .await
+            .expect("manual redirect should succeed");
+        assert_eq!(resp.status(), StatusCode::OK);
+        // `ManualRedirectRequestBuilder::send` must have advanced `self.url`
+        // to the redirected destination.
+        assert_eq!(resp.url().path(), "/dst");
+    }
+
+    /// Confirms `ManualRedirectRequestBuilder::send` honors `max_redirects`
+    /// (an infinite redirect loop must fail once the cap is exceeded, rather
+    /// than looping forever or silently succeeding).
+    #[tokio::test]
+    async fn test_smart_redirect_respects_max_redirects() {
+        let mut server = mockito::Server::new_async().await;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let _mock_loop = server
+            .mock("GET", "/loop")
+            .with_status(301)
+            .with_header("Location", "/loop")
+            .create_async()
+            .await;
+
+        let redirect_client = SmartRedirectClient::new(client, None, None, None, None, None, 2);
+        let url = Url::parse(&format!("{}/loop", server.url())).unwrap();
+        let err = redirect_client
+            .get(url, None)
+            .send()
+            .await
+            .expect_err("exceeding max_redirects should fail");
+        assert!(matches!(err.0, ReqwestResponseError::StatusCode(_)));
     }
 }
