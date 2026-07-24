@@ -15,7 +15,7 @@ pub async fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Re
         },
         248,
     );
-    let mut save_dir = config.save_dir.clone();
+    let mut save_dir = soft_canonicalize::soft_canonicalize(&config.save_dir)?;
     if config.parse_filename && !config.filename.is_empty() {
         let path = PathBuf::from(parse_filename_template(
             config.filename.clone(),
