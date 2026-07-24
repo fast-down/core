@@ -419,12 +419,12 @@ mod tests {
             data: Arc::from(mock_data.as_slice()),
             delay: Duration::from_millis(50),
         };
-        // 还原生产环境的重排层（CacheFilePusher = CacheSeqPusher<BufWriterPusher<...>>）：
-        // 并发乱序片先经 CacheSeqPusher 在 BTreeMap 中重排成连续 run，再连续喂给
-        // BufWriterPusher（只合并连续写入）。abort 时未 flush 的缓冲
-        // （CacheSeqPusher 的 BTreeMap + BufWriterPusher 的 BytesMut）整体丢弃，
-        // 内层 MemPusher 收不到任何字节 → written 确定 = 0。
-        // high_watermark 设为 source+1，确保 CacheSeqPusher 不主动 evict，全部持有。
+        // Restore the production reordering layer (CacheFilePusher = CacheSeqPusher<BufWriterPusher<...>>):
+        // concurrent out-of-order chunks are first reordered into contiguous runs inside CacheSeqPusher's BTreeMap,
+        // then fed contiguously to BufWriterPusher (which only coalesces contiguous writes). On abort, the
+        // un-flushed buffer (CacheSeqPusher's BTreeMap + BufWriterPusher's BytesMut) is discarded as a whole,
+        // so the inner MemPusher receives zero bytes -> written is deterministically == 0.
+        // high_watermark is set to source+1 so CacheSeqPusher never proactively evicts and holds everything.
         let inner = MemPusher::with_capacity(mock_data.len());
         let receive = inner.receive.clone();
         let buf = BufWriterPusher::new(inner, mock_data.len() + 1);
