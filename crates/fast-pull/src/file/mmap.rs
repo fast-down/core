@@ -2,6 +2,11 @@ use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::Bytes;
 use memmap2::MmapMut;
 
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+
 /// File pusher using memory-mapped I/O for zero-copy writes.
 ///
 /// Delegates writes to the OS via `MmapMut`. The file size is fixed at
@@ -27,7 +32,25 @@ impl MmapFilePusher {
     /// 2. Returns an error if `MmapMut::map_mut` fails.
     pub async fn new(file: &tokio::fs::File, size: u64, sync_all: bool) -> std::io::Result<Self> {
         file.set_len(size).await?;
-        let mmap = unsafe { MmapMut::map_mut(file)? };
+        // `MmapMut::map_mut` performs a synchronous `mmap()` syscall, but it only
+        // needs the raw fd/handle — it never takes ownership of the `File`. Moving
+        // just the raw descriptor (always `Send`) into the blocking pool satisfies
+        // `spawn_blocking`'s `'static` bound with zero extra `dup`/`CloneFile`.
+        // (`RawHandle` is a `*mut c_void` and `!Send` on Windows, so it is carried
+        // as `usize` and reconstructed inside the blocking closure.)
+        #[cfg(unix)]
+        let raw = file.as_raw_fd();
+        #[cfg(windows)]
+        let raw = file.as_raw_handle() as usize;
+        let mmap = tokio::task::spawn_blocking(move || unsafe {
+            #[cfg(unix)]
+            let desc = raw;
+            #[cfg(windows)]
+            let desc = raw as std::os::windows::io::RawHandle;
+            MmapMut::map_mut(desc)
+        })
+        .await
+        .map_err(std::io::Error::other)??;
         Ok(Self {
             mmap,
             sync_all,
