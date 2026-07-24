@@ -135,7 +135,7 @@ where
 ///
 /// Cheaply cloneable shared handle. The underlying download keeps running as
 /// long as **any** clone is alive, and is cancelled only once the last clone is
-/// dropped. An explicit [`DownloadResult::abort`] cancels immediately.
+/// dropped. An explicit [`DownloadResultInner::abort`] cancels immediately.
 ///
 /// `DownloadResult` derefs to [`DownloadResultInner`], so all session methods
 /// (`join`, `abort`, `set_threads`, `is_aborted`) and the `event_chain` field
