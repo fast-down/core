@@ -1,4 +1,6 @@
-use crate::{BufWriterPusher, CacheSeqPusher, ProgressEntry, ProgressListener, Pusher, file::StdFilePusher};
+use crate::{
+    BufWriterPusher, CacheSeqPusher, ProgressEntry, ProgressListener, Pusher, file::StdFilePusher,
+};
 use bytes::Bytes;
 
 /// File pusher combining [`CacheSeqPusher`] with [`StdFilePusher`].
