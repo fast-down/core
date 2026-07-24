@@ -27,7 +27,7 @@ pub fn download_single<R: Puller, W: Pusher>(
     const ID: usize = 0;
     let (tx, event_chain) = mpmc::unbounded_async();
     let tx_listener = tx.clone();
-    pusher.set_listener(Box::new(move |p: ProgressEntry| {
+    pusher.set_listener(Box::new(move |p| {
         let _ = tx_listener.send(Event::PushProgress(p));
     }));
     let (tx_push, rx_push) = spsc::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);

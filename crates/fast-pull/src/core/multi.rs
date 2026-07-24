@@ -34,7 +34,7 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     let (tx, event_chain) = mpmc::unbounded_async();
     let tx_listener = tx.clone();
-    pusher.set_listener(Box::new(move |p: ProgressEntry| {
+    pusher.set_listener(Box::new(move |p| {
         let _ = tx_listener.send(Event::PushProgress(p));
     }));
     let (tx_push, rx_push) =
