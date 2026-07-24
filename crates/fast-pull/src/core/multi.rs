@@ -263,7 +263,7 @@ mod tests {
     use vec::Vec;
 
     use super::*;
-    use crate::BufWriterPusher;
+    use crate::{BufWriterPusher, CacheSeqPusher};
     use crate::{
         Merge, ProgressEntry,
         mem::MemPusher,
@@ -366,10 +366,16 @@ mod tests {
     // Strengthened abort coverage.
     //
     // `BufWriterPusher` only forwards buffered bytes to its inner sink on
-    // `flush()` (or overflow). Wrapping `MemPusher` with capacity > source lets
-    // us prove that, on abort, the *un-flushed* buffer is discarded — i.e. the
-    // download stops strictly before the full source is written (the bare
-    // `MemPusher` test's `written <= source` would also pass if abort missed).
+    // `flush()` (or overflow). This concurrent test wraps `MemPusher` with
+    // `CacheSeqPusher<BufWriterPusher<_>>` — the same layering `CacheFilePusher`
+    // uses in production — so out-of-order chunks are reordered into a
+    // contiguous stream *before* `BufWriterPusher` coalesces them. On abort the
+    // un-flushed buffer (CacheSeqPusher's BTreeMap + BufWriterPusher's BytesMut)
+    // is discarded, so the inner sink sees strictly less than the full source
+    // (the bare `MemPusher` test's `written <= source` would also pass if abort
+    // missed). Layering also removes the old flakiness: without `CacheSeqPusher`
+    // the interleaved concurrent writes were all non-contiguous and every piece
+    // was flushed straight through, so a slow abort could drain the whole source.
     // -------------------------------------------------------------------------
 
     /// A [`Puller`] that stalls for `delay` before yielding any data, so a test
@@ -413,10 +419,16 @@ mod tests {
             data: Arc::from(mock_data.as_slice()),
             delay: Duration::from_millis(50),
         };
-        // Capacity > source: nothing reaches `MemPusher` until `flush()`.
+        // 还原生产环境的重排层（CacheFilePusher = CacheSeqPusher<BufWriterPusher<...>>）：
+        // 并发乱序片先经 CacheSeqPusher 在 BTreeMap 中重排成连续 run，再连续喂给
+        // BufWriterPusher（只合并连续写入）。abort 时未 flush 的缓冲
+        // （CacheSeqPusher 的 BTreeMap + BufWriterPusher 的 BytesMut）整体丢弃，
+        // 内层 MemPusher 收不到任何字节 → written 确定 = 0。
+        // high_watermark 设为 source+1，确保 CacheSeqPusher 不主动 evict，全部持有。
         let inner = MemPusher::with_capacity(mock_data.len());
         let receive = inner.receive.clone();
-        let pusher = BufWriterPusher::new(inner, mock_data.len() + 1);
+        let buf = BufWriterPusher::new(inner, mock_data.len() + 1);
+        let pusher = CacheSeqPusher::new(buf, mock_data.len() + 1, 0);
         #[allow(clippy::single_range_in_vec_init)]
         let download_chunks = [0..mock_data.len() as u64];
         let result = download_multi(
