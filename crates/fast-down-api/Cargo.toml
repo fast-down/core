@@ -46,7 +46,7 @@ path_helper = { version = "0.1.3", features = [
     "auto_ext",
     "sanitize",
     "tokio",
-], path = "../../../../path_helper" }
+] }
 chrono = "0.4.45"
 urlencoding = "2.1.3"
 soft-canonicalize = "0.5.6"

@@ -151,9 +151,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cc"
-version = "1.3.0"
+version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c89588d05638b5b4594a3348a2d6c20277e43a7f5c5202b05cc56888475a47b8"
+checksum = "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -396,7 +396,7 @@ dependencies = [
  "httpdate",
  "mockito",
  "parking_lot",
- "path_helper 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "path_helper",
  "reqwest",
  "serde",
  "thiserror",
@@ -421,7 +421,7 @@ dependencies = [
  "inherit-config",
  "mime_guess",
  "parking_lot",
- "path_helper 0.1.8",
+ "path_helper",
  "reqwest",
  "serde",
  "soft-canonicalize",
@@ -1183,19 +1183,12 @@ dependencies = [
 [[package]]
 name = "path_helper"
 version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eac8b6f3d03172dc1dac2005cfb2486d79d20f3e256383e14bcc6f23d73af9bc"
 dependencies = [
  "mime_guess",
  "sanitize-filename",
  "tokio",
-]
-
-[[package]]
-name = "path_helper"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eac8b6f3d03172dc1dac2005cfb2486d79d20f3e256383e14bcc6f23d73af9bc"
-dependencies = [
- "sanitize-filename",
 ]
 
 [[package]]
