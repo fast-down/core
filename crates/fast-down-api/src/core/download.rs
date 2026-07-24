@@ -1,5 +1,3 @@
-#![allow(clippy::too_many_lines)]
-
 use crate::{
     Config, DownloadState, Event, PartialConfig, ResumeError, Tx, WriteMethod,
     prefetch::prefetch,
@@ -154,6 +152,7 @@ impl DownloadHandle {
     /// *outside* `run_until_cancelled` so a mid-download cancel is handled by
     /// its own event loop + final state store, rather than being silently
     /// dropped by `run_until_cancelled`.
+    #[allow(clippy::too_many_lines)]
     async fn run(
         url: Url,
         mut config: Config,

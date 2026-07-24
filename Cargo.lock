@@ -419,7 +419,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "inherit-config",
- "mime_guess",
  "parking_lot",
  "path_helper",
  "reqwest",
