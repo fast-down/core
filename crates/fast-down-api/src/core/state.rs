@@ -1,5 +1,5 @@
 use crate::{Config, PartialConfig};
-use fast_down::{ProgressEntry, UrlInfo};
+use fast_down::{FileId, Merge, ProgressEntry, UrlInfo};
 use inherit_config::{ConfigLayer, InheritConfig};
 use path_helper::tokio::safe_replace;
 use std::{
@@ -12,13 +12,19 @@ use url::Url;
 
 #[derive(Debug, Clone, InheritConfig)]
 pub struct DownloadStateInner {
-    #[config(default = Url::parse("").unwrap())]
+    #[config(default = Url::parse("http://localhost/").unwrap())]
     pub url: Url,
     pub etag: Option<Arc<str>>,
     pub last_modified: Option<Arc<str>>,
     #[config(nest)]
     pub config: Config,
     pub progress: Vec<ProgressEntry>,
+    /// Total file size recorded at save time, compared against the server
+    /// `UrlInfo.size` during resume validation.
+    ///
+    /// An older `.fd` written without this field reads back as `None`, which
+    /// makes `validate` fail and safely fall back to a full re-download.
+    pub size: u64,
 }
 
 #[derive(Debug)]
@@ -38,6 +44,7 @@ impl DownloadState {
                 last_modified: Some(url_info.file_id.last_modified.clone()),
                 config: Some(config.clone()),
                 progress: Some(Vec::new()),
+                size: Some(url_info.size),
             },
             is_dirty: false,
             config_path: config_path.to_path_buf(),
@@ -76,6 +83,58 @@ impl DownloadState {
     pub fn update(&mut self, cb: impl FnOnce(&mut PartialDownloadStateInner)) {
         cb(&mut self.inner);
         self.is_dirty = true;
+    }
+
+    /// Check whether the server-side file is still the same one this state was
+    /// saved for, so a resumed download continues from the correct offset.
+    ///
+    /// The comparison requires the recorded `size` to match and (unless both
+    /// sides are missing identity headers) the `FileId` (`etag` +
+    /// `last_modified`) to be equal. Resumable downloads also require the
+    /// server to support range requests.
+    #[must_use]
+    pub fn validate(&self, info: &UrlInfo) -> bool {
+        if self.size != Some(info.size) {
+            return false;
+        }
+        if !info.fast_download {
+            return false;
+        }
+        let saved = FileId {
+            etag: self.etag.clone().flatten(),
+            last_modified: self.last_modified.clone().flatten(),
+        };
+        let both_missing = saved.etag.is_none()
+            && saved.last_modified.is_none()
+            && info.file_id.etag.is_none()
+            && info.file_id.last_modified.is_none();
+        if !both_missing && saved != info.file_id {
+            return false;
+        }
+        true
+    }
+
+    /// Merge a freshly-written byte range into the recorded progress.
+    ///
+    /// The progress list is the authoritative set of on-disk ranges; new ranges
+    /// are merged, de-duplicated and normalized. Marks the state dirty.
+    pub fn merge_progress(&mut self, range: ProgressEntry) {
+        self.inner
+            .progress
+            .get_or_insert_with(Vec::new)
+            .merge_progress(range);
+        self.is_dirty = true;
+    }
+
+    /// Total number of bytes already downloaded, derived from `progress`.
+    ///
+    /// This value is intentionally not persisted; it is recomputed on demand
+    /// from the recorded ranges.
+    #[must_use]
+    pub fn downloaded_bytes(&self) -> u64 {
+        self.progress
+            .as_ref()
+            .map_or(0, |v| v.iter().map(|r| r.end - r.start).sum())
     }
 }
 
