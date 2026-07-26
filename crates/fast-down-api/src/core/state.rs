@@ -46,7 +46,7 @@ impl DownloadState {
                 progress: Some(Vec::new()),
                 size: Some(url_info.size),
             },
-            is_dirty: false,
+            is_dirty: true,
             config_path: config_path.to_path_buf(),
         }
     }

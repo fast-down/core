@@ -1181,9 +1181,9 @@ dependencies = [
 
 [[package]]
 name = "path_helper"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eac8b6f3d03172dc1dac2005cfb2486d79d20f3e256383e14bcc6f23d73af9bc"
+checksum = "b1cf0534c5a78bd12bd2c8d9ad3231f22ef07fc2205b5093e63e40cab4c4a8fc"
 dependencies = [
  "mime_guess",
  "sanitize-filename",

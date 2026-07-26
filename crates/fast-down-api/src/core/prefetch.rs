@@ -12,7 +12,10 @@ pub async fn prefetch(
     let mut retry_count = 0;
     loop {
         match client.prefetch(url.clone()).await {
-            Ok(t) => break Some(t),
+            Ok(t) => {
+                let _ = tx.send(Event::Prefetch(t.0.clone()));
+                break Some(t);
+            }
             Err((e, t)) => {
                 let _ = tx.send(Event::PrefetchError(e));
                 retry_count += 1;

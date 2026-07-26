@@ -23,6 +23,7 @@ pub enum ResumeError {
 
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    Prefetch(UrlInfo),
     PrefetchError(ReqwestResponseError),
     GenPathError(std::io::Error),
     BuildClientError(reqwest::Error),
@@ -37,7 +38,6 @@ pub enum Event {
     Start {
         tmp_path: PathBuf,
         config_path: PathBuf,
-        url_info: UrlInfo,
         parsed_config: PartialConfig,
     },
     /// Emitted when a download resumes from a previously-saved state, before
