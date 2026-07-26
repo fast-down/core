@@ -1,8 +1,8 @@
 use crate::{
     UrlInfo,
     http::{
-        ContentDisposition, GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder,
-        HttpResponse,
+        ContentDisposition, GetRequestError, GetResponse, HttpClient, HttpError, HttpHeaders,
+        HttpRequestBuilder, HttpResponse,
     },
     url_info::FileId,
 };
@@ -11,7 +11,7 @@ use url::Url;
 
 /// Result of a prefetch operation: the metadata ([`UrlInfo`]) and the initial HTTP response.
 pub type PrefetchResult<Client> =
-    Result<(UrlInfo, GetResponse<Client>), (HttpError<Client>, Option<Duration>)>;
+    Result<(UrlInfo, GetResponse<Client>), (GetRequestError<Client>, Option<Duration>)>;
 
 /// Trait for fetching resource metadata (size, filename, range support) from a URL.
 ///
@@ -76,11 +76,7 @@ async fn prefetch_no_range<Client: HttpClient>(
     client: &Client,
     url: Url,
 ) -> PrefetchResult<Client> {
-    let resp = client
-        .get(url, None)
-        .send()
-        .await
-        .map_err(|(e, d)| (HttpError::Request(e), d))?;
+    let resp = client.get(url, None).send().await?;
     let headers = resp.headers();
     let size = headers
         .get("content-length")

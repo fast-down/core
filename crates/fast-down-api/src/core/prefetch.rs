@@ -14,7 +14,7 @@ pub async fn prefetch(
         match client.prefetch(url.clone()).await {
             Ok(t) => break Some(t),
             Err((e, t)) => {
-                let _ = tx.send(Event::PrefetchError(e.into()));
+                let _ = tx.send(Event::PrefetchError(e));
                 retry_count += 1;
                 if retry_count >= config.retry_times {
                     return None;

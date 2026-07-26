@@ -1,5 +1,5 @@
 use crate::PartialConfig;
-use fast_down::{ProgressEntry, UrlInfo, WorkerId};
+use fast_down::{ProgressEntry, UrlInfo, WorkerId, reqwest::ReqwestResponseError};
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 
@@ -23,7 +23,7 @@ pub enum ResumeError {
 
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
-    PrefetchError(anyhow::Error),
+    PrefetchError(ReqwestResponseError),
     GenPathError(std::io::Error),
     BuildClientError(reqwest::Error),
     BuildPusherError(std::io::Error),
