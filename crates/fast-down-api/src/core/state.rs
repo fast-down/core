@@ -100,11 +100,7 @@ impl DownloadState {
         if !info.fast_download {
             return false;
         }
-        let saved = FileId {
-            etag: self.etag.clone().flatten(),
-            last_modified: self.last_modified.clone().flatten(),
-        };
-        if saved != info.file_id {
+        if self.file_id() != info.file_id {
             return false;
         }
         true
@@ -131,6 +127,14 @@ impl DownloadState {
         self.progress
             .as_ref()
             .map_or(0, |v| v.iter().map(|r| r.end - r.start).sum())
+    }
+
+    #[must_use]
+    pub fn file_id(&self) -> FileId {
+        FileId {
+            etag: self.etag.clone().flatten(),
+            last_modified: self.last_modified.clone().flatten(),
+        }
     }
 }
 

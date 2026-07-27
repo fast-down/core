@@ -423,7 +423,10 @@ async fn test_file_changed_resume_reports_error() {
             _ => None,
         })
         .expect("expected Event::ResumeError");
-    assert_eq!(err, ResumeError::FileChanged);
+    assert!(
+        matches!(err, ResumeError::FileChanged { .. }),
+        "expected Event::ResumeError(ResumeError::FileChanged), got {err:?}"
+    );
 
     assert!(
         !events.iter().any(|e| matches!(e, Event::Renamed(_))),

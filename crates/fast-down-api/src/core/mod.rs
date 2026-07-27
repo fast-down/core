@@ -1,6 +1,7 @@
 mod download;
-pub mod prefetch;
+mod prefetch;
 mod state;
 
 pub use download::*;
+pub use prefetch::*;
 pub use state::*;

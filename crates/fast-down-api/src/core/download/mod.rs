@@ -1,29 +1,17 @@
 use crate::{
-    Config, DownloadState, Event, PartialConfig, ResumeError, Tx, WriteMethod,
-    prefetch::prefetch,
-    tx_err,
+    Config, DownloadState, Event, PartialConfig, ResumeError, Tx, prefetch, tx_err,
     utils::{ForceSendExt, build_header, gen_path},
 };
 use fast_down::{
-    BoxPusher, Merge, UrlInfo,
-    fast_puller::{FastDownPuller, FastDownPullerOptions, build_client},
-    file::{CacheFilePusher, MmapFilePusher},
-    handle::SharedHandle,
-    invert,
-    multi::download_multi,
-    reqwest::SmartRedirectClient,
-    single::download_single,
+    Total, fast_puller::build_client, handle::SharedHandle, invert, multi::download_multi,
+    reqwest::SmartRedirectClient, single::download_single,
 };
 use inherit_config::ConfigLayer;
-use parking_lot::Mutex;
-use path_helper::{IterStemExt, tokio::gen_unique_path};
-use reqwest::Response;
+use path_helper::IterStemExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::{
-    fs::{self, File, OpenOptions},
-    task::JoinError,
-};
+use tokio::fs;
+use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -32,56 +20,13 @@ const STATE_STORE_BYTES: u64 = 16 * 1024 * 1024;
 /// Persist the download state after at least this many `PushProgress` events.
 const STATE_STORE_EVENTS: usize = 512;
 
-/// Outcome of trying to acquire a writable `.part` file + the matching resume state.
-#[allow(clippy::large_enum_variant)]
-enum Acquire {
-    /// A file is ready to write, optionally carrying a previously-saved resume state.
-    ///
-    /// The large fields are boxed so the variant stays small (`large_enum_variant`).
-    Ready {
-        file: File,
-        effective: Config,
-        parsed: PartialConfig,
-        resume_state: Option<DownloadState>,
-    },
-    /// Unique-name collision: the caller should regenerate the stem and retry.
-    CollisionRetry,
-    /// An unrecoverable error was already reported via `tx`; the caller should stop.
-    Abort,
-}
+mod acquire;
+mod finalize;
+mod pipeline;
 
-/// Outcome of probing an existing `.part`/`.fd` pair for resume eligibility.
-///
-/// The classification is pure (see [`classify_resume`]); this enum only names
-/// the three possible results so the resume *contract* lives in one place.
-#[allow(clippy::large_enum_variant)]
-enum ResumeProbe {
-    /// File + state both present and the state still matches the remote file.
-    Valid { file: File, state: DownloadState },
-    /// An explicit resume was requested but the pair is unusable (stale or
-    /// missing); the caller must report and stop.
-    GiveUp(ResumeError),
-    /// Stale or missing state on a plain download; the caller drops the partial
-    /// files and opens fresh.
-    Discard,
-}
-
-/// Borrow the shared `OpenOptions` presets used to open the `.part` file.
-fn open_existing() -> OpenOptions {
-    let mut o = OpenOptions::new();
-    o.read(true).write(true).truncate(false).create(false);
-    o
-}
-fn open_create() -> OpenOptions {
-    let mut o = OpenOptions::new();
-    o.read(true).write(true).truncate(false).create(true);
-    o
-}
-fn open_create_new() -> OpenOptions {
-    let mut o = OpenOptions::new();
-    o.read(true).write(true).truncate(false).create_new(true);
-    o
-}
+use acquire::{Acquire, try_acquire_target};
+use finalize::finalize;
+use pipeline::build_pipeline;
 
 pub struct DownloadHandle {
     handle: SharedHandle<()>,
@@ -220,20 +165,13 @@ impl DownloadHandle {
         let Some((info, resp)) = prefetch(&url, &config, &client, &tx).await else {
             return;
         };
-
-        // Resolve whether we are resuming from an explicit temp file (resume())
-        // or starting a fresh download (download()). Never a synchronous
-        // `Path::exists()`, which would block the executor on a slow mount.
-        let (tmp_path, tmp_exists) = match tmp_path {
-            Some(path) => {
-                if fs::try_exists(&path).await.unwrap_or(false) {
-                    config.resume = true;
-                    (Some(path), true)
-                } else {
-                    (None, false)
-                }
-            }
-            None => (None, false),
+        let tmp_path = if let Some(path) = tmp_path
+            && fs::try_exists(&path).await.unwrap_or(false)
+        {
+            config.resume = true;
+            Some(path)
+        } else {
+            None
         };
 
         // Resolve the destination path + whether we run in unique-name mode.
@@ -244,11 +182,15 @@ impl DownloadHandle {
             (p, !config.overwrite)
         };
 
-        if tmp_exists && !info.fast_download {
+        if tmp_path.is_some() && !info.fast_download {
             let _ = tx.send(Event::ResumeError(ResumeError::NotResumable));
             return;
         }
         let can_resume = config.resume && info.fast_download;
+        // `explicit_resume` is true only when this is an explicit `resume()` call
+        // (a `tmp_path` was supplied and the `.part` exists); a plain `download()`
+        // is `false` and must silently fall back instead of erroring.
+        let explicit_resume = tmp_path.is_some();
 
         // `resp` is consumed exactly once, by `build_pipeline` on the iteration
         // that actually starts a transfer (collision retries `continue` before it).
@@ -257,18 +199,9 @@ impl DownloadHandle {
             let cfg = final_path.with_added_extension("fd");
 
             // ---- 1. Resume from / open the `.part` file (handles unique collisions) ----
-            let acquired = try_acquire_target(
-                &tx,
-                can_resume,
-                tmp_exists,
-                unique,
-                &info,
-                &partial_config,
-                &config,
-                &tmp,
-                &cfg,
-            )
-            .await;
+            let acquired =
+                try_acquire_target(&tx, can_resume, explicit_resume, unique, &info, &partial_config, &tmp, &cfg)
+                    .await;
             let (file, effective, parsed, resume_state) = match acquired {
                 Acquire::CollisionRetry => continue,
                 Acquire::Abort => return,
@@ -363,7 +296,7 @@ impl DownloadHandle {
             while let Ok(e) = res.event_chain.recv().await {
                 if let fast_down::Event::PushProgress(range) = &e {
                     store_events += 1;
-                    store_bytes += range.end - range.start;
+                    store_bytes += range.total();
                     state.merge_progress(range.clone());
                 }
                 let _ = match e {
@@ -402,6 +335,7 @@ impl DownloadHandle {
             // identity. Called unconditionally even when cancelled before the
             // transfer finished.
             let _ = state.store().await;
+
             // If the download was cancelled, do NOT rename the `.part` and do NOT
             // remove the `.fd` state file: keep both so a later `download()`/
             // `resume()` can continue from where it left off (design doc §8).
@@ -412,214 +346,4 @@ impl DownloadHandle {
             return;
         }
     }
-}
-
-/// Try to resume from an existing `.part`/`.fd` pair, or open a fresh `.part`
-/// file. Returns:
-///
-/// - [`Acquire::Ready`] with a writable `file` + the effective config + the
-///   resume state (if any);
-/// - [`Acquire::CollisionRetry`] in unique mode when `create_new` failed
-///   (treats the failure as a name collision and asks the caller to retry);
-/// - [`Acquire::Abort`] when an unrecoverable error has already been reported
-///   through `tx` (e.g. a `resume()` contract violation, or a non-unique open
-///   failure), and the caller should stop.
-///
-/// Classify the result of probing an existing `.part`/`.fd` pair for resume.
-///
-/// Pure: no I/O, no event emission. The two probe results (`open` the `.part`,
-/// `load` the `.fd`) map onto one of three outcomes so the resume *contract*
-/// lives in a single, unit-testable place. The outcomes are
-/// [`ResumeProbe::Valid`] (file + state present and still match the remote
-/// file; resume from it), [`ResumeProbe::GiveUp`] (an explicit resume was
-/// requested but the pair is unusable; report and stop), and
-/// [`ResumeProbe::Discard`] (stale or missing state on a plain download; drop
-/// the partial files and open fresh).
-fn classify_resume<E>(
-    open_res: std::io::Result<File>,
-    load_res: Result<DownloadState, E>,
-    tmp_exists: bool,
-    info: &UrlInfo,
-) -> ResumeProbe {
-    match (open_res, load_res) {
-        (Ok(file), Ok(state)) if state.validate(info) => ResumeProbe::Valid { file, state },
-        (Ok(_), Ok(_)) if tmp_exists => ResumeProbe::GiveUp(ResumeError::FileChanged),
-        _ if tmp_exists => ResumeProbe::GiveUp(ResumeError::NoStateFile),
-        _ => ResumeProbe::Discard,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn try_acquire_target(
-    tx: &Tx,
-    can_resume: bool,
-    tmp_exists: bool,
-    unique: bool,
-    info: &UrlInfo,
-    partial_config: &PartialConfig,
-    config: &Config,
-    tmp: &Path,
-    cfg: &Path,
-) -> Acquire {
-    // ---- 1. Try to resume from an existing `.part`/`.fd` pair ----
-    if can_resume {
-        let opener = open_existing();
-        let (open_res, load_res) = tokio::join!(opener.open(tmp), DownloadState::load(cfg));
-        match classify_resume(open_res, load_res, tmp_exists, info) {
-            ResumeProbe::Valid { file, state } => {
-                let mut pc = partial_config.clone();
-                if let Some(c) = &state.config {
-                    pc.inherit_from(c);
-                }
-                let parsed = pc.clone();
-                let mut effective = pc.build();
-                // Fold the saved progress into the engine's "already downloaded"
-                // set so it only fetches the remaining bytes. This is the other
-                // half of reconstructing `effective` from the resume state; the
-                // `config` half above comes from `state.config`.
-                if let Some(progress) = state.progress.clone() {
-                    for p in progress {
-                        effective.downloaded_chunk.merge_progress(p);
-                    }
-                }
-                return Acquire::Ready {
-                    file,
-                    effective,
-                    parsed,
-                    resume_state: Some(state),
-                };
-            }
-            ResumeProbe::GiveUp(err) => {
-                // Explicit resume target but the `.part`/`.fd` pair is unusable
-                // (stale or missing): report and stop rather than silently
-                // re-downloading (resume contract).
-                let _ = tx.send(Event::ResumeError(err));
-                return Acquire::Abort;
-            }
-            ResumeProbe::Discard => {
-                // Stale or missing state on a plain download: drop the partial
-                // files and fall through to a fresh open below.
-                let _ = fs::remove_file(tmp).await;
-                let _ = fs::remove_file(cfg).await;
-            }
-        }
-    }
-
-    // ---- 2. Fresh open (also the fall-through after discarding a stale state) ----
-    let f = if unique {
-        open_create_new().open(tmp).await.ok()
-    } else {
-        match open_create().open(tmp).await {
-            Ok(f) => Some(f),
-            Err(e) => {
-                let _ = tx.send(Event::BuildPusherError(e));
-                return Acquire::Abort;
-            }
-        }
-    };
-    f.map_or_else(
-        || Acquire::CollisionRetry,
-        |file| Acquire::Ready {
-            file,
-            effective: config.clone(),
-            parsed: partial_config.clone(),
-            resume_state: None,
-        },
-    )
-}
-
-/// Build the puller + pusher inside a `force_send` + `run_until_cancelled`
-/// future (not provably `Send`; see `run` doc). Yields `None` on a build error
-/// (the error event is already sent through `tx`) or on cancel-before-transfer;
-/// the caller is responsible for persisting state and stopping.
-async fn build_pipeline(
-    url: &Url,
-    effective: &Config,
-    info: &UrlInfo,
-    file: File,
-    resp: Response,
-    cancel_token: CancellationToken,
-    tx: &Tx,
-) -> Option<(FastDownPuller, BoxPusher)> {
-    let ct = cancel_token;
-    let resp = Some(Arc::new(Mutex::new(Some(resp))));
-    let built = ct
-        .run_until_cancelled(async move {
-            let puller = FastDownPuller::new(FastDownPullerOptions {
-                url: url.clone(),
-                headers: build_header(&effective.headers).into(),
-                proxy: effective.proxy.as_deref(),
-                accept_invalid_certs: effective.accept_invalid_certs,
-                accept_invalid_hostnames: effective.accept_invalid_hostnames,
-                cookie_store: effective.cookie_store,
-                file_id: info.file_id.clone(),
-                resp,
-                available_ips: effective.local_address.clone().into(),
-                max_redirects: effective.max_redirects,
-            })
-            .map_err(Event::BuildClientError)?;
-            let pusher = if cfg!(target_pointer_width = "64")
-                && info.fast_download
-                && effective.write_method == WriteMethod::Mmap
-            {
-                MmapFilePusher::new(&file, info.size, effective.sync_all)
-                    .await
-                    .map(BoxPusher::new)
-            } else {
-                CacheFilePusher::new(
-                    file,
-                    info.size,
-                    effective.sync_all,
-                    effective.cache_high_watermark,
-                    effective.cache_low_watermark,
-                    effective.write_buffer_size,
-                )
-                .await
-                .map(BoxPusher::new)
-            }
-            .map_err(Event::BuildPusherError)?;
-            Ok::<_, Event>((puller, pusher))
-        })
-        .await;
-    match built {
-        Some(Ok(b)) => Some(b),
-        Some(Err(e)) => {
-            let _ = tx.send(e);
-            None
-        }
-        None => None,
-    }
-}
-
-/// Rename the finished `.part` into place and drop the `.fd` state file.
-///
-/// In unique mode, a fresh unique destination is reserved right before rename
-/// via `gen_unique_path` (atomic `create_new`), closing the TOCTOU gap where
-/// the final file could have been created by someone else during the download.
-/// On any failure the relevant error event is sent through `tx`.
-async fn finalize(tx: &Tx, unique: bool, tmp: &Path, cfg: &Path, final_path: &Path) {
-    let dest = if unique {
-        match gen_unique_path(final_path).await {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = tx.send(Event::GenPathError(e));
-                return;
-            }
-        }
-    } else {
-        final_path.to_path_buf()
-    };
-    if let Err(e) = fs::rename(tmp, &dest).await {
-        // Best-effort: drop the empty placeholder we just reserved so a failed
-        // rename doesn't leave an orphan `xxx (1).mp4` behind.
-        if unique {
-            let _ = fs::remove_file(&dest).await;
-        }
-        let _ = tx.send(Event::RenameFailed(e));
-        return;
-    }
-    let _ = tx.send(Event::Renamed(dest));
-    // Success: the download is complete and renamed, so the state file is no
-    // longer needed. Best-effort cleanup only (kept on cancel).
-    let _ = fs::remove_file(cfg).await;
 }

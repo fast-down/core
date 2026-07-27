@@ -1,5 +1,5 @@
 use crate::PartialConfig;
-use fast_down::{ProgressEntry, UrlInfo, WorkerId, reqwest::ReqwestResponseError};
+use fast_down::{FileId, ProgressEntry, UrlInfo, WorkerId, reqwest::ReqwestResponseError};
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 
@@ -15,7 +15,12 @@ pub enum ResumeError {
     NoStateFile,
     /// The remote file changed (size / etag / last-modified mismatch), so resuming would corrupt the output.
     #[error("remote file changed, cannot resume")]
-    FileChanged,
+    FileChanged {
+        local_file_id: FileId,
+        local_file_size: u64,
+        remote_file_id: FileId,
+        remote_file_size: u64,
+    },
     /// The server does not support resumable (range) downloads.
     #[error("server does not support resumable download")]
     NotResumable,
