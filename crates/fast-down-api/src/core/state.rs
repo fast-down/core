@@ -94,16 +94,7 @@ impl DownloadState {
     /// server to support range requests.
     #[must_use]
     pub fn validate(&self, info: &UrlInfo) -> bool {
-        if self.size != Some(info.size) {
-            return false;
-        }
-        if !info.fast_download {
-            return false;
-        }
-        if self.file_id() != info.file_id {
-            return false;
-        }
-        true
+        info.fast_download && self.size == Some(info.size) && self.file_id() == info.file_id
     }
 
     /// Merge a freshly-written byte range into the recorded progress.
