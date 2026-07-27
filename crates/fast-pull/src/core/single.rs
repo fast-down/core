@@ -155,7 +155,7 @@ mod tests {
 
         let mut pull_progress: Vec<ProgressEntry> = Vec::new();
         let mut push_progress: Vec<ProgressEntry> = Vec::new();
-        while let Ok(e) = result.event_chain.recv().await {
+        while let Ok(e) = result.event_chain().recv().await {
             match e {
                 Event::PullProgress(_, p) => pull_progress.merge_progress(p),
                 Event::PushProgress(p) => push_progress.merge_progress(p),
@@ -284,7 +284,7 @@ mod tests {
         // event). This lands reliably before completion because the puller is
         // slow.
         let mut aborted = false;
-        while let Ok(e) = result.event_chain.recv().await {
+        while let Ok(e) = result.event_chain().recv().await {
             if matches!(e, Event::Pushing(_, _)) {
                 result.abort();
                 assert!(result.is_aborted());
@@ -339,7 +339,7 @@ mod tests {
         );
 
         let mut aborted = false;
-        while let Ok(e) = result.event_chain.recv().await {
+        while let Ok(e) = result.event_chain().recv().await {
             if matches!(e, Event::Pushing(_, _)) {
                 result.abort();
                 assert!(result.is_aborted());

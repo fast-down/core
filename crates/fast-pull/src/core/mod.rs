@@ -3,7 +3,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crossfire::{MAsyncRx, mpmc};
 use fast_steal::{Executor, Handle, TaskQueue};
 use std::fmt;
-use std::ops::Deref;
 use std::sync::{Arc, OnceLock, Weak};
 use std::thread::Thread;
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
@@ -21,13 +20,13 @@ pub mod single;
 /// cancellation happens, giving `DownloadResult` `Arc`-style "last owner gone →
 /// release" semantics: the download keeps running as long as any handle is
 /// alive, and is cancelled only when the final one is dropped.
-pub struct DownloadResultInner<E, PullError, PushError>
+struct DownloadResultInner<E, PullError, PushError>
 where
     E: Executor + Send + Sync,
     PullError: Send + Unpin + 'static,
     PushError: Send + Unpin + 'static,
 {
-    pub event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
+    event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
     handle: SharedHandle<()>,
     abort_handles: Option<Arc<[AbortHandle]>>,
     task_queue: Option<(Weak<E>, TaskQueue<E::Handle>)>,
@@ -163,19 +162,6 @@ where
     }
 }
 
-impl<E, PullError, PushError> Deref for DownloadResult<E, PullError, PushError>
-where
-    E: Executor + Send + Sync,
-    PullError: Send + Unpin + 'static,
-    PushError: Send + Unpin + 'static,
-{
-    type Target = DownloadResultInner<E, PullError, PushError>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
 impl<E, PullError, PushError> DownloadResult<E, PullError, PushError>
 where
     E: Executor + Send + Sync,
@@ -200,5 +186,34 @@ where
                 push_worker,
             }),
         }
+    }
+
+    #[must_use]
+    pub fn event_chain(&self) -> &MAsyncRx<mpmc::List<Event<PullError, PushError>>> {
+        &self.inner.event_chain
+    }
+
+    /// # Errors
+    /// Returns `Arc<JoinError>` if the writer thread exits unexpectedly
+    pub async fn join(&self) -> Result<(), Arc<JoinError>> {
+        self.inner.join().await
+    }
+
+    /// Cancel all workers immediately.
+    ///
+    /// Safe to call multiple times and safe to call while other clones of the
+    /// owning [`DownloadResult`] are still alive. The implicit drop-based
+    /// cancellation (on the last clone) becomes a no-op once this has run.
+    pub fn abort(&self) {
+        self.inner.abort();
+    }
+
+    pub fn set_threads(&self, threads: usize, min_chunk_size: u64) {
+        self.inner.set_threads(threads, min_chunk_size);
+    }
+
+    #[must_use]
+    pub fn is_aborted(&self) -> bool {
+        self.inner.is_aborted()
     }
 }
