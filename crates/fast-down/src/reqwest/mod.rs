@@ -486,7 +486,7 @@ mod tests {
         // `PushProgress` now flows on the same `event_chain` as the engine events
         // (the sink's listener emits it the moment data is actually written), so a
         // single drain collects both pull and push progress.
-        while let Ok(e) = result.event_chain.recv().await {
+        while let Ok(e) = result.event_chain().recv().await {
             match e {
                 Event::PullProgress(_, p) => pull_progress.merge_progress(p),
                 Event::PushProgress(p) => push_progress.merge_progress(p),
@@ -541,7 +541,7 @@ mod tests {
         // `PushProgress` now flows on the same `event_chain` as the engine events
         // (the sink's listener emits it the moment data is actually written), so a
         // single drain collects both pull and push progress.
-        while let Ok(e) = result.event_chain.recv().await {
+        while let Ok(e) = result.event_chain().recv().await {
             match e {
                 Event::PullProgress(_, p) => pull_progress.merge_progress(p),
                 Event::PushProgress(p) => push_progress.merge_progress(p),
