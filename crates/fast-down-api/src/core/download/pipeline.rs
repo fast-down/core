@@ -1,4 +1,4 @@
-use crate::{Config, Ctx, Event, WriteMethod, utils::build_header};
+use crate::{Config, Event, Tx, WriteMethod, core::download::open_existing, utils::build_header};
 use fast_down::{
     BoxPusher, UrlInfo,
     fast_puller::{FastDownPuller, FastDownPullerOptions},
@@ -6,8 +6,8 @@ use fast_down::{
 };
 use parking_lot::Mutex;
 use reqwest::Response;
-use std::sync::Arc;
-use tokio::fs::File;
+use std::{path::Path, sync::Arc};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 pub async fn build_pipeline(
@@ -15,12 +15,12 @@ pub async fn build_pipeline(
     config: &Config,
     info: &UrlInfo,
     resp: Response,
-    file: File,
-    ctx: &Ctx,
+    path: &Path,
+    tx: &Tx,
+    token: &CancellationToken,
 ) -> Option<(FastDownPuller, BoxPusher)> {
     let resp = Some(Arc::new(Mutex::new(Some(resp))));
-    let built = ctx
-        .token
+    let built = token
         .run_until_cancelled(async move {
             let puller = FastDownPuller::new(FastDownPullerOptions {
                 url: url.clone(),
@@ -35,6 +35,11 @@ pub async fn build_pipeline(
                 max_redirects: config.max_redirects,
             })
             .map_err(Event::BuildClientError)?;
+
+            let file = open_existing()
+                .open(path)
+                .await
+                .map_err(Event::BuildPusherError)?;
             let pusher = if cfg!(target_pointer_width = "64")
                 && info.fast_download
                 && config.write_method == WriteMethod::Mmap
@@ -61,7 +66,7 @@ pub async fn build_pipeline(
     match built {
         Some(Ok(b)) => Some(b),
         Some(Err(e)) => {
-            let _ = ctx.tx.send(e);
+            let _ = tx.send(e);
             None
         }
         None => None,

@@ -1,5 +1,5 @@
 use fast_down::{Merge, ProgressEntry, Proxy};
-use inherit_config::{ConfigLayer, InheritConfig};
+use inherit_config::InheritConfig;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::IpAddr, path::PathBuf, time::Duration};
 
@@ -170,23 +170,9 @@ pub struct Config {
 }
 
 impl PartialConfig {
-    /// Build the effective [`Config`], folding previously-saved resume progress
-    /// into `downloaded_chunk` so the engine only fetches the remaining bytes.
-    ///
-    /// This is the *single* place where resume progress enters the resolved
-    /// config. Callers must go through it instead of `build()` followed by a
-    /// separate `merge_progress`, so `effective` stays a pure function of the
-    /// partial config + the saved progress — no post-`build` mutation, and the
-    /// config layer (`self`) and the resolved `Config` can never drift on
-    /// progress because the layer simply does not carry it.
-    #[must_use]
-    pub fn build_seeded(&self, progress: Option<&[ProgressEntry]>) -> Config {
-        let mut c = self.clone().build();
-        if let Some(p) = progress {
-            for e in p {
-                c.downloaded_chunk.merge_progress(e.clone());
-            }
-        }
-        c
+    pub fn merge_progress(&mut self, progress: ProgressEntry) {
+        self.downloaded_chunk
+            .get_or_insert_default()
+            .merge_progress(progress);
     }
 }
