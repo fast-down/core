@@ -2,6 +2,7 @@
 
 [![GitHub last commit](https://img.shields.io/github/last-commit/fast-down/core/main)](https://github.com/fast-down/core/commits/main)
 [![Test](https://github.com/fast-down/core/workflows/Test/badge.svg)](https://github.com/fast-down/core/actions)
+[![codecov](https://codecov.io/gh/fast-down/core/branch/main/graph/badge.svg)](https://codecov.io/gh/fast-down/core)
 [![Latest version](https://img.shields.io/crates/v/fast-down-api.svg)](https://crates.io/crates/fast-down-api)
 [![Documentation](https://docs.rs/fast-down-api/badge.svg)](https://docs.rs/fast-down-api)
 [![License](https://img.shields.io/crates/l/fast-down-api.svg)](https://github.com/fast-down/core/blob/main/LICENSE)
@@ -90,16 +91,16 @@ token.cancel(); // stops fetching, keeps .part / .fd so you can resume later
 
 ## API overview
 
-| Item | Purpose |
-| --- | --- |
-| [`DownloadHandle::download`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadHandle.html#method.download) | Start a download; auto-resume when a valid `.fd` + `.part` exist, else fresh. |
-| [`DownloadHandle::resume`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadHandle.html#method.resume) | Resume a specific `.part` file; hard-error (`Event::ResumeError`) if it can't. |
-| [`DownloadHandle::join`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadHandle.html#method.join) | Await the detached task; errors if the worker panicked. |
-| [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html) | Create the `(Tx, Rx)` event channel. |
-| [`create_cancellation_token`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_cancellation_token.html) | Create a `CancellationToken` for cooperative cancellation. |
-| [`Event`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.Event.html) | The event enum delivered over the channel. |
-| [`PartialConfig`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.PartialConfig.html) | Layered, optional configuration for a download. |
-| [`StateError`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StateError.html) | Errors surfaced via `Event::ResumeError`. |
+| Item                                                                                                                        | Purpose                                                                        |
+| --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| [`DownloadHandle::download`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadHandle.html#method.download) | Start a download; auto-resume when a valid `.fd` + `.part` exist, else fresh.  |
+| [`DownloadHandle::resume`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadHandle.html#method.resume)     | Resume a specific `.part` file; hard-error (`Event::ResumeError`) if it can't. |
+| [`DownloadHandle::join`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadHandle.html#method.join)         | Await the detached task; errors if the worker panicked.                        |
+| [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html)                               | Create the `(Tx, Rx)` event channel.                                           |
+| [`create_cancellation_token`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_cancellation_token.html)         | Create a `CancellationToken` for cooperative cancellation.                     |
+| [`Event`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.Event.html)                                               | The event enum delivered over the channel.                                     |
+| [`PartialConfig`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.PartialConfig.html)                             | Layered, optional configuration for a download.                                |
+| [`StateError`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StateError.html)                                     | Errors surfaced via `Event::ResumeError`.                                      |
 
 ## How resume works
 
