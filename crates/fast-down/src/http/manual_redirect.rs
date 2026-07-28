@@ -135,24 +135,42 @@ mod tests {
 
     #[test]
     fn parse_all_tokens_case_insensitive() {
-        assert_eq!(ReferrerPolicy::parse("no-referrer"), Some(ReferrerPolicy::NoReferrer));
-        assert_eq!(ReferrerPolicy::parse("NO-REFERRER"), Some(ReferrerPolicy::NoReferrer));
+        assert_eq!(
+            ReferrerPolicy::parse("no-referrer"),
+            Some(ReferrerPolicy::NoReferrer)
+        );
+        assert_eq!(
+            ReferrerPolicy::parse("NO-REFERRER"),
+            Some(ReferrerPolicy::NoReferrer)
+        );
         assert_eq!(
             ReferrerPolicy::parse("No-Referrer-When-Downgrade"),
             Some(ReferrerPolicy::NoReferrerWhenDowngrade)
         );
-        assert_eq!(ReferrerPolicy::parse("origin"), Some(ReferrerPolicy::Origin));
+        assert_eq!(
+            ReferrerPolicy::parse("origin"),
+            Some(ReferrerPolicy::Origin)
+        );
         assert_eq!(
             ReferrerPolicy::parse("origin-when-cross-origin"),
             Some(ReferrerPolicy::OriginWhenCrossOrigin)
         );
-        assert_eq!(ReferrerPolicy::parse("same-origin"), Some(ReferrerPolicy::SameOrigin));
-        assert_eq!(ReferrerPolicy::parse("strict-origin"), Some(ReferrerPolicy::StrictOrigin));
+        assert_eq!(
+            ReferrerPolicy::parse("same-origin"),
+            Some(ReferrerPolicy::SameOrigin)
+        );
+        assert_eq!(
+            ReferrerPolicy::parse("strict-origin"),
+            Some(ReferrerPolicy::StrictOrigin)
+        );
         assert_eq!(
             ReferrerPolicy::parse("strict-origin-when-cross-origin"),
             Some(ReferrerPolicy::StrictOriginWhenCrossOrigin)
         );
-        assert_eq!(ReferrerPolicy::parse("unsafe-url"), Some(ReferrerPolicy::UnsafeUrl));
+        assert_eq!(
+            ReferrerPolicy::parse("unsafe-url"),
+            Some(ReferrerPolicy::UnsafeUrl)
+        );
     }
 
     #[test]
@@ -184,11 +202,17 @@ mod tests {
         let a_http = u("http://a.com/r");
 
         // None / NoReferrerWhenDowngrade (default)
-        assert_eq!(compute_referer(None, &a, &b), Some("https://a.com/p".to_string()));
+        assert_eq!(
+            compute_referer(None, &a, &b),
+            Some("https://a.com/p".to_string())
+        );
         assert_eq!(compute_referer(None, &a, &a_http), None);
 
         // NoReferrer
-        assert_eq!(compute_referer(Some(ReferrerPolicy::NoReferrer), &a, &b), None);
+        assert_eq!(
+            compute_referer(Some(ReferrerPolicy::NoReferrer), &a, &b),
+            None
+        );
 
         // Origin
         assert_eq!(
@@ -215,14 +239,20 @@ mod tests {
             compute_referer(Some(ReferrerPolicy::SameOrigin), &a, &a),
             Some("https://a.com/p".to_string())
         );
-        assert_eq!(compute_referer(Some(ReferrerPolicy::SameOrigin), &a, &b), None);
+        assert_eq!(
+            compute_referer(Some(ReferrerPolicy::SameOrigin), &a, &b),
+            None
+        );
 
         // StrictOrigin
         assert_eq!(
             compute_referer(Some(ReferrerPolicy::StrictOrigin), &a, &a),
             Some("https://a.com".to_string())
         );
-        assert_eq!(compute_referer(Some(ReferrerPolicy::StrictOrigin), &a, &a_http), None);
+        assert_eq!(
+            compute_referer(Some(ReferrerPolicy::StrictOrigin), &a, &a_http),
+            None
+        );
 
         // StrictOriginWhenCrossOrigin
         assert_eq!(
@@ -234,7 +264,11 @@ mod tests {
             Some("https://a.com".to_string())
         );
         assert_eq!(
-            compute_referer(Some(ReferrerPolicy::StrictOriginWhenCrossOrigin), &a, &a_http),
+            compute_referer(
+                Some(ReferrerPolicy::StrictOriginWhenCrossOrigin),
+                &a,
+                &a_http
+            ),
             None
         );
 
@@ -252,12 +286,20 @@ mod tests {
         let same = u("https://user:pass@a.com/r#x");
         // cross-origin -> only origin (no userinfo/fragment)
         assert_eq!(
-            compute_referer(Some(ReferrerPolicy::OriginWhenCrossOrigin), &with_auth, &other),
+            compute_referer(
+                Some(ReferrerPolicy::OriginWhenCrossOrigin),
+                &with_auth,
+                &other
+            ),
             Some("https://a.com".to_string())
         );
         // same-origin -> full referer with userinfo & fragment stripped
         assert_eq!(
-            compute_referer(Some(ReferrerPolicy::OriginWhenCrossOrigin), &with_auth, &same),
+            compute_referer(
+                Some(ReferrerPolicy::OriginWhenCrossOrigin),
+                &with_auth,
+                &same
+            ),
             Some("https://a.com/p".to_string())
         );
     }

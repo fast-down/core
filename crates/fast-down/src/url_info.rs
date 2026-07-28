@@ -94,7 +94,10 @@ mod tests {
     #[test]
     fn file_id_equality() {
         assert_eq!(FileId::new(Some("x"), None), FileId::new(Some("x"), None));
-        assert_ne!(FileId::new(Some("x"), None), FileId::new(Some("x"), Some("y")));
+        assert_ne!(
+            FileId::new(Some("x"), None),
+            FileId::new(Some("x"), Some("y"))
+        );
     }
 
     #[test]

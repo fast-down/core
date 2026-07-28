@@ -55,19 +55,28 @@ mod tests {
     #[test]
     fn no_placeholders_passthrough() {
         let url = Url::parse("https://example.com/x").unwrap();
-        assert_eq!(parse_filename_template("plain".to_string(), &url, "f.txt"), "plain");
+        assert_eq!(
+            parse_filename_template("plain".to_string(), &url, "f.txt"),
+            "plain"
+        );
     }
 
     #[test]
     fn host_unknown_when_no_host() {
         let url = Url::parse("file:///etc/hosts").unwrap();
-        assert_eq!(parse_filename_template("{host}".to_string(), &url, "hosts"), "unknown");
+        assert_eq!(
+            parse_filename_template("{host}".to_string(), &url, "hosts"),
+            "unknown"
+        );
     }
 
     #[test]
     fn parent_path_root_when_no_dir() {
         let url = Url::parse("https://example.com/file.txt").unwrap();
-        assert_eq!(parse_filename_template("{parent_path}".to_string(), &url, "file.txt"), ".");
+        assert_eq!(
+            parse_filename_template("{parent_path}".to_string(), &url, "file.txt"),
+            "."
+        );
     }
 
     #[test]

@@ -177,7 +177,7 @@ mod tests {
             bytes: Bytes,
         ) -> Result<(), (Self::Error, Bytes)> {
             if self.fail_next.fetch_and(false, Ordering::SeqCst) {
-                return Err((std::io::Error::new(std::io::ErrorKind::Other, "boom"), bytes));
+                return Err((std::io::Error::other("boom"), bytes));
             }
             self.pushes.lock().unwrap().push((range.clone(), bytes));
             Ok(())
@@ -207,6 +207,7 @@ mod tests {
         assert_eq!(pushes[0].1.len(), 30);
         // Merged bytes preserve ascending order: A(0..10) B(10..20) C(20..30).
         assert_eq!(&pushes[0].1[..], b"AAAAAAAAAABBBBBBBBBBCCCCCCCCCC");
+        drop(pushes);
     }
 
     #[test]
@@ -221,13 +222,14 @@ mod tests {
         let pushes = sink.pushes.lock().unwrap();
         assert_eq!(pushes.len(), 1);
         assert_eq!(pushes[0].0, 0..20);
+        drop(pushes);
     }
 
     #[test]
     fn test_cache_merge_inner_failure_propagates() {
         let sink = SharedSink::new();
         sink.fail_next.store(true, Ordering::SeqCst);
-        let mut p = CacheMergePusher::new(sink.clone(), 10, 0);
+        let mut p = CacheMergePusher::new(sink, 10, 0);
         let res = p.push(&(0..10), bb(&"A".repeat(10)));
         assert!(res.is_err());
     }
@@ -251,5 +253,6 @@ mod tests {
         let pushes = sink.pushes.lock().unwrap();
         assert_eq!(pushes.len(), 1);
         assert_eq!(&pushes[0].1[..], b"BBBBBBBBBB");
+        drop(pushes);
     }
 }
