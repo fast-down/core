@@ -13,6 +13,9 @@ pub trait Merge {
 
 impl Merge for Vec<ProgressEntry> {
     fn merge_progress(&mut self, new: ProgressEntry) {
+        if new.start >= new.end {
+            return;
+        }
         let i = self.partition_point(|x| x.end < new.start);
         if i == self.len() {
             self.push(new);
@@ -75,5 +78,49 @@ mod tests {
         assert_eq!(v, vec![1..70, 72..82]);
         v.merge_progress(0..90);
         assert_eq!(v, vec![0..90]);
+    }
+
+    #[test]
+    fn test_merge_empty_range_is_dropped() {
+        // An empty range contained inside an existing entry must be a no-op.
+        let mut v = vec![1..5, 10..20];
+        v.merge_progress(3..3);
+        assert_eq!(v, vec![1..5, 10..20]);
+
+        // An empty range landing in a gap or at the end must NOT be inserted
+        // as a degenerate entry.
+        v.merge_progress(7..7);
+        assert_eq!(v, vec![1..5, 10..20]);
+        v.merge_progress(25..25);
+        assert_eq!(v, vec![1..5, 10..20]);
+    }
+
+    #[test]
+    fn test_merge_before_front_with_gap() {
+        #![allow(clippy::single_range_in_vec_init)]
+        // `new` sits entirely before `self[0]`, leaving a gap -> inserted at front.
+        let mut v = vec![5..10];
+        v.merge_progress(1..3);
+        assert_eq!(v, vec![1..3, 5..10]);
+    }
+
+    #[test]
+    fn test_merge_extends_before_first_and_spans_gaps() {
+        #![allow(clippy::single_range_in_vec_init)]
+        // `new` starts before the first entry and spans across multiple gaps,
+        // absorbing every overlapping/touching entry into a single coalesced range.
+        let mut v = vec![1..5, 8..10, 12..15];
+        v.merge_progress(0..13);
+        assert_eq!(v, vec![0..15]);
+    }
+
+    #[test]
+    fn test_merge_reversed_range_is_dropped() {
+        #![allow(clippy::single_range_in_vec_init)]
+        // A reversed range (`start > end`) is invalid and must not enter the list.
+        let mut v = vec![10..20];
+        #[allow(clippy::reversed_empty_ranges)]
+        v.merge_progress(30..5);
+        assert_eq!(v, vec![10..20]);
     }
 }
