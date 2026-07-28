@@ -1,3 +1,6 @@
+//! Iterator and helper for computing the *gaps* (not-yet-downloaded ranges)
+//! from a set of [`ProgressEntry`](crate::ProgressEntry)s.
+
 use crate::ProgressEntry;
 
 /// Iterator that yields the *gaps* (non-downloaded ranges) from a list of [`ProgressEntry`]s.
@@ -5,9 +8,13 @@ use crate::ProgressEntry;
 /// Entries shorter than `window` are merged into adjacent gaps to reduce fragmentation.
 #[derive(Debug)]
 pub struct InvertIter<I: Iterator<Item = ProgressEntry>> {
+    /// Iterator over the already-downloaded (sorted) ranges.
     iter: I,
+    /// End offset of the last range consumed from `iter`.
     prev_end: u64,
+    /// Total size of the source.
     total_size: u64,
+    /// Merge entries shorter than this into the surrounding gap.
     window: u64,
 }
 

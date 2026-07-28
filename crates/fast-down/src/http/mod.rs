@@ -1,3 +1,21 @@
+//! A backend-agnostic HTTP download layer.
+//!
+//! This module defines a set of small traits — [`HttpClient`],
+//! [`HttpRequestBuilder`], [`HttpResponse`], and [`HttpHeaders`] — that abstract
+//! over any HTTP client implementation (for example the `reqwest` wrapper in
+//! the `reqwest` module). On top of them it provides:
+//!
+//! * [`HttpPuller`]: a [`fast_pull::Puller`] that streams bytes over HTTP, with
+//!   range support and file-identity (resumability) checks.
+//! * [`Prefetch`]: resolves a [`crate::UrlInfo`] for a URL via a prefetch request.
+//! * [`ContentDisposition`]: parses the `Content-Disposition` header for filenames.
+//! * [`manual_redirect`]: RFC 9110-aware `Referer` computation for redirect following.
+//! * [`HttpError`]: the error type produced by this layer.
+//!
+//! Most users do not use these types directly; instead they use
+//! `FastDownPuller` (from the `fast-puller` feature), which wraps
+//! [`HttpPuller`] with a smart-redirecting `reqwest` client.
+
 mod content_disposition;
 pub mod manual_redirect;
 mod prefetch;
@@ -61,13 +79,13 @@ pub type GetHeaderError<Client> = <GetHeader<Client> as HttpHeaders>::GetHeaderE
 /// detecting mismatched file identity, and irrecoverable failures.
 #[derive(thiserror::Error)]
 pub enum HttpError<Client: HttpClient> {
-    #[error("HTTP request failed")]
+    #[error("HTTP request failed: {0:?}")]
     Request(GetRequestError<Client>),
-    #[error("HTTP chunk read failed")]
+    #[error("HTTP chunk read failed: {0:?}\n  response: {1:?}")]
     Chunk(GetChunkError<Client>, GetResponse<Client>),
     #[error("irrecoverable pull error")]
     Irrecoverable,
-    #[error("body mismatch: expected file {0:?}, got different content")]
+    #[error("body mismatch: expected file {0:?}, got different content\n  response: {1:?}")]
     MismatchedBody(FileId, GetResponse<Client>),
 }
 

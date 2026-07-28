@@ -28,8 +28,11 @@ pub fn create_channel() -> (Tx, Rx) {
 
 /// Create a new cancellation token for use with download tasks.
 ///
-/// Pass the token to any `DownloadTask` method (`start`, `start_with_pusher`,
-/// or `start_in_memory`) to cancel the download at any time.
+/// Pass the token to [`DownloadHandle::download`] or [`DownloadHandle::resume`]
+/// to cancel the download at any time. Cancellation is cooperative: the running
+/// task stops fetching, leaves the `.part`/`.fd` files in place, and returns
+/// without renaming — so a later [`DownloadHandle::resume`] call can continue
+/// from where it stopped.
 #[must_use]
 pub fn create_cancellation_token() -> CancellationToken {
     CancellationToken::new()

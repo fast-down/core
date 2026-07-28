@@ -1,3 +1,11 @@
+//! Manual redirect handling that respects the `Referrer-Policy` header.
+//!
+//! When `SmartRedirectClient` follows redirects itself (rather
+//! than letting `reqwest` do it), it must compute the correct `Referer` header
+//! for each hop. [`compute_referer`] implements the W3C Referrer Policy
+//! algorithm (with RFC 9110 §7.4 defaults), and [`ReferrerPolicy`] parses the
+//! policy tokens sent by servers.
+
 use url::Url;
 
 /// Serialize a URL for use as a `Referer` header value,
@@ -51,6 +59,7 @@ impl ReferrerPolicy {
     }
 }
 
+/// Returns `true` when following `from` -> `to` would downgrade from HTTPS to HTTP.
 fn is_downgrade(from: &Url, to: &Url) -> bool {
     from.scheme() == "https" && to.scheme() == "http"
 }

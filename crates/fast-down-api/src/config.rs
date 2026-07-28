@@ -170,6 +170,13 @@ pub struct Config {
 }
 
 impl PartialConfig {
+    /// Merge a freshly-written byte range into this partial config's progress.
+    ///
+    /// The range is folded into `downloaded_chunk` (created if absent), keeping
+    /// it normalized and de-duplicated. This is the in-memory counterpart of
+    /// [`DownloadState::merge_progress`](crate::DownloadState::merge_progress):
+    /// callers use it to record progress before handing the config to
+    /// [`DownloadHandle::resume`](crate::DownloadHandle::resume).
     pub fn merge_progress(&mut self, progress: ProgressEntry) {
         self.downloaded_chunk
             .get_or_insert_default()

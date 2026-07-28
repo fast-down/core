@@ -32,6 +32,13 @@ fn open_create_new() -> OpenOptions {
     o
 }
 
+/// A handle to a spawned download task.
+///
+/// [`download`](Self::download) and [`resume`](Self::resume) spawn a detached
+/// background task and return a `DownloadHandle`. Progress and lifecycle events
+/// are delivered through the [`Tx`](crate::Tx) channel you pass in; call
+/// [`join`](Self::join) to await the task's completion (it errors if the task
+/// panicked).
 #[derive(Debug, Clone)]
 pub struct DownloadHandle {
     handle: SharedHandle<()>,
@@ -47,6 +54,20 @@ impl DownloadHandle {
         self.handle.join().await
     }
 
+    /// Start a download, resuming automatically when possible.
+    ///
+    /// Spawns a detached task. The task first `prefetch`es metadata, then:
+    /// - if `config.resume` is enabled, a valid `.fd` state file and its `.part`
+    ///   exist, and the remote file still matches ([`crate::Event::Resumed`]), it
+    ///   continues from the recorded offset;
+    /// - otherwise it starts a fresh download.
+    ///
+    /// Unlike [`resume`](Self::resume), a failure to resume here is **not** an
+    /// error: the task silently falls back to a full re-download and emits the
+    /// normal event stream. Pass a
+    /// [`CancellationToken`](crate::create_cancellation_token) to cancel; on
+    /// cancellation the `.part`/`.fd` files are preserved so a later
+    /// [`resume`](Self::resume) can continue.
     #[must_use]
     pub fn download(
         url: Url,
@@ -74,6 +95,17 @@ impl DownloadHandle {
         }
     }
 
+    /// Resume a previously interrupted download from its `.part` file.
+    ///
+    /// Spawns a detached task pinned to `tmp_path`. If the download cannot be
+    /// continued — the `.fd` state file is missing, the server does not support
+    /// range requests, or the remote file changed — the task emits
+    /// [`Event::ResumeError`](crate::Event::ResumeError) and returns **without**
+    /// falling back to a full re-download. This is the "hard error" counterpart
+    /// to [`download`](Self::download).
+    ///
+    /// If `tmp_path` itself does not exist, the call falls back to
+    /// [`download`](Self::download) (a fresh download under a unique name).
     pub fn resume(
         tmp_path: impl AsRef<Path>,
         url: Url,

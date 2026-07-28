@@ -1,3 +1,5 @@
+//! Single-threaded sequential download.
+
 use crate::{
     DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, multi::TokioExecutor,
 };

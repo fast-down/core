@@ -1,3 +1,10 @@
+//! Parser for the HTTP `Content-Disposition` header.
+//!
+//! Used during prefetch to derive a suggested filename for a downloaded
+//! resource. [`ContentDisposition::parse`] handles both the quoted `filename`
+//! form and the RFC 5987 `filename*` (UTF-8, percent-encoded) form, with the
+//! latter taking precedence when both are present.
+
 use std::{iter::Peekable, str::Chars};
 
 /// Parsed `Content-Disposition` header, extracting the `filename` parameter.

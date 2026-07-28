@@ -1,3 +1,6 @@
+//! A deterministic in-memory [`Puller`](crate::Puller) for tests, plus a helper
+//! to build mock payloads.
+
 use crate::{ProgressEntry, PullResult, PullStream, Puller};
 use futures::stream;
 use std::{sync::Arc, vec::Vec};

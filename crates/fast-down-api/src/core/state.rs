@@ -14,24 +14,39 @@ use url::Url;
 /// Errors that can occur when an explicit [`DownloadHandle::resume`](crate::DownloadHandle::resume)
 /// cannot continue an interrupted download.
 ///
-/// These are surfaced through [`Event::ResumeError`] so the caller is notified
+/// These are surfaced through [`crate::Event::ResumeError`] so the caller is notified
 /// instead of silently falling back to a full re-download.
 #[derive(Debug, thiserror::Error)]
 #[allow(clippy::large_enum_variant)]
 pub enum StateError {
-    /// No `.fd` state file exists for this download, so there is nothing to resume from.
-    #[error("no .fd state file to resume from")]
+    /// Failed to open or read the `.fd` state file from disk.
+    ///
+    /// This usually means the file is missing or unreadable (permission error,
+    /// removed by another process, etc.).
+    #[error("failed to open .fd state file: {0}")]
     Open(std::io::Error),
-    /// No `.fd` state file exists for this download, so there is nothing to resume from.
-    #[error("no .fd state file to resume from")]
+    /// Failed to persist the `.fd` state file to disk.
+    ///
+    /// The state was computed but could not be written (disk full, permission
+    /// error, etc.).
+    #[error("failed to save .fd state file: {0}")]
     Save(std::io::Error),
-    /// No `.fd` state file exists for this download, so there is nothing to resume from.
-    #[error("no .fd state file to resume from")]
+    /// Failed to deserialize the `.fd` state file.
+    ///
+    /// The file was read but is not valid TOML, or its schema no longer matches
+    /// the current [`DownloadStateInner`] definition.
+    #[error("failed to decode .fd state file: {0}")]
     Decode(#[from] toml::de::Error),
-    #[error("no .fd state file to resume from")]
+    /// Failed to serialize the download state into the `.fd` state file.
+    ///
+    /// The state could not be encoded as TOML (e.g. a field holds a value that
+    /// has no valid TOML representation).
+    #[error("failed to encode .fd state file: {0}")]
     Encode(#[from] toml::ser::Error),
     /// The remote file changed (size / etag / last-modified mismatch), so resuming would corrupt the output.
-    #[error("remote file changed, cannot resume")]
+    #[error(
+        "remote file changed, cannot resume\n  local:  size={local_file_size}, id={local_file_id:?}\n  remote: size={remote_file_size}, id={remote_file_id:?}"
+    )]
     FileChanged {
         local_file_id: FileId,
         local_file_size: u64,
@@ -39,10 +54,20 @@ pub enum StateError {
         remote_file_size: u64,
     },
     /// The server does not support resumable (range) downloads.
-    #[error("server does not support resumable download")]
+    #[error(
+        "server does not support resumable download\n  url_info: {:?}\n  url: {}\n  status: {}\n  headers: {:?}",
+        .0, .1.url(), .1.status(), .1.headers()
+    )]
     NotResumable(UrlInfo, Response),
 }
 
+/// Full (resolved) download state that is serialized into the `.fd` file.
+///
+/// `DownloadStateInner` is the non-partial form of the persisted state: every
+/// field is present. It is encoded to TOML by [`DownloadState::store`] and read
+/// back as the generated partial [`PartialDownloadStateInner`] on resume. The
+/// `size` field is recorded for resume validation; older `.fd` files omit it and
+/// read back as `None` in the partial form.
 #[derive(Debug, Clone, InheritConfig)]
 pub struct DownloadStateInner {
     #[config(default = Url::parse("about:blank").unwrap())]
@@ -59,6 +84,18 @@ pub struct DownloadStateInner {
     pub size: u64,
 }
 
+/// On-disk state for an in-progress download, backing resume support.
+///
+/// `DownloadState` pairs a [`PartialDownloadStateInner`] (the persisted config,
+/// whose fields may be absent if the `.fd` file predates them) with the path of
+/// the `.fd` file and a dirty flag. It is the bridge between a saved `.fd` file
+/// and a fresh [`crate::PartialConfig`] handed to
+/// [`crate::DownloadHandle::resume`]: [`DownloadState::merge_config`] folds the
+/// loaded progress into the new request so a resumed download continues from the
+/// correct byte offset instead of restarting from zero.
+///
+/// `DownloadState` derefs to [`PartialDownloadStateInner`], so the saved `url`,
+/// `etag`, `last_modified`, `config` and `size` are reachable directly.
 #[derive(Debug)]
 pub struct DownloadState {
     inner: PartialDownloadStateInner,
@@ -67,6 +104,12 @@ pub struct DownloadState {
 }
 
 impl DownloadState {
+    /// Build a fresh, dirty download state from the initial prefetch metadata.
+    ///
+    /// `url` and `url_info` come from the prefetch step, `config` is the
+    /// caller-provided [`PartialConfig`], and `config_path` is where the `.fd`
+    /// file will be written. The returned state is marked dirty so the first
+    /// [`DownloadState::store`] persists it.
     #[must_use]
     pub fn new(url: &Url, url_info: &UrlInfo, config: &PartialConfig, config_path: &Path) -> Self {
         Self {
@@ -115,6 +158,10 @@ impl DownloadState {
         Ok(())
     }
 
+    /// Apply a mutation to the inner partial state and mark it dirty.
+    ///
+    /// Any change made through `cb` (e.g. updating `etag`/`last_modified` or the
+    /// nested `config`) schedules the next [`DownloadState::store`].
     pub fn update(&mut self, cb: impl FnOnce(&mut PartialDownloadStateInner)) {
         cb(&mut self.inner);
         self.is_dirty = true;
@@ -146,6 +193,10 @@ impl DownloadState {
         }
     }
 
+    /// Return the list of byte ranges already written to the `.part` file.
+    ///
+    /// This is the authoritative on-disk progress. It is empty for a brand new
+    /// download and grows as [`DownloadState::merge_progress`] is called.
     #[must_use]
     pub fn get_progress(&self) -> Vec<ProgressEntry> {
         self.config
@@ -166,6 +217,15 @@ impl DownloadState {
         self.is_dirty = true;
     }
 
+    /// Fold a freshly-built [`PartialConfig`] into this loaded state for resume.
+    ///
+    /// This is the key bridge that preserves download progress across a resume:
+    /// the ranges already recorded in `self.config.downloaded_chunk` are merged
+    /// into `partial_config` first, so that even if `partial_config` starts from
+    /// an empty progress list the resumed download keeps the already-downloaded
+    /// bytes. `partial_config` is then layered on top via
+    /// `inherit_from`, and the merged result replaces the stored
+    /// config. Marks the state dirty.
     pub fn merge_config(&mut self, partial_config: &PartialConfig) {
         if let Some(config) = &self.config {
             let mut pc = partial_config.clone();
@@ -180,6 +240,11 @@ impl DownloadState {
         }
     }
 
+    /// Reconstruct the identity of the file this state was saved for.
+    ///
+    /// Returns a [`FileId`] from the stored `etag` / `last_modified`. Missing
+    /// headers collapse to `None`, which makes [`DownloadState::validate`] treat
+    /// "no identity on either side" as a match.
     #[must_use]
     pub fn file_id(&self) -> FileId {
         FileId {
@@ -188,6 +253,9 @@ impl DownloadState {
         }
     }
 
+    /// Path of the partial (`.part`) output file paired with this state.
+    ///
+    /// Derived from `config_path` by swapping the extension to `.part`.
     #[must_use]
     pub fn tmp_path(&self) -> PathBuf {
         self.config_path.with_extension("part")

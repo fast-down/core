@@ -1,3 +1,5 @@
+//! Multi-threaded concurrent download with work-stealing.
+
 use crate::{DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, WorkerId};
 use bytes::Bytes;
 use core::{

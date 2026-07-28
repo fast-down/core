@@ -1,3 +1,13 @@
+//! The default HTTP [`fast_pull::Puller`] for this crate.
+//!
+//! [`FastDownPuller`] ties together the [`crate::http::HttpPuller`] engine and a
+//! `SmartRedirectClient`, adding proxy support, optional
+//! multi-interface IP rotation, and file-identity-based resumability. Construct
+//! one from [`FastDownPullerOptions`] (typically via [`build_client`] to wire up
+//! the underlying reqwest client), then pass it to `fast_pull::download_multi`
+//! or `fast_pull::download_single` alongside a `Pusher` such as
+//! `fast_pull::file::StdFilePusher` (requires the `file` feature of `fast-pull`).
+
 use crate::Proxy;
 use crate::{
     FileId, ProgressEntry, PullResult, PullStream,
@@ -81,19 +91,31 @@ pub struct FastDownPuller {
     turn: Arc<std::sync::atomic::AtomicUsize>,
     max_redirects: usize,
 }
+// Field-level docs live on [`FastDownPullerOptions`], the public construction
+// surface; the runtime struct mirrors those fields.
 
 /// Options for constructing a [`FastDownPuller`].
 #[derive(Debug)]
 pub struct FastDownPullerOptions<'a> {
+    /// The URL to download.
     pub url: Url,
+    /// Extra request headers sent on every request.
     pub headers: Arc<HeaderMap>,
+    /// Proxy selection (no / system / custom URL).
     pub proxy: Proxy<&'a str>,
+    /// Accept invalid TLS certificates (requires the `reqwest-tls` feature).
     pub accept_invalid_certs: bool,
+    /// Accept invalid TLS hostnames (requires the `reqwest-tls` feature).
     pub accept_invalid_hostnames: bool,
+    /// Enable a cookie store (requires the `cookie-store` feature).
     pub cookie_store: bool,
+    /// The expected [`FileId`], used to detect a changed resource and resume safely.
     pub file_id: FileId,
+    /// An already-open response to reuse for the first request (e.g. from a prefetch).
     pub resp: Option<Arc<Mutex<Option<Response>>>>,
+    /// Candidate local source IPs for outbound connections; rotated across clones.
     pub available_ips: Arc<[std::net::IpAddr]>,
+    /// Maximum number of redirects to follow before failing.
     pub max_redirects: usize,
 }
 

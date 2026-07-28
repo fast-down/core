@@ -1,3 +1,11 @@
+//! An HTTP implementation of the [`fast_pull::Puller`] trait.
+//!
+//! [`HttpPuller`] builds range requests through the generic [`crate::http::HttpClient`]
+//! trait and streams the response body back as a [`fast_pull::PullStream`]. It
+//! verifies the server's `ETag` / `Last-Modified` headers against the expected
+//! [`crate::FileId`] so that a changed file is reported as [`crate::http::HttpError::MismatchedBody`]
+//! rather than silently corrupting an incremental download.
+
 use crate::http::{
     FileId, GetRequestError, GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder,
     HttpResponse,
@@ -39,6 +47,14 @@ impl<C: HttpClient> Clone for HttpPuller<C> {
     }
 }
 impl<Client: HttpClient> HttpPuller<Client> {
+    /// Create a new [`HttpPuller`].
+    ///
+    /// * `url` — the resource to download.
+    /// * `client` — the HTTP client used to issue requests.
+    /// * `resp` — an optional already-open response to reuse for the first
+    ///   (full-file) request, typically the one produced by a prefetch.
+    /// * `file_id` — the expected [`crate::FileId`], compared against the
+    ///   server's headers to detect a changed resource.
     pub const fn new(
         url: Arc<Url>,
         client: Client,

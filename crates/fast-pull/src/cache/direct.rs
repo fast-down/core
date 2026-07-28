@@ -1,3 +1,5 @@
+//! Pusher cache that flushes contiguous runs without byte merging.
+
 use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::Bytes;
 use std::collections::BTreeMap;
@@ -18,6 +20,10 @@ pub struct CacheDirectPusher<P> {
 }
 
 impl<P: Pusher> CacheDirectPusher<P> {
+    /// Wrap `inner` with the given `high_watermark` / `low_watermark` (in bytes).
+    ///
+    /// Eviction to the inner pusher triggers once the buffered size reaches
+    /// `high_watermark`, and stops once it falls back to `low_watermark`.
     pub const fn new(inner: P, high_watermark: usize, low_watermark: usize) -> Self {
         Self {
             inner,

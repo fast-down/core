@@ -1,5 +1,19 @@
 #![cfg(not(target_family = "wasm"))]
 
+//! A `reqwest`-based implementation of the [`crate::http`] HTTP traits with
+//! smart redirect handling.
+//!
+//! This module adapts `reqwest` to the backend-agnostic [`crate::http::HttpClient`]
+//! trait family and, more importantly, provides [`SmartRedirectClient`]: a
+//! `reqwest::Client` wrapper that follows redirects **manually** so it can honor
+//! the `Referrer-Policy` header and strip resource-specific headers
+//! (`Origin` / `Authorization` / `Cookie`) on cross-origin hops, per RFC 9110
+//! §15.4. The corresponding request builder is [`ManualRedirectRequestBuilder`].
+//!
+//! Most users do not construct these types directly; instead they build a
+//! `FastDownPuller` via `build_client`, which creates a
+//! correctly-configured [`SmartRedirectClient`].
+
 use crate::http::{
     HttpClient, HttpHeaders, HttpRequestBuilder, HttpResponse,
     manual_redirect::{ReferrerPolicy, compute_referer},
@@ -118,6 +132,18 @@ pub struct SmartRedirectClient {
 }
 
 impl SmartRedirectClient {
+    /// Build a [`SmartRedirectClient`] from an already-constructed `reqwest::Client`.
+    ///
+    /// * `client` — the underlying client. **Must** be built with
+    ///   `redirect(reqwest::redirect::Policy::none())`, otherwise the manual
+    ///   redirect logic here conflicts with reqwest's own auto-follow.
+    /// * `initial_referer` — the `Referer` sent on the first request.
+    /// * `referrer_policy` — the policy applied when no `Referrer-Policy`
+    ///   header is present on a response; per-hop headers override it.
+    /// * `origin` / `authorization` / `cookie` — resource-specific headers
+    ///   injected only on the first hop and stripped on redirect (RFC 9110 §15.4).
+    /// * `max_redirects` — the maximum number of redirects to follow before
+    ///   failing with a `StatusCode` error.
     #[must_use]
     pub const fn new(
         client: Client,

@@ -1,9 +1,13 @@
+//! Merging of [`ProgressEntry`](crate::ProgressEntry) ranges into a sorted list.
+
 use crate::ProgressEntry;
 
 /// Trait for merging a new [`ProgressEntry`] into a sorted list of existing entries.
 ///
 /// Used to consolidate downloaded ranges and remove redundant gaps.
 pub trait Merge {
+    /// Merge `new` into the existing (sorted) progress list, coalescing overlaps
+    /// so the list stays sorted and gap-free where ranges touch.
     fn merge_progress(&mut self, new: ProgressEntry);
 }
 

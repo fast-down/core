@@ -1,3 +1,5 @@
+//! In-memory pusher backed by a shared `Vec<u8>` (feature `mem`).
+
 use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::Bytes;
 use parking_lot::Mutex;

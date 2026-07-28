@@ -1,3 +1,8 @@
+//! Traits that connect a [`TaskQueue`](crate::TaskQueue) to an async runtime.
+//!
+//! Implement [`Executor`] to spawn work onto your runtime, and [`Handle`] to give the
+//! queue a way to identify and abort the tasks it spawned.
+
 use crate::{Task, TaskQueue};
 
 /// User-defined executor that runs tasks on a [`TaskQueue`].

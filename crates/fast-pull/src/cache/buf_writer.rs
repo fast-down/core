@@ -1,3 +1,6 @@
+//! A `std::io::BufWriter`-style contiguous write buffer for
+//! [`Pusher`](crate::Pusher)s.
+
 use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::{Bytes, BytesMut};
 

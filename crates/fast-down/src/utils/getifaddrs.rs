@@ -1,3 +1,10 @@
+//! Enumeration of usable local network interfaces.
+//!
+//! [`get_available_local_ips`] returns the non-loopback, non-virtual,
+//! non-link-local IP addresses of the host. This powers the multi-interface
+//! IP-rotation feature of `FastDownPuller`, where each clone can bind
+//! to a different local address.
+
 use std::net::IpAddr;
 
 /// # Errors

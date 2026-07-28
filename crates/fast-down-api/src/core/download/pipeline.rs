@@ -1,3 +1,9 @@
+//! Builds the pull/push pipeline shared by `download` and `resume`.
+//!
+//! [`build_pipeline`] constructs a [`FastDownPuller`] (network side) and a
+//! [`BoxPusher`] (file side) for the `.part` file, choosing the memory-mapped
+//! writer on 64-bit targets when the server supports fast (resumable) downloads
+//! and `Mmap` writing is configured, and the buffered/cache writer otherwise.
 use crate::{Config, Event, Tx, WriteMethod, core::download::open_existing, utils::build_header};
 use fast_down::{
     BoxPusher, UrlInfo,
@@ -10,6 +16,22 @@ use std::{path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+/// Construct the (puller, pusher) pipeline for a `.part` file.
+///
+/// Returns `None` (after forwarding the failure as a public
+/// [`crate::Event`]) if the HTTP client or the output file cannot be created,
+/// or if `token` is cancelled before construction finishes.
+///
+/// * `url` / `config` drive the puller (headers, proxy, cert handling, range
+///   identity, local bind address, redirect limit).
+/// * `info` supplies the file identity used for range validation and selects
+///   the writer: on 64-bit targets a resumable `info.fast_download` download
+///   with [`WriteMethod::Mmap`] uses [`MmapFilePusher`]; otherwise
+///   [`CacheFilePusher`] (buffered + out-of-order reordering).
+/// * `resp` is the prefetch response, reused to seed the first range request
+///   without an extra round-trip.
+/// * `path` is the `.part` file; `tx` receives error events; `token` makes
+///   construction cancellable.
 pub async fn build_pipeline(
     url: &Url,
     config: &Config,

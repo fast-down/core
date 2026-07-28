@@ -1,3 +1,5 @@
+//! Pusher cache that merges each flush run into a single contiguous buffer.
+
 use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::{Bytes, BytesMut};
 use std::collections::{BTreeMap, btree_map::Entry};
@@ -18,6 +20,10 @@ pub struct CacheMergePusher<P> {
 }
 
 impl<P: Pusher> CacheMergePusher<P> {
+    /// Wrap `inner` with the given `high_watermark` / `low_watermark` (in bytes).
+    ///
+    /// Eviction to the inner pusher triggers once the buffered size reaches
+    /// `high_watermark`, and stops once it falls back to `low_watermark`.
     pub const fn new(inner: P, high_watermark: usize, low_watermark: usize) -> Self {
         Self {
             inner,

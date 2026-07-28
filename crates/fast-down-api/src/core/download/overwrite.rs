@@ -1,3 +1,14 @@
+//! Full-pipeline download driver: persists state, runs the engine, then renames
+//! the `.part` file into place.
+//!
+//! [`overwrite`] is the shared core of both [`crate::DownloadHandle::download`]
+//! and [`crate::DownloadHandle::resume`]. It takes a fully-prepared
+//! [`OverwriteOption`] (state + paths + prefetch result + channel + token),
+//! builds the pull/push pipeline, drives [`fast_down::multi::download_multi`] or
+//! [`fast_down::single::download_single`], forwards engine events to the public
+//! [`crate::Event`] stream, periodically saves progress, and on success renames
+//! the `.part` file to its final destination (or a unique variant when
+//! `overwrite` is disabled).
 use crate::{
     DownloadState, Event, PartialConfig, Tx, core::download::pipeline::build_pipeline, tx_err,
 };
@@ -20,15 +31,41 @@ use std::{
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
 
+/// Fully-prepared inputs for [`overwrite`].
+///
+/// Callers build this once prefetch has succeeded and the [`DownloadState`] is
+/// ready; [`overwrite`] then owns it and runs the download to completion.
 pub struct OverwriteOption {
+    /// The download state backing resume (progress, identity, `.fd` path).
     pub state: DownloadState,
+    /// Intended final destination of the file (before unique-path adjustment).
     pub final_path: PathBuf,
+    /// Prefetch metadata for the remote file (size, identity, range support).
     pub info: UrlInfo,
+    /// The prefetch HTTP response, reused to seed the first range request.
     pub resp: Response,
+    /// Channel to forward public [`crate::Event`]s to the consumer.
     pub tx: Tx,
+    /// Cancellation token; cancelling stops fetching and leaves `.part`/`.fd`.
     pub token: CancellationToken,
 }
 
+/// Run a complete download: persist state, drive the engine, rename into place.
+///
+/// This is the shared core of [`crate::DownloadHandle::download`] and
+/// [`crate::DownloadHandle::resume`]. It:
+/// 1. Saves the `.fd` state up front.
+/// 2. Builds the pull/push pipeline for the `.part` file.
+/// 3. Emits [`crate::Event::Start`] and runs `download_multi` (fast downloads)
+///    or `download_single` (single-stream) according to `info.fast_download`.
+/// 4. Forwards every engine event to the public [`crate::Event`] channel and
+///    merges `PushProgress` ranges into the state.
+/// 5. Periodically (≈1s) re-saves the `.fd` so progress survives interruption.
+/// 6. On success, renames `.part` to `final_path` (or a unique variant when
+///    `overwrite` is disabled) and emits [`crate::Event::Renamed`].
+///
+/// If the token is cancelled or the download did not complete, the `.part` and
+/// `.fd` files are left in place so a later resume can continue.
 #[allow(clippy::too_many_lines)]
 pub async fn overwrite(option: OverwriteOption) {
     let OverwriteOption {

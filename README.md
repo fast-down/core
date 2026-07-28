@@ -9,7 +9,7 @@
 - fast-steal: [![Latest version](https://img.shields.io/crates/v/fast-steal.svg)](https://crates.io/crates/fast-steal) [![Documentation](https://docs.rs/fast-steal/badge.svg)](https://docs.rs/fast-steal)
 - fast-pull: [![Latest version](https://img.shields.io/crates/v/fast-pull.svg)](https://crates.io/crates/fast-pull) [![Documentation](https://docs.rs/fast-pull/badge.svg)](https://docs.rs/fast-pull)
 - fast-down: [![Latest version](https://img.shields.io/crates/v/fast-down.svg)](https://crates.io/crates/fast-down) [![Documentation](https://docs.rs/fast-down/badge.svg)](https://docs.rs/fast-down)
-- fast-down-ffi: [![Latest version](https://img.shields.io/crates/v/fast-down-ffi.svg)](https://crates.io/crates/fast-down-ffi) [![Documentation](https://docs.rs/fast-down-ffi/badge.svg)](https://docs.rs/fast-down-ffi)
+- fast-down-api: [![Latest version](https://img.shields.io/crates/v/fast-down-api.svg)](https://crates.io/crates/fast-down-api) [![Documentation](https://docs.rs/fast-down-api/badge.svg)](https://docs.rs/fast-down-api)
 
 **[Official Website (Simplified Chinese)](https://fd.s121.top/)**
 

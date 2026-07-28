@@ -1,3 +1,10 @@
+//! Prefetch metadata for a downloadable URL over HTTP.
+//!
+//! [`Prefetch::prefetch`] issues the initial GET (and a range probe) through a
+//! [`crate::http::HttpClient`], then assembles a [`crate::UrlInfo`] describing
+//! the resource: its size, suggested filename, content type, range support, and
+//! the [`crate::FileId`] used for resumable downloads.
+
 use crate::{
     UrlInfo,
     http::{

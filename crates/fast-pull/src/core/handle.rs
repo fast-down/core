@@ -1,3 +1,5 @@
+//! A shareable, multi-consumer handle to a tokio task.
+
 use std::sync::Arc;
 use tokio::{
     sync::watch,
