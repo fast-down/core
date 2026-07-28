@@ -199,7 +199,12 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     extern crate std;
     use crate::{Executor, Handle, Task, TaskQueue};
-    use std::{collections::HashMap, dbg, println, sync::{Arc, Mutex}, vec::Vec};
+    use std::{
+        collections::HashMap,
+        dbg, println,
+        sync::{Arc, Mutex},
+        vec::Vec,
+    };
     use tokio::{sync::mpsc, task::AbortHandle};
 
     struct TokioExecutor {
