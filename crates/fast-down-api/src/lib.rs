@@ -1,0 +1,39 @@
+#![doc = include_str!("../README.md")]
+
+mod config;
+mod core;
+mod event;
+pub(crate) mod utils;
+
+pub use config::*;
+pub use core::*;
+pub use event::*;
+
+pub use fast_down;
+
+use tokio_util::sync::CancellationToken;
+
+/// Sender half of the event channel, used to push [`Event`]s from the download task.
+pub type Tx = crossfire::MTx<crossfire::mpmc::List<Event>>;
+/// Receiver half of the event channel, used to receive [`Event`]s from the download task.
+pub type Rx = crossfire::MAsyncRx<crossfire::mpmc::List<Event>>;
+
+/// Create a new unbounded event channel for receiving download progress events.
+///
+/// Returns a sender (`Tx`) and receiver (`Rx`) pair.
+#[must_use]
+pub fn create_channel() -> (Tx, Rx) {
+    crossfire::mpmc::unbounded_async()
+}
+
+/// Create a new cancellation token for use with download tasks.
+///
+/// Pass the token to [`DownloadHandle::download`] or [`DownloadHandle::resume`]
+/// to cancel the download at any time. Cancellation is cooperative: the running
+/// task stops fetching, leaves the `.part`/`.fd` files in place, and returns
+/// without renaming — so a later [`DownloadHandle::resume`] call can continue
+/// from where it stopped.
+#[must_use]
+pub fn create_cancellation_token() -> CancellationToken {
+    CancellationToken::new()
+}

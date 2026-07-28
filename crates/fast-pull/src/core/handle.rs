@@ -1,3 +1,5 @@
+//! A shareable, multi-consumer handle to a tokio task.
+
 use std::sync::Arc;
 use tokio::{
     sync::watch,
@@ -9,7 +11,7 @@ use tokio::{
 /// Unlike a raw [`JoinHandle`], [`SharedHandle`] can be cloned and awaited
 /// concurrently without consuming the result. The first awaiter gets the result,
 /// subsequent awaiters will see the same cached result.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SharedHandle<T> {
     rx: watch::Receiver<Option<Result<T, Arc<JoinError>>>>,
 }

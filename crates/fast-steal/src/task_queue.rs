@@ -1,3 +1,10 @@
+//! A concurrent work-stealing queue.
+//!
+//! [`TaskQueue`] holds pending and running [`Task`](crate::Task)s and lets worker
+//! threads pull fresh work or steal a sub-range from a busy peer via
+//! [`steal`](TaskQueue::steal). The number of running workers can be adjusted at
+//! runtime with [`set_threads`](TaskQueue::set_threads).
+
 extern crate alloc;
 use crate::{Executor, Handle, Task, WeakTask};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
@@ -26,6 +33,8 @@ struct TaskQueueInner<H: Handle> {
     waiting: VecDeque<Task>,
 }
 impl<H: Handle> TaskQueue<H> {
+    /// Creates a queue from an iterator of `start..end` ranges, each wrapped in its
+    /// own [`Task`].
     pub fn new(tasks: impl Iterator<Item = Range<u64>>) -> Self {
         let waiting: VecDeque<_> = tasks.map(Task::from).collect();
         Self {
@@ -35,10 +44,25 @@ impl<H: Handle> TaskQueue<H> {
             })),
         }
     }
+    /// Appends a [`Task`] to the waiting queue so a future
+    /// [`steal`](TaskQueue::steal) or [`set_threads`](TaskQueue::set_threads) can
+    /// pick it up.
     pub fn add(&self, task: Task) {
         let mut guard = self.inner.lock();
         guard.waiting.push_back(task);
     }
+    /// Tries to refill `task` with more work for the worker identified by `id`.
+    ///
+    /// The caller must pass its own currently-held [`Task`] plus `id` (compared via
+    /// [`Handle::is_self`](crate::Handle::is_self)). The function first hands out a
+    /// pending task from the waiting queue; if none is available it steals a half
+    /// range from the busiest running task via [`Task::split_two`](crate::Task::split_two)
+    /// (when at least `min_chunk_size * 2` work remains), or, if `max_speculative > 1`
+    /// and the stolen task has few enough strong references, shares that same task
+    /// speculatively.
+    ///
+    /// Returns `true` if `task` was refilled, or `false` if the worker is not
+    /// registered or no work could be found.
     pub fn steal(
         &self,
         id: &H::Id,
@@ -143,6 +167,8 @@ impl<H: Handle> TaskQueue<H> {
         }
         Some(())
     }
+    /// Provides mutable access to the handles of all running tasks, e.g. to abort
+    /// or inspect them.
     pub fn handles<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut dyn Iterator<Item = &mut H>) -> R,
@@ -153,6 +179,8 @@ impl<H: Handle> TaskQueue<H> {
         f(&mut iter)
     }
 
+    /// Aborts every running task equal to `task` that does not belong to the
+    /// worker `id`, reclaiming it back into the waiting queue.
     pub fn cancel_task(&self, task: &Task, id: &H::Id) {
         let mut guard = self.inner.lock();
         for (weak, handle) in &mut guard.running {

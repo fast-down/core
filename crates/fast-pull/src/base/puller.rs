@@ -1,3 +1,5 @@
+//! The [`Puller`](crate::Puller) trait: an abstraction over a chunked data source.
+
 use crate::ProgressEntry;
 use bytes::Bytes;
 use core::time::Duration;
@@ -25,6 +27,12 @@ pub type PullResult<T, E> = Result<T, (E, Option<Duration>)>;
 /// specific byte range. Cloning is required for retry and work-stealing scenarios.
 pub trait Puller: Send + Sync + Clone + 'static {
     type Error: PullerError;
+    /// Pull a (sub)range of the source as a stream of byte chunks.
+    ///
+    /// Passing `None` for `range` requests the entire source. The returned
+    /// [`PullStream`] yields [`Bytes`] chunks; each error carries an optional
+    /// retry delay that the engine honors via its retry backoff. Implementors
+    /// must be `Clone` so workers can be spawned and work can be stolen/retried.
     fn pull(
         &mut self,
         range: Option<&ProgressEntry>,
@@ -33,6 +41,11 @@ pub trait Puller: Send + Sync + Clone + 'static {
 
 /// Extension trait for pull errors, distinguishing recoverable from irrecoverable failures.
 pub trait PullerError: std::error::Error + Send + Sync + Unpin + 'static {
+    /// Whether an error is fatal and must **not** be retried.
+    ///
+    /// The default (`false`) means the error is recoverable and the engine will
+    /// retry after the configured backoff. Return `true` to stop retrying and
+    /// abort the affected worker.
     fn is_irrecoverable(&self) -> bool {
         false
     }

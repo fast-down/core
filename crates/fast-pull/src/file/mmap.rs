@@ -1,3 +1,5 @@
+//! Memory-mapped file pusher (feature `file`).
+
 use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::Bytes;
 use memmap2::MmapMut;

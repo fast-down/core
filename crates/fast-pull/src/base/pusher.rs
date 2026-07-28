@@ -1,3 +1,5 @@
+//! The [`Pusher`](crate::Pusher) trait: an abstraction over a chunked data sink.
+
 use crate::ProgressEntry;
 use bytes::Bytes;
 
@@ -14,8 +16,18 @@ pub type ProgressListener = Box<dyn FnMut(ProgressEntry) + Send + 'static>;
 /// The pusher writes data to its destination and can optionally flush.
 pub trait Pusher: Send + 'static {
     type Error: std::error::Error + Send + Sync + Unpin + 'static;
+    /// Write `content` covering the given `range` to the destination.
+    ///
+    /// On success returns `Ok(())`. On failure returns `Err((error, bytes))`
+    /// where `bytes` is the (possibly partial) payload that was **not** written,
+    /// so the engine can retry it. Implementors should keep already-written
+    /// bytes internally on failure rather than dropping them.
     #[allow(clippy::missing_errors_doc)]
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)>;
+    /// Flush any buffered data to the destination.
+    ///
+    /// The default implementation is a no-op. File-backed pushers use this to
+    /// issue `fsync` / `flush` on the underlying file.
     #[allow(clippy::missing_errors_doc)]
     fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
@@ -41,6 +53,7 @@ impl std::error::Error for Box<dyn AnyError> {}
 /// Useful for FFI boundaries or heterogeneous collections of pushers.
 #[allow(missing_debug_implementations)]
 pub struct BoxPusher {
+    /// The boxed, type-erased inner pusher.
     pub pusher: Box<dyn Pusher<Error = Box<dyn AnyError>>>,
 }
 impl Pusher for BoxPusher {

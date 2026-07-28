@@ -1,3 +1,5 @@
+//! Raw `std::fs::File` random-access pusher (feature `file`).
+
 use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::Bytes;
 use std::{

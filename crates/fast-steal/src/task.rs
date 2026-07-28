@@ -1,3 +1,10 @@
+//! Cancellable, lock-free units of work.
+//!
+//! A [`Task`] stores its remaining work as a single atomic `u128` packing the
+//! `start` (high 64 bits) and `end` (low 64 bits) bounds, which lets multiple
+//! worker threads advance the same task without locking. Because the crate is
+//! `no_std`, only `alloc` is required for the reference-counted state.
+
 extern crate alloc;
 use alloc::sync::{Arc, Weak};
 use core::{fmt, ops::Range, sync::atomic::Ordering};
@@ -8,8 +15,15 @@ use portable_atomic::AtomicU128;
 /// The range is stored as a single atomic `u128`, allowing lock-free reads and
 /// fine-grained progress updates. Multiple workers can safely steal sub-ranges
 /// from the same task via [`split_two`](Task::split_two).
+///
+/// Two `Task`s are equal iff they point to the same underlying state (see the
+/// `PartialEq` impl, which uses `Arc::ptr_eq`).
 #[derive(Debug, Clone)]
 pub struct Task {
+    /// Atomic state packing `start` (high 64 bits) and `end` (low 64 bits).
+    ///
+    /// Prefer the safe accessors ([`Task::start`], [`Task::end`], [`Task::get`],
+    /// [`Task::safe_add_start`]); this field is exposed for advanced use.
     pub state: Arc<AtomicU128>,
 }
 /// A weak reference to a [`Task`], obtained via [`Task::downgrade`].
@@ -18,18 +32,25 @@ pub struct Task {
 /// to attempt to obtain a strong [`Task`] reference.
 #[derive(Debug, Clone)]
 pub struct WeakTask {
+    /// Weak reference to the underlying atomic state of the originating [`Task`].
     pub state: Weak<AtomicU128>,
 }
 
 impl WeakTask {
+    /// Attempts to upgrade to a strong [`Task`].
+    ///
+    /// Returns `None` if all strong references to the underlying state have already
+    /// been dropped.
     #[must_use]
     pub fn upgrade(&self) -> Option<Task> {
         self.state.upgrade().map(|state| Task { state })
     }
+    /// Returns the number of strong [`Task`] references to the underlying state.
     #[must_use]
     pub fn strong_count(&self) -> usize {
         self.state.strong_count()
     }
+    /// Returns the number of weak [`WeakTask`] references to the underlying state.
     #[must_use]
     pub fn weak_count(&self) -> usize {
         self.state.weak_count()
@@ -71,18 +92,27 @@ impl Task {
             state: Arc::new(AtomicU128::new(Self::pack(range))),
         }
     }
+    /// Returns the current `start..end` range, loaded atomically with `Acquire`
+    /// ordering.
     #[must_use]
     pub fn get(&self) -> Range<u64> {
         let state = self.state.load(Ordering::Acquire);
         Self::unpack(state)
     }
+    /// Returns the current start of the work range (the high 64 bits of the atomic
+    /// state).
     #[must_use]
     pub fn start(&self) -> u64 {
         (self.state.load(Ordering::Acquire) >> 64) as u64
     }
+    /// Atomically advances `start` to `min(start + bias, end)`, but only if that
+    /// makes forward progress; then returns the slice that was claimed.
+    ///
     /// # Errors
-    /// Returns [`RangeError`] when `start` + `bias` <= `old_start`
-    /// Otherwise returns `old_start..new_start.min(end)`
+    /// Returns [`RangeError`] when `start + bias` would not exceed the current
+    /// `start` (no progress, a non-positive bias, or `u64` overflow), or when the
+    /// task range invariant `start <= end` is violated. On success returns the
+    /// claimed `old_start..new_start` sub-range.
     pub fn safe_add_start(&self, start: u64, bias: u64) -> Result<Range<u64>, RangeError> {
         let new_start = start.checked_add(bias).ok_or(RangeError)?;
         let mut old_state = self.state.load(Ordering::Acquire);
@@ -106,6 +136,8 @@ impl Task {
             }
         }
     }
+    /// Returns the current end of the work range (the low 64 bits of the atomic
+    /// state).
     #[must_use]
     pub fn end(&self) -> u64 {
         let state = self.state.load(Ordering::Acquire);
@@ -113,6 +145,7 @@ impl Task {
         let end = state as u64;
         end
     }
+    /// Returns `end - start` (saturating), i.e. how much work is left.
     #[must_use]
     pub fn remain(&self) -> u64 {
         let range = self.get();
@@ -144,6 +177,10 @@ impl Task {
             }
         }
     }
+    /// Atomically claims and returns the entire remaining range `start..end`,
+    /// emptying this task (sets `start = end`).
+    ///
+    /// Returns `None` if the task is already empty.
     #[must_use]
     pub fn take(&self) -> Option<Range<u64>> {
         let mut old_state = self.state.load(Ordering::Acquire);
@@ -164,21 +201,28 @@ impl Task {
             }
         }
     }
+    /// Creates a [`WeakTask`] that does not keep the task's state alive.
     #[must_use]
     pub fn downgrade(&self) -> WeakTask {
         WeakTask {
             state: Arc::downgrade(&self.state),
         }
     }
+    /// Returns the number of strong ([`Task`]) references to this task's state.
     #[must_use]
     pub fn strong_count(&self) -> usize {
         Arc::strong_count(&self.state)
     }
+    /// Returns the number of weak ([`WeakTask`]) references to this task's state.
     #[must_use]
     pub fn weak_count(&self) -> usize {
         Arc::weak_count(&self.state)
     }
 }
+/// Creates a [`Task`] from a `start..end` range.
+///
+/// # Panics
+/// Panics (via [`Task::new`]) if `range.start > range.end`.
 impl From<Range<u64>> for Task {
     fn from(value: Range<u64>) -> Self {
         Self::new(value)
@@ -237,5 +281,66 @@ mod tests {
         assert_eq!(task.start(), 1);
         assert_eq!(task.end(), 2);
         assert_eq!(range, None);
+    }
+
+    #[test]
+    fn test_safe_add_start_no_progress() {
+        let task = Task::new(10..20);
+        // bias 0 -> start does not advance
+        assert_eq!(task.safe_add_start(10, 0), Err(RangeError));
+        // bias would not exceed current start
+        assert_eq!(task.safe_add_start(8, 2), Err(RangeError));
+    }
+
+    #[test]
+    fn test_safe_add_start_claims_span() {
+        let task = Task::new(10..20);
+        let span = task.safe_add_start(10, 5).unwrap();
+        assert_eq!(span, 10..15);
+        assert_eq!(task.start(), 15);
+        assert_eq!(task.remain(), 5);
+    }
+
+    #[test]
+    fn test_safe_add_start_capped_at_end() {
+        let task = Task::new(10..12);
+        let span = task.safe_add_start(10, 100).unwrap();
+        assert_eq!(span, 10..12);
+        assert_eq!(task.remain(), 0);
+    }
+
+    #[test]
+    fn test_take_empties() {
+        let task = Task::new(5..9);
+        assert_eq!(task.take(), Some(5..9));
+        assert_eq!(task.take(), None);
+        assert_eq!(task.remain(), 0);
+    }
+
+    #[test]
+    fn test_downgrade_upgrade() {
+        let task = Task::new(1..10);
+        let weak = task.downgrade();
+        assert_eq!(weak.strong_count(), 1);
+        assert_eq!(weak.upgrade().unwrap().get(), 1..10);
+        drop(task);
+        assert_eq!(weak.upgrade(), None);
+    }
+
+    #[test]
+    fn test_partial_eq_by_ptr() {
+        let a = Task::new(1..10);
+        let b = a.clone();
+        assert_eq!(a, b);
+        let c = Task::new(1..10);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_split_two_halves() {
+        let task = Task::new(0..100);
+        let range = task.split_two().unwrap().unwrap();
+        assert_eq!(range, 50..100);
+        assert_eq!(task.get(), 0..50);
     }
 }

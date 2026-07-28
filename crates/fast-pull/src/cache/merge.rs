@@ -1,3 +1,5 @@
+//! Pusher cache that merges each flush run into a single contiguous buffer.
+
 use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::{Bytes, BytesMut};
 use std::collections::{BTreeMap, btree_map::Entry};
@@ -18,6 +20,10 @@ pub struct CacheMergePusher<P> {
 }
 
 impl<P: Pusher> CacheMergePusher<P> {
+    /// Wrap `inner` with the given `high_watermark` / `low_watermark` (in bytes).
+    ///
+    /// Eviction to the inner pusher triggers once the buffered size reaches
+    /// `high_watermark`, and stops once it falls back to `low_watermark`.
     pub const fn new(inner: P, high_watermark: usize, low_watermark: usize) -> Self {
         Self {
             inner,
@@ -137,5 +143,116 @@ impl<P: Pusher> Pusher for CacheMergePusher<P> {
     fn flush(&mut self) -> Result<(), Self::Error> {
         self.evict_until(0)?;
         self.inner.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// A `Pusher` that records everything pushed into a shared buffer so tests
+    /// can inspect it without reaching into `CacheMergePusher`'s private fields.
+    #[derive(Clone)]
+    struct SharedSink {
+        pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
+        fail_next: Arc<AtomicBool>,
+    }
+    impl SharedSink {
+        fn new() -> Self {
+            Self {
+                pushes: Arc::new(Mutex::new(Vec::new())),
+                fail_next: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+    impl Pusher for SharedSink {
+        type Error = std::io::Error;
+        fn set_listener(&mut self, _: ProgressListener) {}
+        fn push(
+            &mut self,
+            range: &ProgressEntry,
+            bytes: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            if self.fail_next.fetch_and(false, Ordering::SeqCst) {
+                return Err((std::io::Error::other("boom"), bytes));
+            }
+            self.pushes.lock().unwrap().push((range.clone(), bytes));
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    fn bb(s: &str) -> Bytes {
+        Bytes::copy_from_slice(s.as_bytes())
+    }
+
+    #[test]
+    fn test_cache_merge_evicts_contiguous_run() {
+        let sink = SharedSink::new();
+        let mut p = CacheMergePusher::new(sink.clone(), 30, 0);
+        // Out-of-order insertion; not yet at watermark.
+        p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
+        p.push(&(20..30), bb(&"C".repeat(10))).unwrap();
+        assert!(sink.pushes.lock().unwrap().is_empty());
+        // This insertion reaches the high watermark and triggers a merge+evict.
+        p.push(&(10..20), bb(&"B".repeat(10))).unwrap();
+        let pushes = sink.pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(pushes[0].0, 0..30);
+        assert_eq!(pushes[0].1.len(), 30);
+        // Merged bytes preserve ascending order: A(0..10) B(10..20) C(20..30).
+        assert_eq!(&pushes[0].1[..], b"AAAAAAAAAABBBBBBBBBBCCCCCCCCCC");
+        drop(pushes);
+    }
+
+    #[test]
+    fn test_cache_merge_no_evict_below_watermark() {
+        let sink = SharedSink::new();
+        let mut p = CacheMergePusher::new(sink.clone(), 100, 0);
+        p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
+        p.push(&(10..20), bb(&"B".repeat(10))).unwrap();
+        assert!(sink.pushes.lock().unwrap().is_empty());
+        // Explicit flush must drain the buffered run to the inner pusher.
+        p.flush().unwrap();
+        let pushes = sink.pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(pushes[0].0, 0..20);
+        drop(pushes);
+    }
+
+    #[test]
+    fn test_cache_merge_inner_failure_propagates() {
+        let sink = SharedSink::new();
+        sink.fail_next.store(true, Ordering::SeqCst);
+        let mut p = CacheMergePusher::new(sink, 10, 0);
+        let res = p.push(&(0..10), bb(&"A".repeat(10)));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_cache_merge_empty_bytes_is_noop() {
+        let sink = SharedSink::new();
+        let mut p = CacheMergePusher::new(sink.clone(), 1, 0);
+        p.push(&(0..0), Bytes::new()).unwrap();
+        assert!(sink.pushes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_cache_merge_partial_overwrite_replaces() {
+        // A chunk at an already-cached start position replaces the old bytes.
+        let sink = SharedSink::new();
+        let mut p = CacheMergePusher::new(sink.clone(), 100, 0);
+        p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
+        p.push(&(0..10), bb(&"B".repeat(10))).unwrap();
+        p.flush().unwrap();
+        let pushes = sink.pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(&pushes[0].1[..], b"BBBBBBBBBB");
+        drop(pushes);
     }
 }

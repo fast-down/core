@@ -1,8 +1,15 @@
+//! Prefetch metadata for a downloadable URL over HTTP.
+//!
+//! [`Prefetch::prefetch`] issues the initial GET (and a range probe) through a
+//! [`crate::http::HttpClient`], then assembles a [`crate::UrlInfo`] describing
+//! the resource: its size, suggested filename, content type, range support, and
+//! the [`crate::FileId`] used for resumable downloads.
+
 use crate::{
     UrlInfo,
     http::{
-        ContentDisposition, GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder,
-        HttpResponse,
+        ContentDisposition, GetRequestError, GetResponse, HttpClient, HttpError, HttpHeaders,
+        HttpRequestBuilder, HttpResponse,
     },
     url_info::FileId,
 };
@@ -11,7 +18,7 @@ use url::Url;
 
 /// Result of a prefetch operation: the metadata ([`UrlInfo`]) and the initial HTTP response.
 pub type PrefetchResult<Client> =
-    Result<(UrlInfo, GetResponse<Client>), (HttpError<Client>, Option<Duration>)>;
+    Result<(UrlInfo, GetResponse<Client>), (GetRequestError<Client>, Option<Duration>)>;
 
 /// Trait for fetching resource metadata (size, filename, range support) from a URL.
 ///
@@ -50,8 +57,8 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
                 })
                 .filter(|s| !s.trim().is_empty())
         })
-        .or_else(|| url.host_str().map(ToString::to_string))
-        .unwrap_or_else(|| url.to_string())
+        .or_else(|| url.host_str().map(|s| s.replace('.', "_")))
+        .unwrap_or_else(|| url.to_string().replace('.', "_"))
 }
 
 async fn prefetch<Client: HttpClient>(client: &Client, url: Url) -> PrefetchResult<Client> {
@@ -76,11 +83,7 @@ async fn prefetch_no_range<Client: HttpClient>(
     client: &Client,
     url: Url,
 ) -> PrefetchResult<Client> {
-    let resp = client
-        .get(url, None)
-        .send()
-        .await
-        .map_err(|(e, d)| (HttpError::Request(e), d))?;
+    let resp = client.get(url, None).send().await?;
     let headers = resp.headers();
     let size = headers
         .get("content-length")

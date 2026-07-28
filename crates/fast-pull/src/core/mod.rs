@@ -1,9 +1,17 @@
+//! Top-level download orchestration: session handle plus single- and
+//! multi-threaded entry points.
+//!
+//! [`download_single`](crate::single::download_single) runs a sequential pull,
+//! while [`download_multi`](crate::multi::download_multi) splits the work across
+//! concurrent workers with work-stealing. Both return a [`DownloadResult`], a
+//! cheaply cloneable handle that keeps the session alive until the last clone is
+//! dropped (or [`DownloadResult::abort`] is called).
+
 use crate::{Event, handle::SharedHandle};
 use core::sync::atomic::{AtomicBool, Ordering};
 use crossfire::{MAsyncRx, mpmc};
 use fast_steal::{Executor, Handle, TaskQueue};
 use std::fmt;
-use std::ops::Deref;
 use std::sync::{Arc, OnceLock, Weak};
 use std::thread::Thread;
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
@@ -21,13 +29,13 @@ pub mod single;
 /// cancellation happens, giving `DownloadResult` `Arc`-style "last owner gone →
 /// release" semantics: the download keeps running as long as any handle is
 /// alive, and is cancelled only when the final one is dropped.
-pub struct DownloadResultInner<E, PullError, PushError>
+struct DownloadResultInner<E, PullError, PushError>
 where
     E: Executor + Send + Sync,
     PullError: Send + Unpin + 'static,
     PushError: Send + Unpin + 'static,
 {
-    pub event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
+    event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
     handle: SharedHandle<()>,
     abort_handles: Option<Arc<[AbortHandle]>>,
     task_queue: Option<(Weak<E>, TaskQueue<E::Handle>)>,
@@ -135,11 +143,11 @@ where
 ///
 /// Cheaply cloneable shared handle. The underlying download keeps running as
 /// long as **any** clone is alive, and is cancelled only once the last clone is
-/// dropped. An explicit [`DownloadResultInner::abort`] cancels immediately.
+/// dropped. An explicit [`abort`](Self::abort) cancels immediately.
 ///
-/// `DownloadResult` derefs to [`DownloadResultInner`], so all session methods
-/// (`join`, `abort`, `set_threads`, `is_aborted`) and the `event_chain` field
-/// are reachable directly on the handle.
+/// `DownloadResult` derefs to `DownloadResultInner`, so all session methods
+/// (`join`, `abort`, `set_threads`, `is_aborted`) and the [`event_chain`](Self::event_chain)
+/// method are reachable directly on the handle.
 #[derive(Debug)]
 pub struct DownloadResult<E, PullError, PushError>
 where
@@ -163,25 +171,18 @@ where
     }
 }
 
-impl<E, PullError, PushError> Deref for DownloadResult<E, PullError, PushError>
-where
-    E: Executor + Send + Sync,
-    PullError: Send + Unpin + 'static,
-    PushError: Send + Unpin + 'static,
-{
-    type Target = DownloadResultInner<E, PullError, PushError>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
 impl<E, PullError, PushError> DownloadResult<E, PullError, PushError>
 where
     E: Executor + Send + Sync,
     PullError: Send + Unpin + 'static,
     PushError: Send + Unpin + 'static,
 {
+    /// Construct a [`DownloadResult`] from the raw session pieces.
+    ///
+    /// This is an internal constructor used by
+    /// [`download_single`](crate::single::download_single) and
+    /// [`download_multi`](crate::multi::download_multi); prefer those entry
+    /// points instead of calling this directly.
     pub fn new(
         event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
         handle: JoinHandle<()>,
@@ -200,5 +201,43 @@ where
                 push_worker,
             }),
         }
+    }
+
+    /// Access the stream of [`Event`]s emitted during the session.
+    ///
+    /// The receiver closes once the last clone of this handle is dropped or the
+    /// session is aborted, so draining it is a natural way to observe progress.
+    #[must_use]
+    pub fn event_chain(&self) -> &MAsyncRx<mpmc::List<Event<PullError, PushError>>> {
+        &self.inner.event_chain
+    }
+
+    /// # Errors
+    /// Returns `Arc<JoinError>` if the writer thread exits unexpectedly
+    pub async fn join(&self) -> Result<(), Arc<JoinError>> {
+        self.inner.join().await
+    }
+
+    /// Cancel all workers immediately.
+    ///
+    /// Safe to call multiple times and safe to call while other clones of the
+    /// owning [`DownloadResult`] are still alive. The implicit drop-based
+    /// cancellation (on the last clone) becomes a no-op once this has run.
+    pub fn abort(&self) {
+        self.inner.abort();
+    }
+
+    /// Adjust the worker thread count and minimum chunk size of a running
+    /// multi-threaded session.
+    ///
+    /// No-op for single-threaded sessions, which have no task queue.
+    pub fn set_threads(&self, threads: usize, min_chunk_size: u64) {
+        self.inner.set_threads(threads, min_chunk_size);
+    }
+
+    /// Whether the session has been (or is being) cancelled.
+    #[must_use]
+    pub fn is_aborted(&self) -> bool {
+        self.inner.is_aborted()
     }
 }

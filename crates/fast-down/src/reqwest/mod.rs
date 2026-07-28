@@ -1,5 +1,19 @@
 #![cfg(not(target_family = "wasm"))]
 
+//! A `reqwest`-based implementation of the [`crate::http`] HTTP traits with
+//! smart redirect handling.
+//!
+//! This module adapts `reqwest` to the backend-agnostic [`crate::http::HttpClient`]
+//! trait family and, more importantly, provides [`SmartRedirectClient`]: a
+//! `reqwest::Client` wrapper that follows redirects **manually** so it can honor
+//! the `Referrer-Policy` header and strip resource-specific headers
+//! (`Origin` / `Authorization` / `Cookie`) on cross-origin hops, per RFC 9110
+//! §15.4. The corresponding request builder is [`ManualRedirectRequestBuilder`].
+//!
+//! Most users do not construct these types directly; instead they build a
+//! `FastDownPuller` via `build_client`, which creates a
+//! correctly-configured [`SmartRedirectClient`].
+
 use crate::http::{
     HttpClient, HttpHeaders, HttpRequestBuilder, HttpResponse,
     manual_redirect::{ReferrerPolicy, compute_referer},
@@ -37,13 +51,13 @@ impl HttpRequestBuilder for RequestBuilder {
         let res = self
             .send()
             .await
-            .map_err(|e| (ReqwestResponseError::Reqwest(e), None))?;
+            .map_err(|e| (ReqwestResponseError::Request(e), None))?;
         let status = res.status();
         if status.is_success() {
             Ok(res)
         } else {
             let retry_after = parse_retry_after(res.headers());
-            Err((ReqwestResponseError::StatusCode(status), retry_after))
+            Err((ReqwestResponseError::StatusCode(res), retry_after))
         }
     }
 }
@@ -81,9 +95,9 @@ pub enum ReqwestGetHeaderError {
 #[derive(thiserror::Error, Debug)]
 pub enum ReqwestResponseError {
     #[error("Reqwest error {0:?}")]
-    Reqwest(reqwest::Error),
-    #[error("Status code {0:?}")]
-    StatusCode(reqwest::StatusCode),
+    Request(reqwest::Error),
+    #[error("Url: {}, Status Code: {}, Headers: {:?}", .0.url(), .0.status(), .0.headers())]
+    StatusCode(Response),
 }
 
 /// Parse the `Retry-After` response header into a [`Duration`].
@@ -118,6 +132,18 @@ pub struct SmartRedirectClient {
 }
 
 impl SmartRedirectClient {
+    /// Build a [`SmartRedirectClient`] from an already-constructed `reqwest::Client`.
+    ///
+    /// * `client` — the underlying client. **Must** be built with
+    ///   `redirect(reqwest::redirect::Policy::none())`, otherwise the manual
+    ///   redirect logic here conflicts with reqwest's own auto-follow.
+    /// * `initial_referer` — the `Referer` sent on the first request.
+    /// * `referrer_policy` — the policy applied when no `Referrer-Policy`
+    ///   header is present on a response; per-hop headers override it.
+    /// * `origin` / `authorization` / `cookie` — resource-specific headers
+    ///   injected only on the first hop and stripped on redirect (RFC 9110 §15.4).
+    /// * `max_redirects` — the maximum number of redirects to follow before
+    ///   failing with a `StatusCode` error.
     #[must_use]
     pub const fn new(
         client: Client,
@@ -215,7 +241,7 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
             let resp = req
                 .send()
                 .await
-                .map_err(|e| (ReqwestResponseError::Reqwest(e), None))?;
+                .map_err(|e| (ReqwestResponseError::Request(e), None))?;
 
             // DEBUG ASSERT: If reqwest auto-followed redirects, resp.url() will differ
             // from the URL we sent the request to. This means the inner Client was NOT
@@ -234,12 +260,12 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
                     Ok(resp)
                 } else {
                     let retry_after = parse_retry_after(resp.headers());
-                    Err((ReqwestResponseError::StatusCode(status), retry_after))
+                    Err((ReqwestResponseError::StatusCode(resp), retry_after))
                 };
             }
             if self.redirect_count >= self.max_redirects {
                 let retry_after = parse_retry_after(resp.headers());
-                return Err((ReqwestResponseError::StatusCode(status), retry_after));
+                return Err((ReqwestResponseError::StatusCode(resp), retry_after));
             }
             let location = if let Some(v) = resp.headers().get(header::LOCATION)
                 && let Ok(s) = v.to_str()
@@ -247,11 +273,11 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
                 s
             } else {
                 let retry_after = parse_retry_after(resp.headers());
-                return Err((ReqwestResponseError::StatusCode(status), retry_after));
+                return Err((ReqwestResponseError::StatusCode(resp), retry_after));
             };
             let Ok(mut next_url) = self.url.join(location) else {
                 let retry_after = parse_retry_after(resp.headers());
-                return Err((ReqwestResponseError::StatusCode(status), retry_after));
+                return Err((ReqwestResponseError::StatusCode(resp), retry_after));
             };
             // RFC 9110 §10.2.2: If the Location header lacks a fragment,
             // inherit it from the original request URI.
@@ -296,7 +322,7 @@ mod tests {
     )]
     use super::*;
     use crate::{
-        http::{HttpError, HttpPuller, Prefetch},
+        http::{HttpPuller, Prefetch},
         url_info::FileId,
     };
     use fast_pull::{
@@ -411,17 +437,9 @@ mod tests {
         match client.prefetch(url).await {
             Ok(info) => unreachable!("404 status code should not success: {info:?}"),
             Err((err, _)) => match err {
-                HttpError::Request(e) => match e {
-                    ReqwestResponseError::Reqwest(error) => unreachable!("{error:?}"),
-                    ReqwestResponseError::StatusCode(status_code) => {
-                        assert_eq!(status_code, StatusCode::NOT_FOUND);
-                    }
-                },
-                HttpError::Chunk(_, _) | HttpError::Irrecoverable => {
-                    unreachable!()
-                }
-                HttpError::MismatchedBody(file_id, _) => {
-                    unreachable!("404 status code should not return mismatched body: {file_id:?}")
+                ReqwestResponseError::Request(error) => unreachable!("{error:?}"),
+                ReqwestResponseError::StatusCode(resp) => {
+                    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
                 }
             },
         }
@@ -494,7 +512,7 @@ mod tests {
         // `PushProgress` now flows on the same `event_chain` as the engine events
         // (the sink's listener emits it the moment data is actually written), so a
         // single drain collects both pull and push progress.
-        while let Ok(e) = result.event_chain.recv().await {
+        while let Ok(e) = result.event_chain().recv().await {
             match e {
                 Event::PullProgress(_, p) => pull_progress.merge_progress(p),
                 Event::PushProgress(p) => push_progress.merge_progress(p),
@@ -549,7 +567,7 @@ mod tests {
         // `PushProgress` now flows on the same `event_chain` as the engine events
         // (the sink's listener emits it the moment data is actually written), so a
         // single drain collects both pull and push progress.
-        while let Ok(e) = result.event_chain.recv().await {
+        while let Ok(e) = result.event_chain().recv().await {
             match e {
                 Event::PullProgress(_, p) => pull_progress.merge_progress(p),
                 Event::PushProgress(p) => push_progress.merge_progress(p),
