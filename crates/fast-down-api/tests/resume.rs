@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fast_down_api::{
-    DownloadHandle, Event, PartialConfig, ResumeError, Rx, WriteMethod, create_cancellation_token,
+    DownloadHandle, Event, PartialConfig, Rx, StateError, WriteMethod, create_cancellation_token,
     create_channel,
 };
 use futures::StreamExt;
@@ -227,7 +227,7 @@ fn make_config(save_dir: &Path) -> PartialConfig {
         save_dir: Some(save_dir.to_path_buf()),
         filename: Some("out.bin".to_string()),
         parse_filename: Some(false),
-        overwrite: Some(false),
+        overwrite: Some(true),
         write_method: Some(WriteMethod::Mmap),
         min_chunk_size: Some(1024 * 1024),
         threads: Some(1),
@@ -255,8 +255,7 @@ async fn partial_download_via_cancel(
     let cfg = make_config(save_dir);
     let (tx, rx) = create_channel();
     let _handle =
-        DownloadHandle::download(Url::parse(url).expect("valid url"), cfg, tx, cancel.clone())
-            .expect("spawn download");
+        DownloadHandle::download(Url::parse(url).expect("valid url"), cfg, tx, cancel.clone());
 
     let mut events = Vec::new();
     let mut started = false;
@@ -311,8 +310,7 @@ async fn test_resume_success() {
         cfg,
         tx,
         resume_cancel,
-    )
-    .expect("spawn resume");
+    );
     let events = drain(rx).await;
 
     let (_, size) = events
@@ -364,8 +362,7 @@ async fn test_file_changed_download_falls_back() {
     let (tx, rx) = create_channel();
     let dl_cancel = create_cancellation_token();
     let _handle =
-        DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, dl_cancel)
-            .expect("spawn download");
+        DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, dl_cancel);
     let events = drain(rx).await;
 
     assert!(
@@ -390,7 +387,7 @@ async fn test_file_changed_download_falls_back() {
 }
 
 /// Case 2 (resume branch): a stale `.fd` (remote file changed) makes `resume()`
-/// report `ResumeError::FileChanged` and keep the partial files untouched.
+/// report `StateError::FileChanged` and keep the partial files untouched.
 #[tokio::test]
 async fn test_file_changed_resume_reports_error() {
     let dir = temp_dir("file_changed_resume");
@@ -412,20 +409,19 @@ async fn test_file_changed_resume_reports_error() {
         cfg,
         tx,
         resume_cancel,
-    )
-    .expect("spawn resume");
+    );
     let events = drain(rx).await;
 
     let err = events
         .iter()
         .find_map(|e| match e {
-            Event::ResumeError(r) => Some(r.clone()),
+            Event::ResumeError(r) => Some(r),
             _ => None,
         })
         .expect("expected Event::ResumeError");
     assert!(
-        matches!(err, ResumeError::FileChanged { .. }),
-        "expected Event::ResumeError(ResumeError::FileChanged), got {err:?}"
+        matches!(err, StateError::FileChanged { .. }),
+        "expected Event::ResumeError(StateError::FileChanged), got {err:?}"
     );
 
     assert!(
@@ -441,7 +437,7 @@ async fn test_file_changed_resume_reports_error() {
     );
 }
 
-/// Case 3: `resume()` with no `.fd` state file reports `ResumeError::NoStateFile`.
+/// Case 3: `resume()` with no `.fd` state file reports `StateError::Open`.
 #[tokio::test]
 async fn test_resume_no_state_file() {
     let dir = temp_dir("resume_no_state_file");
@@ -463,18 +459,20 @@ async fn test_resume_no_state_file() {
         cfg,
         tx,
         cancel,
-    )
-    .expect("spawn resume");
+    );
     let events = drain(rx).await;
 
     let err = events
         .iter()
         .find_map(|e| match e {
-            Event::ResumeError(r) => Some(r.clone()),
+            Event::ResumeError(r) => Some(r),
             _ => None,
         })
         .expect("expected Event::ResumeError");
-    assert_eq!(err, ResumeError::NoStateFile);
+    assert!(
+        matches!(err, StateError::Open(_)),
+        "expected Event::ResumeError(StateError::Open) for missing .fd, got {err:?}"
+    );
     assert!(
         !events.iter().any(|e| matches!(e, Event::Renamed(_))),
         "resume() must NOT rename when there is no .fd"
@@ -482,16 +480,18 @@ async fn test_resume_no_state_file() {
 }
 
 /// Case 4: `resume()` against a server that does not support range requests
-/// reports `ResumeError::NotResumable`.
+/// reports `StateError::NotResumable`.
 #[tokio::test]
 async fn test_resume_not_resumable() {
     let dir = temp_dir("resume_not_resumable");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", false).await;
-    // `tmp_path` (.part) must exist so `force_resume` is engaged; the
-    // non-range server then reports `NotResumable`.
+    // A cancelled download leaves a valid `.fd` + `.part` for the non-range
+    // server; `resume()` must then report `NotResumable` (server can't range).
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+
     let final_path = dir.join("out.bin");
     let part = final_path.with_added_extension("part");
-    let _ = std::fs::File::create(&part).expect("create .part");
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
@@ -501,18 +501,20 @@ async fn test_resume_not_resumable() {
         cfg,
         tx,
         cancel,
-    )
-    .expect("spawn resume");
+    );
     let events = drain(rx).await;
 
     let err = events
         .iter()
         .find_map(|e| match e {
-            Event::ResumeError(r) => Some(r.clone()),
+            Event::ResumeError(r) => Some(r),
             _ => None,
         })
         .expect("expected Event::ResumeError");
-    assert_eq!(err, ResumeError::NotResumable);
+    assert!(
+        matches!(err, StateError::NotResumable(..)),
+        "expected Event::ResumeError(StateError::NotResumable), got {err:?}"
+    );
 }
 
 /// Case 5 (explicit): the previous round's fix — a cancel must preserve `.part`
@@ -546,8 +548,7 @@ async fn test_cancel_keeps_part_and_fd_then_resume() {
         cfg,
         tx,
         resume_cancel,
-    )
-    .expect("spawn resume");
+    );
     let events = drain(rx).await;
 
     assert!(
@@ -593,8 +594,7 @@ async fn test_resume_missing_tmp_path_falls_back_to_download() {
         cfg,
         tx,
         cancel,
-    )
-    .expect("spawn resume");
+    );
     let events = drain(rx).await;
 
     assert!(
@@ -632,8 +632,7 @@ async fn test_fresh_download_writes_full_file() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
-    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel)
-        .expect("spawn download");
+    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = drain(rx).await;
 
     assert!(
