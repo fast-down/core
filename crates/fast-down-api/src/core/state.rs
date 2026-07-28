@@ -86,6 +86,7 @@ impl DownloadState {
     ///
     /// # Errors
     /// Returns an error if the file cannot be read or deserialized.
+    #[allow(clippy::result_large_err)]
     pub async fn load(config_path: &Path) -> Result<Self, StateError> {
         let inner = fs::read(&config_path).await.map_err(StateError::Open)?;
         let inner: PartialDownloadStateInner = toml::from_slice(&inner)?;
@@ -100,6 +101,7 @@ impl DownloadState {
     ///
     /// # Errors
     /// Returns an error if serializing or writing the state fails.
+    #[allow(clippy::result_large_err)]
     pub async fn store(&mut self) -> Result<(), StateError> {
         if self.is_dirty {
             self.inner
