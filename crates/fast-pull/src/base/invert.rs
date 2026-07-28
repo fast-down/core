@@ -77,4 +77,45 @@ mod tests {
         assert_eq!(invert_vec(&[2..4, 6..8, 10..12], 15, 5), [0..15]);
         assert_eq!(invert_vec(&[0..2, 10..20], 30, 5), [2..10, 20..30]);
     }
+
+    #[test]
+    fn test_invert_empty_progress() {
+        // Nothing downloaded of a 50-byte file -> one gap spanning everything.
+        assert_eq!(invert_vec(&[], 50, 1), [0..50]);
+    }
+
+    #[test]
+    fn test_invert_zero_total_size() {
+        // total_size 0 -> no gaps, even if progress is present.
+        assert_eq!(invert_vec(&[0..5], 0, 1), []);
+    }
+
+    #[test]
+    fn test_invert_full_cover_no_gaps() {
+        assert_eq!(invert_vec(&[0..30], 30, 1), []);
+    }
+
+    #[test]
+    fn test_invert_window_zero_keeps_small_entries() {
+        #![allow(clippy::single_range_in_vec_init)]
+        // window=0 means every entry (even tiny) is kept, so small entries are
+        // not merged into the surrounding gap.
+        assert_eq!(invert_vec(&[10..12], 30, 0), [0..10, 12..30]);
+    }
+
+    #[test]
+    fn test_invert_trailing_gap_only() {
+        assert_eq!(invert_vec(&[0..20], 30, 1), [20..30]);
+    }
+
+    #[test]
+    fn test_invert_leading_gap_only() {
+        assert_eq!(invert_vec(&[10..30], 30, 1), [0..10]);
+    }
+
+    #[test]
+    fn test_invert_contiguous_then_gap() {
+        #![allow(clippy::single_range_in_vec_init)]
+        assert_eq!(invert_vec(&[0..10, 10..20], 30, 1), [20..30]);
+    }
 }

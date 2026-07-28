@@ -26,3 +26,27 @@ impl Total for Vec<ProgressEntry> {
         self.iter().map(Total::total).sum()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_entry_total() {
+        assert_eq!((0..0).total(), 0);
+        assert_eq!((5..10).total(), 5);
+        assert_eq!((3..3).total(), 0);
+        // A reversed range must not underflow: saturating_sub yields 0.
+        let reversed = core::ops::Range { start: 10, end: 5 };
+        assert_eq!(reversed.total(), 0);
+    }
+
+    #[test]
+    fn vec_progress_total() {
+        #![allow(clippy::single_range_in_vec_init)]
+        let v: Vec<ProgressEntry> = vec![1..5, 8..10, 12..15];
+        assert_eq!(v.total(), 9);
+        let empty: Vec<ProgressEntry> = vec![];
+        assert_eq!(empty.total(), 0);
+    }
+}

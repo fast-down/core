@@ -34,3 +34,53 @@ pub fn parse_filename_template(template: String, url: &Url, filename: &str) -> S
         .replace("{file_stem}", file_stem)
         .replace("{file_ext}", file_ext)
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use url::Url;
+
+    #[test]
+    fn all_placeholders() {
+        let url = Url::parse("https://example.com/path/to/file.txt").unwrap();
+        let t = "{host}/{parent_path}/{file_name}_{file_stem}{file_ext}";
+        let out = parse_filename_template(t.to_string(), &url, "file.txt");
+        assert!(out.starts_with("example.com"));
+        assert!(out.contains("path"));
+        assert!(out.contains("to"));
+        assert!(out.ends_with("file.txt_file.txt"));
+    }
+
+    #[test]
+    fn no_placeholders_passthrough() {
+        let url = Url::parse("https://example.com/x").unwrap();
+        assert_eq!(parse_filename_template("plain".to_string(), &url, "f.txt"), "plain");
+    }
+
+    #[test]
+    fn host_unknown_when_no_host() {
+        let url = Url::parse("file:///etc/hosts").unwrap();
+        assert_eq!(parse_filename_template("{host}".to_string(), &url, "hosts"), "unknown");
+    }
+
+    #[test]
+    fn parent_path_root_when_no_dir() {
+        let url = Url::parse("https://example.com/file.txt").unwrap();
+        assert_eq!(parse_filename_template("{parent_path}".to_string(), &url, "file.txt"), ".");
+    }
+
+    #[test]
+    fn file_ext_includes_dot() {
+        let url = Url::parse("https://example.com/a/b.tar.gz").unwrap();
+        let out = parse_filename_template("{file_stem}{file_ext}".to_string(), &url, "b.tar.gz");
+        assert_eq!(out, "b.tar.gz");
+    }
+
+    #[test]
+    fn no_dot_file_has_empty_ext() {
+        let url = Url::parse("https://example.com/README").unwrap();
+        let out = parse_filename_template("{file_stem}|{file_ext}".to_string(), &url, "README");
+        assert_eq!(out, "README|");
+    }
+}

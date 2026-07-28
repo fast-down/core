@@ -53,3 +53,43 @@ impl<T> Proxy<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_transforms_custom_only() {
+        assert_eq!(Proxy::<i32>::No.map(|x| x + 1), Proxy::No);
+        assert_eq!(Proxy::<i32>::System.map(|x| x + 1), Proxy::System);
+        assert_eq!(Proxy::Custom(5).map(|x| x + 1), Proxy::Custom(6));
+    }
+
+    #[test]
+    fn as_deref_borrows_custom() {
+        let p: Proxy<String> = Proxy::Custom("http".to_string());
+        assert_eq!(p.as_deref(), Proxy::Custom("http"));
+        assert_eq!(Proxy::<String>::No.as_deref(), Proxy::No);
+        assert_eq!(Proxy::<String>::System.as_deref(), Proxy::System);
+    }
+
+    #[test]
+    fn as_ref_borrows_custom() {
+        let p: Proxy<i32> = Proxy::Custom(7);
+        assert_eq!(p.as_ref(), Proxy::Custom(&7));
+        assert_eq!(Proxy::<i32>::No.as_ref(), Proxy::No);
+        assert_eq!(Proxy::<i32>::System.as_ref(), Proxy::System);
+    }
+
+    #[test]
+    fn default_is_system() {
+        assert_eq!(Proxy::<String>::default(), Proxy::System);
+    }
+
+    #[test]
+    fn copy_and_equality() {
+        let p = Proxy::Custom(3);
+        let q = p; // Proxy is Copy
+        assert_eq!(p, q);
+    }
+}

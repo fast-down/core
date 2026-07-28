@@ -217,4 +217,46 @@ mod tests {
         let cd = ContentDisposition::parse(s);
         assert_eq!(cd.filename.unwrap(), ";\";;");
     }
+
+    #[test]
+    fn test_no_semicolon_is_none() {
+        assert_eq!(ContentDisposition::parse("attachment").filename, None);
+    }
+
+    #[test]
+    fn test_empty_header() {
+        assert_eq!(ContentDisposition::parse("").filename, None);
+        assert_eq!(ContentDisposition::parse("   ").filename, None);
+    }
+
+    #[test]
+    fn test_filename_star_non_utf8_ignored() {
+        // A non-UTF-8 charset is unsupported, so `filename*` is dropped.
+        let s = "attachment; filename*=ISO-8859-1''%A3.txt";
+        assert_eq!(ContentDisposition::parse(s).filename, None);
+    }
+
+    #[test]
+    fn test_filename_star_wins_over_filename() {
+        let s = r#"attachment; filename="old.txt"; filename*=UTF-8''%E6%B5%8B.txt"#;
+        assert_eq!(ContentDisposition::parse(s).filename.unwrap(), "测.txt");
+    }
+
+    #[test]
+    fn test_unquoted_token_stops_at_space() {
+        let s = "attachment; filename=foo bar.txt";
+        assert_eq!(ContentDisposition::parse(s).filename.unwrap(), "foo");
+    }
+
+    #[test]
+    fn test_consecutive_semicolons() {
+        let s = "attachment;;; filename=foo.txt";
+        assert_eq!(ContentDisposition::parse(s).filename.unwrap(), "foo.txt");
+    }
+
+    #[test]
+    fn test_quoted_with_escaped_quote() {
+        let s = r#"attachment; filename="a\"b.txt""#;
+        assert_eq!(ContentDisposition::parse(s).filename.unwrap(), "a\"b.txt");
+    }
 }

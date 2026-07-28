@@ -282,4 +282,65 @@ mod tests {
         assert_eq!(task.end(), 2);
         assert_eq!(range, None);
     }
+
+    #[test]
+    fn test_safe_add_start_no_progress() {
+        let task = Task::new(10..20);
+        // bias 0 -> start does not advance
+        assert_eq!(task.safe_add_start(10, 0), Err(RangeError));
+        // bias would not exceed current start
+        assert_eq!(task.safe_add_start(8, 2), Err(RangeError));
+    }
+
+    #[test]
+    fn test_safe_add_start_claims_span() {
+        let task = Task::new(10..20);
+        let span = task.safe_add_start(10, 5).unwrap();
+        assert_eq!(span, 10..15);
+        assert_eq!(task.start(), 15);
+        assert_eq!(task.remain(), 5);
+    }
+
+    #[test]
+    fn test_safe_add_start_capped_at_end() {
+        let task = Task::new(10..12);
+        let span = task.safe_add_start(10, 100).unwrap();
+        assert_eq!(span, 10..12);
+        assert_eq!(task.remain(), 0);
+    }
+
+    #[test]
+    fn test_take_empties() {
+        let task = Task::new(5..9);
+        assert_eq!(task.take(), Some(5..9));
+        assert_eq!(task.take(), None);
+        assert_eq!(task.remain(), 0);
+    }
+
+    #[test]
+    fn test_downgrade_upgrade() {
+        let task = Task::new(1..10);
+        let weak = task.downgrade();
+        assert_eq!(weak.strong_count(), 1);
+        assert_eq!(weak.upgrade().unwrap().get(), 1..10);
+        drop(task);
+        assert_eq!(weak.upgrade(), None);
+    }
+
+    #[test]
+    fn test_partial_eq_by_ptr() {
+        let a = Task::new(1..10);
+        let b = a.clone();
+        assert_eq!(a, b);
+        let c = Task::new(1..10);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_split_two_halves() {
+        let task = Task::new(0..100);
+        let range = task.split_two().unwrap().unwrap();
+        assert_eq!(range, 50..100);
+        assert_eq!(task.get(), 0..50);
+    }
 }

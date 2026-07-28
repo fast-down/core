@@ -123,4 +123,69 @@ mod tests {
         v.merge_progress(30..5);
         assert_eq!(v, vec![10..20]);
     }
+
+    #[test]
+    fn test_merge_into_empty_vec() {
+        #![allow(clippy::single_range_in_vec_init)]
+        let mut v: Vec<ProgressEntry> = vec![];
+        v.merge_progress(5..10);
+        assert_eq!(v, vec![5..10]);
+    }
+
+    #[test]
+    fn test_merge_superset_absorbs_all() {
+        #![allow(clippy::single_range_in_vec_init)]
+        let mut v = vec![1..5, 8..10, 20..30];
+        v.merge_progress(0..40);
+        assert_eq!(v, vec![0..40]);
+    }
+
+    #[test]
+    fn test_merge_exact_duplicate_is_noop() {
+        #![allow(clippy::single_range_in_vec_init)]
+        let mut v = vec![1..5];
+        v.merge_progress(1..5);
+        assert_eq!(v, vec![1..5]);
+    }
+
+    #[test]
+    fn test_merge_touching_right_extends() {
+        #![allow(clippy::single_range_in_vec_init)]
+        let mut v = vec![1..5];
+        v.merge_progress(5..8);
+        assert_eq!(v, vec![1..8]);
+    }
+
+    #[test]
+    fn test_merge_touching_left_extends() {
+        #![allow(clippy::single_range_in_vec_init)]
+        let mut v = vec![5..10];
+        v.merge_progress(1..5);
+        assert_eq!(v, vec![1..10]);
+    }
+
+    /// Simulate concurrent, out-of-order chunk delivery where each chunk is
+    /// *adjacent* (touching but not overlapping) the next — the worst case for
+    /// `download_complete`'s `x.len() == 1` check in `overwrite.rs`. This must
+    /// still coalesce into a single `[0..200]` entry, otherwise the download
+    /// would be wrongly reported as incomplete and the `.part` never renamed.
+    #[test]
+    fn test_merge_out_of_order_adjacent_coalesces_to_single() {
+        let mut v: Vec<ProgressEntry> = vec![];
+        // 4 chunks of 50 bytes on a 200-byte file, arriving in a scrambled order.
+        v.merge_progress(0..50);
+        v.merge_progress(150..200);
+        v.merge_progress(100..150);
+        v.merge_progress(50..100);
+        assert_eq!(v, vec![0..200]);
+
+        // And the canonical "fully covered, single entry" invariant holds for
+        // any interleaving that covers the whole span.
+        let mut w: Vec<ProgressEntry> = vec![];
+        for r in [0..70, 140..200, 70..140] {
+            w.merge_progress(r);
+        }
+        assert_eq!(w, vec![0..200]);
+        assert!(w.len() == 1 && w[0] == (0..200));
+    }
 }

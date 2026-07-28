@@ -71,3 +71,49 @@ impl FileId {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn file_id_new() {
+        let f = FileId::new(Some("abc"), Some("def"));
+        assert_eq!(f.etag, Some(Arc::from("abc")));
+        assert_eq!(f.last_modified, Some(Arc::from("def")));
+    }
+
+    #[test]
+    fn file_id_none_fields() {
+        let f = FileId::new(None, None);
+        assert_eq!(f.etag, None);
+        assert_eq!(f.last_modified, None);
+    }
+
+    #[test]
+    fn file_id_equality() {
+        assert_eq!(FileId::new(Some("x"), None), FileId::new(Some("x"), None));
+        assert_ne!(FileId::new(Some("x"), None), FileId::new(Some("x"), Some("y")));
+    }
+
+    #[test]
+    fn url_info_filename_sanitizes() {
+        #![allow(unused_variables)]
+        let info = UrlInfo {
+            size: 10,
+            raw_name: "a/b:c*?.txt".to_string(),
+            supports_range: true,
+            fast_download: true,
+            final_url: Url::parse("http://example.com/x").unwrap(),
+            file_id: FileId::default(),
+            content_type: Some("text/plain".to_string()),
+        };
+        #[cfg(feature = "sanitize-filename")]
+        {
+            let name = info.filename();
+            assert!(!name.is_empty());
+            assert!(!name.contains(['/', ':', '*', '?']));
+        }
+    }
+}

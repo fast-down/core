@@ -183,3 +183,41 @@ impl PartialConfig {
             .merge_progress(progress);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_progress_none_to_some() {
+        let mut c = PartialConfig::default();
+        assert_eq!(c.downloaded_chunk, None);
+        c.merge_progress(1u64..5);
+        assert_eq!(c.downloaded_chunk, Some(vec![1u64..5]));
+    }
+
+    #[test]
+    fn merge_progress_coalesces() {
+        let mut c = PartialConfig::default();
+        c.merge_progress(1u64..5);
+        c.merge_progress(5u64..10);
+        c.merge_progress(10u64..20);
+        assert_eq!(c.downloaded_chunk, Some(vec![1u64..20]));
+    }
+
+    #[test]
+    fn merge_progress_empty_is_noop() {
+        let mut c = PartialConfig::default();
+        c.merge_progress(1u64..5);
+        c.merge_progress(3u64..3);
+        assert_eq!(c.downloaded_chunk, Some(vec![1u64..5]));
+    }
+
+    #[test]
+    fn merge_progress_disjoint() {
+        let mut c = PartialConfig::default();
+        c.merge_progress(1u64..5);
+        c.merge_progress(10u64..20);
+        assert_eq!(c.downloaded_chunk, Some(vec![1u64..5, 10u64..20]));
+    }
+}
