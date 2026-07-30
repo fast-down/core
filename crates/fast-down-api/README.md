@@ -19,7 +19,7 @@ drain progress events, resume after interruption, and cancel cooperatively.
 
 ## Quick start
 
-```rust,ignore
+```rust,no_run
 use fast_down_api::{create_cancellation_token, create_channel, DownloadHandle, Event, PartialConfig};
 use std::path::PathBuf;
 use url::Url;

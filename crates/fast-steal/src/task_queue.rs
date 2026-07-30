@@ -233,9 +233,12 @@ mod tests {
             let speculative = self.speculative;
             let handle = tokio::spawn(async move {
                 loop {
+                    // Keep the worker alive briefly so the shrink-mid-run test can
+                    // observe in-flight work without paying the recursive-fib cost.
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                     while task.start() < task.end() {
                         let i = task.start();
-                        let res = fib(i);
+                        let res = fib_fast(i);
                         let Ok(_) = task.safe_add_start(i, 1) else {
                             println!("task-failed: {i} = {res}");
                             continue;
@@ -253,13 +256,6 @@ mod tests {
         }
     }
 
-    fn fib(n: u64) -> u64 {
-        match n {
-            0 => 0,
-            1 => 1,
-            _ => fib(n - 1) + fib(n - 2),
-        }
-    }
     fn fib_fast(n: u64) -> u64 {
         let mut a = 0;
         let mut b = 1;
@@ -335,7 +331,7 @@ mod tests {
         let task_queue = TaskQueue::new(pre_data.iter().cloned());
         // Spin up 8 workers, let them make progress, then shrink to 2 mid-run.
         task_queue.set_threads(8, 1, Some(&executor)).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(800));
+        std::thread::sleep(std::time::Duration::from_millis(20));
         task_queue.set_threads(2, 1, Some(&executor)).unwrap();
         // The decrease branch must have actually reduced the running pool.
         assert_eq!(task_queue.inner.lock().running.len(), 2);
@@ -355,6 +351,155 @@ mod tests {
             }
         }
         assert_eq!(data.len(), 0);
+    }
+
+    /// A *correct* executor used to genuinely exercise work-stealing and
+    /// mid-run reclaim. Unlike [`TokioExecutor`], its handle carries a real
+    /// worker id so [`Handle::is_self`] resolves, and the worker loop has an
+    /// `.await` point so [`Handle::abort`] actually cancels in-flight tasks.
+    ///
+    /// This is what lets a shrink truly reclaim a busy worker's remaining range
+    /// into `waiting` and have the survivors pick it up via [`steal`], instead
+    /// of the existing tests' brute-force completion + `safe_add_start`
+    /// deduplication.
+    struct StealExecutor {
+        tx: mpsc::UnboundedSender<(usize, u64, u64)>,
+        speculative: usize,
+        next_id: Arc<Mutex<usize>>,
+        released: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[derive(Clone)]
+    struct StealHandle {
+        abort: AbortHandle,
+        id: usize,
+    }
+    impl Handle for StealHandle {
+        type Output = ();
+        type Id = usize;
+        fn abort(&mut self) {
+            self.abort.abort();
+        }
+        fn is_self(&mut self, id: &usize) -> bool {
+            self.id == *id
+        }
+    }
+    impl Executor for StealExecutor {
+        type Handle = StealHandle;
+        fn execute(&self, mut task: Task, q: TaskQueue<Self::Handle>) -> Self::Handle {
+            let id = {
+                let mut g = self.next_id.lock().unwrap();
+                let i = *g;
+                *g += 1;
+                i
+            };
+            let tx = self.tx.clone();
+            let speculative = self.speculative;
+            let released = self.released.clone();
+            // Stay in-flight (and keep `abort` effective via the `.await` point)
+            // until the test flips `released`, so a mid-run shrink sees this
+            // worker as still running.
+            let handle = tokio::spawn(async move {
+                while !released.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+                loop {
+                    while task.start() < task.end() {
+                        // Yield between numbers so a busy worker stays
+                        // schedulable while its peers steal from it, instead of
+                        // finishing its whole range in one uninterruptible burst.
+                        tokio::task::yield_now().await;
+                        let i = task.start();
+                        let res = i;
+                        if task.safe_add_start(i, 1).is_err() {
+                            continue;
+                        }
+                        tx.send((id, i, res)).unwrap();
+                    }
+                    tokio::task::yield_now().await;
+                    if !q.steal(&id, &mut task, 1, speculative) {
+                        break;
+                    }
+                }
+            });
+            StealHandle {
+                abort: handle.abort_handle(),
+                id,
+            }
+        }
+    }
+
+    /// Genuinely verifies work-stealing: one worker gets a huge range while the
+    /// other seven get single-number crumbs, so the crumb workers *must* `steal`
+    /// from the busy peer to finish. With a working `steal` every crumb worker
+    /// ends up computing more than its initial 1-number crumb; if `steal` were a
+    /// no-op (e.g. `is_self` broken) only the single big worker does >1 number.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_steal_distributes_work() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor = StealExecutor {
+            tx,
+            speculative: 1,
+            next_id: Arc::new(Mutex::new(0)),
+            released: released.clone(),
+        };
+        // One big task [7..1000] plus seven single-number crumbs.
+        let pre_data = [0..1, 1..2, 2..3, 3..4, 4..5, 5..6, 6..7, 7..1000];
+        let task_queue = TaskQueue::new(pre_data.iter().cloned());
+        task_queue.set_threads(8, 1, Some(&executor)).unwrap();
+        drop(executor);
+        released.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut seen = std::collections::HashSet::new();
+        let mut per_worker = HashMap::new();
+        while let Some((wid, i, res)) = rx.recv().await {
+            assert!(seen.insert(i), "number {i} computed twice");
+            assert_eq!(res, i);
+            *per_worker.entry(wid).or_insert(0) += 1;
+        }
+        assert_eq!(seen.len(), 1000, "not all numbers were computed");
+        // The discriminating check: with working steal, every crumb worker
+        // steals and ends up doing >1 number (here all 8 workers do). A broken
+        // `is_self` leaves exactly one worker (the big one) above 1.
+        let multi = per_worker.values().filter(|&&c| c > 1).count();
+        assert!(
+            multi >= 7,
+            "steal did not distribute work; only {multi} workers exceeded their \
+             initial crumb (per-worker counts: {per_worker:?})"
+        );
+    }
+
+    /// Genuinely verifies mid-run reclaim: 8 workers split a big task, then the
+    /// pool is cut to 2. The 6 aborted workers are truly cancelled (the worker
+    /// loop's `.await` point makes `abort` effective) and their remaining ranges
+    /// are reclaimed into `waiting`, where the 2 survivors pick them up via
+    /// `steal`. If reclaim or `steal` failed, those reclaimed ranges would be
+    /// lost and the count would fall short of 1000.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_set_threads_decrease_reclaims_via_steal() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor = StealExecutor {
+            tx,
+            speculative: 1,
+            next_id: Arc::new(Mutex::new(0)),
+            released: released.clone(),
+        };
+        let task_queue = TaskQueue::new(std::iter::once(0..1000));
+        task_queue.set_threads(8, 1, Some(&executor)).unwrap();
+        // Workers are spinning on `released` (in-flight), so the shrink sees
+        // them as still running.
+        task_queue.set_threads(2, 1, Some(&executor)).unwrap();
+        assert_eq!(task_queue.inner.lock().running.len(), 2);
+        released.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(executor);
+        let mut seen = std::collections::HashSet::new();
+        while let Some((_, i, res)) = rx.recv().await {
+            assert!(seen.insert(i), "number {i} computed twice (reclaim failed)");
+            assert_eq!(res, i);
+        }
+        // All 1000 must be present: the reclaimed ranges were picked up by the
+        // survivors via steal. A broken `is_self` (steal no-op) loses them.
+        assert_eq!(seen.len(), 1000, "reclaimed work was lost");
     }
 
     /// A lightweight executor used only to exercise `set_threads` bookkeeping

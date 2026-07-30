@@ -876,9 +876,13 @@ async fn test_progress_elapsed_persisted_across_resume() {
     let resume_progress: Vec<(Vec<fast_down::ProgressEntry>, u64, Duration, f64, u64)> = events
         .iter()
         .filter_map(|e| match e {
-            Event::Progress(s) => {
-                Some((s.progress.clone(), s.downloaded, s.elapsed, s.percent, s.total))
-            }
+            Event::Progress(s) => Some((
+                s.progress.clone(),
+                s.downloaded,
+                s.elapsed,
+                s.percent,
+                s.total,
+            )),
             _ => None,
         })
         .collect();

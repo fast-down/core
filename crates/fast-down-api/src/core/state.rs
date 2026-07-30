@@ -115,9 +115,8 @@ pub struct DownloadStateInner {
 /// `etag`, `last_modified`, `config` and `size` are reachable directly.
 ///
 /// The inner state is wrapped in an `Arc<Mutex<PartialDownloadStateInner>>` to
-/// provide a single source of truth shared between the engine loop,
-/// [`ProgressReporter`](crate::core::download::progress_reporter::ProgressReporter),
-/// and any other readers/writers.
+/// provide a single source of truth shared between the engine loop, the
+/// internal progress reporter, and any other readers/writers.
 ///
 /// `DownloadState` is cheaply `Clone`able: the clone shares the same inner state
 /// and the same dirty flag (both behind `Arc`), so a download driver can hand a
@@ -139,7 +138,7 @@ impl DownloadState {
 
     /// Returns a clone of the shared `Arc<Mutex<PartialDownloadStateInner>>`,
     /// for sharing the authoritative state with other tasks
-    /// (e.g. [`ProgressReporter`]).
+    /// (e.g. the internal progress reporter).
     #[must_use]
     pub fn share_inner(&self) -> Arc<Mutex<PartialDownloadStateInner>> {
         self.inner.clone()
