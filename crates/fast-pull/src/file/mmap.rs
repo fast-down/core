@@ -126,7 +126,7 @@ mod tests {
         let mut pusher = MmapFilePusher::new(&temp_file.reopen().unwrap().into(), 10, true)
             .await
             .unwrap();
-        let _ = format!("{:?}", &pusher);
+        let _ = format!("{pusher:?}");
         pusher.push(&(2..5), b"234"[..].into()).unwrap();
         pusher.flush().unwrap();
         let mut file_content = Vec::new();

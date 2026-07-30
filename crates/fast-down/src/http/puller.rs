@@ -360,8 +360,8 @@ mod tests {
         fn url(&self) -> &Url {
             &self.url
         }
-        async fn chunk(&mut self) -> Result<Option<Bytes>, Self::ChunkError> {
-            Ok(None)
+        fn chunk(&mut self) -> impl Future<Output = Result<Option<Bytes>, Self::ChunkError>> + Send {
+            std::future::ready(Ok(None))
         }
     }
 
@@ -424,8 +424,8 @@ mod tests {
         fn url(&self) -> &Url {
             &self.url
         }
-        async fn chunk(&mut self) -> Result<Option<Bytes>, Self::ChunkError> {
-            Err(MockError)
+        fn chunk(&mut self) -> impl Future<Output = Result<Option<Bytes>, Self::ChunkError>> + Send {
+            std::future::ready(Err(MockError))
         }
     }
 

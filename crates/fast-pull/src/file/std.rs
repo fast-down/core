@@ -164,7 +164,7 @@ mod tests {
         let pusher = StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, false)
             .await
             .unwrap();
-        let _ = format!("{:?}", &pusher);
+        let _ = format!("{pusher:?}");
     }
 
     #[tokio::test]

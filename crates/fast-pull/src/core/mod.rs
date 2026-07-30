@@ -273,7 +273,7 @@ mod tests {
             },
         );
         // Lines 63-68: `Debug` of `DownloadResultInner` (via the derived `Debug`).
-        let _ = format!("{:?}", &result);
+        let _ = format!("{result:?}");
         // Lines 234-236 (forwarding) and 111-123 (inner task-queue adjustment).
         result.set_threads(4, 1);
         result.join().await.unwrap();
