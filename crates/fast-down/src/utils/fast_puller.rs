@@ -260,4 +260,60 @@ mod tests {
             "clone() must share the same Arc<Url> (URL stored once)"
         );
     }
+
+    #[test]
+    fn build_client_custom_proxy_succeeds() {
+        let headers = HeaderMap::new();
+        let client = build_client(
+            headers,
+            Proxy::Custom("http://127.0.0.1:1080"),
+            false,
+            false,
+            false,
+            None,
+            10,
+        )
+        .expect("build_client with a custom proxy must succeed");
+        let _ = client;
+    }
+
+    #[test]
+    fn new_with_available_ips_rotates_local_address() {
+        let ips: Vec<std::net::IpAddr> = vec!["127.0.0.1".parse().unwrap()];
+        let mut opts = make_options(Url::parse("http://example.com/a.bin").unwrap());
+        opts.available_ips = Arc::from(ips);
+        let puller = FastDownPuller::new(opts).expect("FastDownPuller::new with ips must succeed");
+        let cloned = puller.clone();
+        assert!(Arc::ptr_eq(&puller.url, &cloned.url));
+    }
+
+    #[test]
+    fn clone_with_available_ips_rotates_local_address() {
+        let ips: Vec<std::net::IpAddr> = vec!["127.0.0.1".parse().unwrap()];
+        let mut opts = make_options(Url::parse("http://example.com/a.bin").unwrap());
+        opts.available_ips = Arc::from(ips);
+        let puller = FastDownPuller::new(opts).expect("FastDownPuller::new with ips must succeed");
+        // Cloning with non-empty available_ips rotates the local address and
+        // rebuilds a client via the `map_or_else` success branch.
+        let cloned = puller.clone();
+        assert!(Arc::ptr_eq(&puller.url, &cloned.url));
+    }
+
+    #[test]
+    fn build_client_system_proxy_succeeds() {
+        let headers = HeaderMap::new();
+        let client = build_client(headers, Proxy::System, false, false, false, None, 10)
+            .expect("build_client with the system proxy must succeed");
+        let _ = client;
+    }
+
+    #[tokio::test]
+    async fn fast_down_puller_pull_forwards_to_inner() {
+        let opts = make_options(Url::parse("http://example.com/a.bin").unwrap());
+        let mut puller = FastDownPuller::new(opts).expect("FastDownPuller::new must succeed");
+        // `pull` simply forwards to the inner `HttpPuller`; driving the stream is
+        // not required to cover the forwarding body.
+        let stream = FastDownPuller::pull(&mut puller, None).await;
+        assert!(stream.is_ok());
+    }
 }

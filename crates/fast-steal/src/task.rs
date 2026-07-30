@@ -239,7 +239,11 @@ impl Eq for Task {}
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    extern crate std;
     use super::*;
+    use std::sync::Arc;
+    use std::thread;
+    use std::vec::Vec;
 
     #[test]
     fn test_new_task() {
@@ -342,5 +346,105 @@ mod tests {
         let range = task.split_two().unwrap().unwrap();
         assert_eq!(range, 50..100);
         assert_eq!(task.get(), 0..50);
+    }
+
+    #[test]
+    fn weak_task_reports_strong_and_weak_counts() {
+        // Covers WeakTask::strong_count (task.rs 51-52) and WeakTask::weak_count
+        // (task.rs 55-56).
+        let task = Task::new(1..10);
+        let weak = task.downgrade();
+        assert_eq!(weak.strong_count(), 1);
+        assert_eq!(weak.weak_count(), 1);
+        // A second weak reference bumps the weak count.
+        let weak2 = task.downgrade();
+        assert_eq!(weak2.weak_count(), 2);
+        drop(weak2);
+        assert_eq!(weak.weak_count(), 1);
+    }
+
+    #[test]
+    fn task_weak_count_reflects_weak_refs() {
+        // Covers Task::weak_count (task.rs 218-220).
+        let task = Task::new(1..10);
+        assert_eq!(task.weak_count(), 0);
+        let _w1 = task.downgrade();
+        assert_eq!(task.weak_count(), 1);
+        let _w2 = task.downgrade();
+        assert_eq!(task.weak_count(), 2);
+    }
+
+    #[test]
+    fn safe_add_start_survives_contention() {
+        // Many threads advancing the same task forces the CAS in
+        // `safe_add_start` to fail and retry, exercising the `Err(x) => old_state = x`
+        // branch (`task.rs` line 135).
+        let task = Arc::new(Task::new(0..2_000));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let t = task.clone();
+            handles.push(thread::spawn(move || {
+                loop {
+                    let s = t.start();
+                    if s >= 2_000 {
+                        break;
+                    }
+                    if t.safe_add_start(s, 1).is_err() {
+                        // Lost the CAS race; loop and retry (exercises the err path).
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(task.get(), 2_000..2_000);
+        assert_eq!(task.remain(), 0);
+    }
+
+    #[test]
+    fn split_two_survives_contention() {
+        // Contended `split_two` exercises its CAS-failure branch (`task.rs` line 176).
+        let task = Arc::new(Task::new(0..2_000));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let t = task.clone();
+            handles.push(thread::spawn(
+                move || {
+                    while t.split_two().unwrap().is_some() {}
+                },
+            ));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        // split_two leaves a single (un-splittable) remaining element.
+        assert_eq!(task.remain(), 1);
+    }
+
+    #[test]
+    fn take_survives_contention() {
+        // Contended `take` exercises its CAS-failure branch (`task.rs` line 200).
+        let task = Arc::new(Task::new(0..2_000));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let t = task.clone();
+            handles.push(thread::spawn(move || while t.take().is_some() {}));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(task.remain(), 0);
+    }
+
+    #[test]
+    fn split_two_reports_invariant_violation_when_start_gt_end() {
+        // `Task::new` panics on start > end, so a corrupted/invalid state can
+        // only be built through the public `state` field. This pins the
+        // `range.start > range.end` guard in `split_two` (task.rs line 162).
+        let bad = Task {
+            state: std::sync::Arc::new(portable_atomic::AtomicU128::new((20u128 << 64) | 0xA)),
+        };
+        assert_eq!(bad.split_two(), Err(RangeError));
     }
 }

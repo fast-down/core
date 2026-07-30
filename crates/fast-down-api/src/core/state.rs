@@ -469,4 +469,47 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    #[tokio::test]
+    #[allow(clippy::single_range_in_vec_init)]
+    async fn merge_config_preserves_loaded_progress_into_fresh() {
+        // Regression guard for the `Some(downloaded_chunk)` arm of
+        // `merge_config` (state.rs lines 313-317): when the loaded `.fd` already
+        // records progress, that progress must be folded into the fresh request so a
+        // resumed download keeps the already-downloaded bytes, and the fresh
+        // request's own overrides (here `min_chunk_size`) must still apply.
+        let path = std::env::temp_dir().join(format!(
+            "fd_merge_progress_{}.fd",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let state = make_state(&path);
+        // Simulate a loaded state that already recorded two contiguous ranges.
+        state.inner.lock().config = Some(PartialConfig {
+            downloaded_chunk: Some(vec![0u64..10, 10..20]),
+            ..Default::default()
+        });
+
+        let fresh = PartialConfig {
+            min_chunk_size: Some(2048),
+            ..Default::default()
+        };
+        state.merge_config(&fresh);
+
+        let merged = state.inner.lock().config.clone().unwrap();
+        assert_eq!(
+            merged.downloaded_chunk,
+            Some(vec![0u64..20]),
+            "loaded progress must be preserved and merged into the fresh config"
+        );
+        assert_eq!(
+            merged.min_chunk_size,
+            Some(2048),
+            "fresh request overrides must still be applied via inherit_from"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

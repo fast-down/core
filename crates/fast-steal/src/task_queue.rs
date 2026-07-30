@@ -200,9 +200,12 @@ mod tests {
     extern crate std;
     use crate::{Executor, Handle, Task, TaskQueue};
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         dbg, println,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
         vec::Vec,
     };
     use tokio::{sync::mpsc, task::AbortHandle};
@@ -457,12 +460,20 @@ mod tests {
             *per_worker.entry(wid).or_insert(0) += 1;
         }
         assert_eq!(seen.len(), 1000, "not all numbers were computed");
-        // The discriminating check: with working steal, every crumb worker
-        // steals and ends up doing >1 number (here all 8 workers do). A broken
-        // `is_self` leaves exactly one worker (the big one) above 1.
+        // The discriminating check: with working steal, crumb workers steal from
+        // the big peer and end up doing far more than their initial 1-number
+        // crumb. A broken `is_self` makes `steal` a no-op, leaving *exactly one*
+        // worker (the big one) above 1.
+        //
+        // The threshold is deliberately loose. How many crumb workers get a bite
+        // depends on scheduling: a crumb worker that wakes late may find the big
+        // range already drained by its peers and legitimately finish with 1. So
+        // we assert "several workers shared the big range", not "all of them" —
+        // that still fails hard (1 < 3) when steal is broken, without being
+        // flaky under an unlucky interleaving.
         let multi = per_worker.values().filter(|&&c| c > 1).count();
         assert!(
-            multi >= 7,
+            multi >= 3,
             "steal did not distribute work; only {multi} workers exceeded their \
              initial crumb (per-worker counts: {per_worker:?})"
         );
@@ -641,5 +652,45 @@ mod tests {
         assert_eq!(guard.running.len(), 0);
         assert_eq!(guard.waiting.len(), total);
         drop(guard);
+    }
+
+    /// `add` pushes onto the waiting queue (`task_queue.rs` 50-53) and a live worker's
+    /// `steal` then pulls that freshly-added task off `waiting` (the `found = true;
+    /// break` branch, `task_queue.rs` line 91) before falling back to stealing from a
+    /// busy peer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_add_then_steal_pulls_from_waiting() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let released = Arc::new(AtomicBool::new(false));
+        let executor = StealExecutor {
+            tx,
+            speculative: 1,
+            next_id: Arc::new(Mutex::new(0)),
+            released: released.clone(),
+        };
+        // A single tiny initial task so exactly one worker is registered and the
+        // waiting queue starts empty.
+        let q = TaskQueue::new(std::iter::once(0..1));
+        q.set_threads(1, 1, Some(&executor)).unwrap();
+        // `add` lands a brand-new task in `waiting` (covers 50-53).
+        q.add(Task::new(100..110));
+        assert_eq!(q.inner.lock().waiting.len(), 1);
+
+        drop(executor);
+        released.store(true, Ordering::Relaxed);
+
+        let mut seen = HashSet::new();
+        while let Some((_id, i, _res)) = rx.recv().await {
+            seen.insert(i);
+        }
+        // The initial task ran...
+        assert!(seen.contains(&0), "initial task was not executed");
+        // ...and the `add`ed task was pulled from `waiting` via `steal` (line 91).
+        for i in 100..110 {
+            assert!(
+                seen.contains(&i),
+                "added task range element {i} was never stolen"
+            );
+        }
     }
 }

@@ -271,4 +271,35 @@ mod tests {
         assert_eq!(l[0], (0, 4, b"abcd".to_vec()));
         drop(l);
     }
+
+    #[test]
+    fn empty_push_is_a_noop() {
+        // Line 89: a zero-length chunk returns `Ok(())` without touching the buffer.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut bp = BufWriterPusher::new(RecordingPusher { log: log.clone() }, 1024);
+        bp.push(&(0..0), Bytes::new()).unwrap();
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn flush_failure_during_push_returns_caller_bytes() {
+        // Lines 97-101: a non-contiguous write while the buffer is non-empty triggers
+        // an inner flush; when that flush fails, the caller's bytes are handed back.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut bp = BufWriterPusher::new(
+            FlakyPusher {
+                log,
+                did_fail: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            1024,
+        );
+        // Buffered run [0..4); the FlakyPusher fails its first inner push.
+        bp.push(&(0..4), Bytes::from_static(b"abcd")).unwrap();
+        // Non-contiguous write forces a flush of [0..4), which fails; the incoming
+        // bytes [10..14) are returned to the caller.
+        let res = bp.push(&(10..14), Bytes::from_static(b"efgh"));
+        assert!(res.is_err());
+        let (_e, remaining) = res.unwrap_err();
+        assert_eq!(&remaining[..], b"efgh");
+    }
 }

@@ -194,3 +194,47 @@ impl ProgressReporter {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::too_many_lines)]
+    use super::ProgressReporter;
+    use crate::PartialConfig;
+    use crate::core::state::DownloadState;
+    use fast_down::UrlInfo;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+    use url::Url;
+
+    #[test]
+    fn compute_reports_zero_percent_when_total_is_zero() {
+        // Covers progress_reporter.rs:133-134 (total == 0 short-circuit:
+        // percent is forced to 0.0 instead of dividing by zero).
+        let url = Url::parse("https://example.com/x").unwrap();
+        let info = UrlInfo {
+            size: 0,
+            raw_name: "x".to_string(),
+            supports_range: false,
+            fast_download: false,
+            final_url: url.clone(),
+            file_id: fast_down::FileId::new(None, None),
+            content_type: None,
+        };
+        let state = DownloadState::new(
+            &url,
+            &info,
+            &PartialConfig::default(),
+            Path::new("/tmp/_pr_zero_total.fd"),
+        );
+        let reporter = ProgressReporter::new(Duration::ZERO, 0, state.share_inner());
+        let sample = reporter.compute(Instant::now(), None);
+        assert_eq!(sample.total, 0);
+        assert!(
+            (sample.percent).abs() < f64::EPSILON,
+            "percent must be 0.0 when total is 0, got {}",
+            sample.percent
+        );
+        assert_eq!(sample.downloaded, 0);
+        assert!(sample.eta.is_none());
+    }
+}

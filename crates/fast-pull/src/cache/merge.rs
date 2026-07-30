@@ -159,18 +159,22 @@ mod tests {
     struct SharedSink {
         pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
         fail_next: Arc<AtomicBool>,
+        listener_set: Arc<AtomicBool>,
     }
     impl SharedSink {
         fn new() -> Self {
             Self {
                 pushes: Arc::new(Mutex::new(Vec::new())),
                 fail_next: Arc::new(AtomicBool::new(false)),
+                listener_set: Arc::new(AtomicBool::new(false)),
             }
         }
     }
     impl Pusher for SharedSink {
         type Error = std::io::Error;
-        fn set_listener(&mut self, _: ProgressListener) {}
+        fn set_listener(&mut self, _: ProgressListener) {
+            self.listener_set.store(true, Ordering::SeqCst);
+        }
         fn push(
             &mut self,
             range: &ProgressEntry,
@@ -253,6 +257,73 @@ mod tests {
         let pushes = sink.pushes.lock().unwrap();
         assert_eq!(pushes.len(), 1);
         assert_eq!(&pushes[0].1[..], b"BBBBBBBBBB");
+        drop(pushes);
+    }
+
+    #[test]
+    fn test_cache_merge_set_listener_forwards() {
+        // Lines 120-122 (forwarding) and 173 (inner set_listener): the listener must
+        // reach the inner sink.
+        let sink = SharedSink::new();
+        let mut p = CacheMergePusher::new(sink.clone(), 100, 0);
+        p.set_listener(Box::new(|_| {}));
+        assert!(sink.listener_set.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_cache_merge_equal_watermarks_noop() {
+        // Line 39: when high == low and the cache reaches the watermark, evict_until
+        // returns immediately because `cache_size <= target_size` is already true.
+        let sink = SharedSink::new();
+        let mut p = CacheMergePusher::new(sink.clone(), 10, 10);
+        p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
+        // No eviction happens at the watermark.
+        assert!(sink.pushes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_cache_merge_gap_segmentation_and_reinsert() {
+        // Covers 54-58 (gap segmentation), 84-96 (multi-chunk merge) and 109-111
+        // (a multi-chunk run re-inserted when eviction stops at the low watermark).
+        //
+        // Layout at eviction time (high=200, low=70):
+        //   runA [0..100)  two chunks  -> 100 bytes (longest)
+        //   runB [200..260) two chunks -> 60 bytes
+        //   runC [300..340) two chunks -> 40 bytes (multi-chunk, stays buffered)
+        //   runD [400..420) one chunk  -> 20 bytes (single, stays buffered)
+        let sink = SharedSink::new();
+        let mut p = CacheMergePusher::new(sink.clone(), 200, 70);
+        p.push(&(0..50), bb(&"A".repeat(50))).unwrap();
+        p.push(&(50..100), bb(&"A".repeat(50))).unwrap();
+        p.push(&(200..230), bb(&"B".repeat(30))).unwrap();
+        p.push(&(230..260), bb(&"B".repeat(30))).unwrap();
+        p.push(&(300..320), bb(&"C".repeat(20))).unwrap();
+        p.push(&(320..340), bb(&"C".repeat(20))).unwrap();
+        p.push(&(400..420), bb(&"D".repeat(20))).unwrap();
+
+        let pushes = sink.pushes.lock().unwrap();
+        // runA and runB were pushed; runC/runD remain buffered below the low mark.
+        assert_eq!(pushes.len(), 2);
+        assert_eq!(pushes[0].0, 0..100);
+        assert_eq!(pushes[1].0, 200..260);
+        drop(pushes);
+    }
+
+    #[test]
+    fn test_cache_merge_reaches_low_watermark_stops_single() {
+        // Line 78: once cache_size falls to <= low_watermark, a remaining single-chunk
+        // run is `continue`d (left in the cache) rather than pushed.
+        let sink = SharedSink::new();
+        let mut p = CacheMergePusher::new(sink.clone(), 200, 70);
+        p.push(&(0..100), bb(&"A".repeat(100))).unwrap();
+        p.push(&(200..240), bb(&"B".repeat(40))).unwrap();
+        p.push(&(300..340), bb(&"C".repeat(40))).unwrap();
+        p.push(&(400..420), bb(&"D".repeat(20))).unwrap();
+
+        let pushes = sink.pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 2);
+        assert_eq!(pushes[0].0, 0..100);
+        assert_eq!(pushes[1].0, 200..240);
         drop(pushes);
     }
 }

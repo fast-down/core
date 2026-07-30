@@ -123,3 +123,168 @@ impl<P: Pusher> Pusher for CacheDirectPusher<P> {
         self.inner.flush()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// Records every push and can be told to fail the next one, returning the
+    /// bytes so the cache can re-buffer them.
+    #[derive(Clone)]
+    struct RecordingSink {
+        pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
+        fail_next: Arc<AtomicBool>,
+        listener_set: Arc<AtomicBool>,
+    }
+    impl RecordingSink {
+        fn new() -> Self {
+            Self {
+                pushes: Arc::new(Mutex::new(Vec::new())),
+                fail_next: Arc::new(AtomicBool::new(false)),
+                listener_set: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+    impl Pusher for RecordingSink {
+        type Error = std::io::Error;
+        fn set_listener(&mut self, _: ProgressListener) {
+            self.listener_set.store(true, Ordering::SeqCst);
+        }
+        fn push(
+            &mut self,
+            range: &ProgressEntry,
+            bytes: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            if self.fail_next.fetch_and(false, Ordering::SeqCst) {
+                return Err((std::io::Error::other("boom"), bytes));
+            }
+            self.pushes.lock().unwrap().push((range.clone(), bytes));
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    fn bb(s: &str) -> Bytes {
+        Bytes::copy_from_slice(s.as_bytes())
+    }
+
+    #[test]
+    fn empty_push_is_noop() {
+        // Lines 103-105: a zero-length chunk returns `Ok(())` without buffering.
+        let sink = RecordingSink::new();
+        let mut p = CacheDirectPusher::new(sink.clone(), 100, 0);
+        p.push(&(0..0), Bytes::new()).unwrap();
+        assert!(sink.pushes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn equal_watermarks_noop_eviction() {
+        // Lines 38-39: with high == low, reaching the watermark makes evict_until
+        // return immediately because `cache_size <= target_size`.
+        let sink = RecordingSink::new();
+        let mut p = CacheDirectPusher::new(sink.clone(), 10, 10);
+        p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
+        assert!(sink.pushes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn below_watermark_buffers_until_flush() {
+        // No eviction happens while below the high watermark; flush pushes each chunk.
+        let sink = RecordingSink::new();
+        let mut p = CacheDirectPusher::new(sink.clone(), 100, 10);
+        p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
+        p.push(&(10..20), bb(&"B".repeat(10))).unwrap();
+        assert!(sink.pushes.lock().unwrap().is_empty());
+        p.flush().unwrap();
+        let pushes = sink.pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 2);
+        assert_eq!(pushes[0].0, 0..10);
+        assert_eq!(pushes[1].0, 10..20);
+        drop(pushes);
+    }
+
+    #[test]
+    fn evicts_longest_run_first() {
+        // Lines 42-68: runs are segmented, sorted longest-first, and each chunk is
+        // flushed as-is in ascending offset order within a run.
+        let sink = RecordingSink::new();
+        let mut p = CacheDirectPusher::new(sink.clone(), 70, 0);
+        // runB (length 40)
+        p.push(&(100..120), bb(&"B".repeat(20))).unwrap();
+        p.push(&(120..140), bb(&"B".repeat(20))).unwrap();
+        // runC (length 10)
+        p.push(&(200..210), bb(&"C".repeat(10))).unwrap();
+        // runA (length 20, split so the trigger crosses the watermark mid-run)
+        p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
+        p.push(&(10..20), bb(&"A".repeat(10))).unwrap();
+        // The final 10 bytes of runA arrive after the eviction.
+        p.push(&(20..30), bb(&"A".repeat(10))).unwrap();
+        p.flush().unwrap();
+
+        let pushes = sink.pushes.lock().unwrap();
+        // Longest run (runB, length 40) must be flushed first.
+        assert_eq!(pushes[0].0, 100..120);
+        assert_eq!(pushes.len(), 6);
+        drop(pushes);
+    }
+
+    #[test]
+    fn duplicate_start_overwrites_old_bytes() {
+        // Lines 107-110: re-inserting at an already-cached start replaces the old
+        // bytes and keeps `cache_size` correct.
+        let sink = RecordingSink::new();
+        let mut p = CacheDirectPusher::new(sink.clone(), 100, 0);
+        p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
+        p.push(&(0..10), bb(&"B".repeat(10))).unwrap();
+        p.flush().unwrap();
+        let pushes = sink.pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(&pushes[0].1[..], b"BBBBBBBBBB");
+        drop(pushes);
+    }
+
+    #[test]
+    fn inner_push_failure_rebuffers_partial() {
+        // Lines 77-84: when an inner push fails, the un-written tail is re-inserted
+        // into the cache and the error is returned to the caller.
+        let sink = RecordingSink::new();
+        sink.fail_next.store(true, Ordering::SeqCst);
+        let mut p = CacheDirectPusher::new(sink, 10, 0);
+        let res = p.push(&(0..10), bb(&"A".repeat(10)));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn evict_stops_early_at_low_watermark() {
+        // Lines 87-89: once the buffered size drops to <= low_watermark, the
+        // eviction loop breaks early and the remaining (separate) run stays buffered.
+        // The three chunks are kept as separate runs via gaps.
+        let sink = RecordingSink::new();
+        let mut p = CacheDirectPusher::new(sink.clone(), 100, 30);
+        p.push(&(0..60), bb(&"A".repeat(60))).unwrap();
+        p.push(&(100..120), bb(&"B".repeat(20))).unwrap();
+        p.push(&(200..220), bb(&"C".repeat(20))).unwrap();
+
+        let pushes = sink.pushes.lock().unwrap();
+        // runA is flushed; runB and runC are retained because the cache is already
+        // at/below the low watermark after runA.
+        assert_eq!(pushes.len(), 2);
+        assert_eq!(pushes[0].0, 0..60);
+        assert_eq!(pushes[1].0, 100..120);
+        drop(pushes);
+    }
+
+    #[test]
+    fn set_listener_forwards_to_inner() {
+        // Lines 98-99: the listener is forwarded to the inner pusher.
+        let sink = RecordingSink::new();
+        let mut p = CacheDirectPusher::new(sink.clone(), 100, 0);
+        p.set_listener(Box::new(|_| {}));
+        assert!(sink.listener_set.load(Ordering::SeqCst));
+    }
+}

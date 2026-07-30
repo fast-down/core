@@ -393,4 +393,76 @@ mod range_list_tests {
         let back: PartialConfig = toml::from_str(&toml).unwrap();
         assert_eq!(back.downloaded_chunk, Some(vec![5..6]));
     }
+
+    #[test]
+    fn downloaded_chunk_rejects_range_without_dash() {
+        // No '-' separator: `split_once('-')` fails (deserialize lines 299-303).
+        let toml = "downloaded_chunk = \"5\"\n";
+        let err = toml::from_str::<PartialConfig>(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("downloaded_chunk"),
+            "missing-dash range must be rejected with a clear error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn downloaded_chunk_rejects_bad_start() {
+        // Non-numeric start: `start_repr.parse()` fails (lines 304-306).
+        let toml = "downloaded_chunk = \"x-10\"\n";
+        let err = toml::from_str::<PartialConfig>(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("downloaded_chunk") && msg.contains('x'),
+            "invalid start must be rejected with a clear error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn downloaded_chunk_rejects_bad_end() {
+        // Non-numeric end: `end_repr.parse()` fails (lines 307-309).
+        let toml = "downloaded_chunk = \"5-y\"\n";
+        let err = toml::from_str::<PartialConfig>(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("downloaded_chunk") && msg.contains('y'),
+            "invalid end must be rejected with a clear error, got: {msg}"
+        );
+    }
+
+    /// Covers the `None` arm of `range_list::serialize` (`config.rs` line 267).
+    ///
+    /// `PartialConfig` can never reach it: `inherit-config` injects
+    /// `#[serde(skip_serializing_if = "Option::is_none")]` on every partial
+    /// field, so serde skips the field entirely instead of calling the helper.
+    /// A local wrapper without that attribute exercises the arm directly.
+    #[test]
+    fn range_list_serialize_none_emits_nothing() {
+        #[derive(Serialize)]
+        struct Wrapper {
+            #[serde(with = "super::range_list")]
+            downloaded_chunk: Option<Vec<ProgressEntry>>,
+        }
+
+        let toml = toml::to_string(&Wrapper {
+            downloaded_chunk: None,
+        })
+        .unwrap();
+        assert!(
+            toml.is_empty(),
+            "a `None` chunk list must serialize to nothing, got:\n{toml}"
+        );
+    }
+
+    /// Covers the `None` arm of `range_list::deserialize` (`config.rs` line 290).
+    ///
+    /// TOML has no `null` and the partial field carries `serde(default)`, so a
+    /// missing key never calls the helper; the arm is only reachable by feeding
+    /// the helper a deserializer that yields `None` directly.
+    #[test]
+    fn range_list_deserialize_none_yields_none() {
+        let de = serde::de::value::UnitDeserializer::<serde::de::value::Error>::new();
+        let parsed = range_list::deserialize(de).unwrap();
+        assert_eq!(parsed, None);
+    }
 }

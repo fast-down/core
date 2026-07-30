@@ -35,3 +35,78 @@ pub async fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Re
     fs::create_dir_all(&save_dir).await?;
     Ok(save_dir.join(&filename))
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::PartialConfig;
+    use fast_down::UrlInfo;
+    use inherit_config::ConfigLayer;
+    use std::path::PathBuf;
+    use url::Url;
+
+    fn make_info(raw_name: &str, content_type: Option<&str>) -> UrlInfo {
+        UrlInfo {
+            size: 100,
+            raw_name: raw_name.to_string(),
+            supports_range: true,
+            fast_download: true,
+            final_url: Url::parse("https://example.com/x").unwrap(),
+            file_id: fast_down::FileId::new(None, None),
+            content_type: content_type.map(str::to_string),
+        }
+    }
+
+    fn make_config(save_dir: &std::path::Path, filename: &str, parse_filename: bool) -> Config {
+        let pc = PartialConfig {
+            save_dir: Some(save_dir.to_path_buf()),
+            filename: Some(filename.to_string()),
+            parse_filename: Some(parse_filename),
+            ..Default::default()
+        };
+        pc.build()
+    }
+
+    fn tempdir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gen_path_test_{name}_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[tokio::test]
+    async fn empty_filename_uses_auto_ext() {
+        // filename empty => `auto_ext` branch (line 12) is taken.
+        let dir = tempdir("auto_ext");
+        let url = Url::parse("https://example.com/path/data.bin?x=1").unwrap();
+        let info = make_info("data.bin", Some("application/octet-stream"));
+        let cfg = make_config(&dir, "", false);
+        let p = gen_path(&url, &info, &cfg).await.unwrap();
+        assert_eq!(p.file_name().unwrap(), "data.bin");
+    }
+
+    #[tokio::test]
+    async fn explicit_filename_used_when_parse_disabled() {
+        // filename non-empty + parse_filename false => `Cow::Borrowed` branch.
+        let dir = tempdir("borrowed");
+        let url = Url::parse("https://example.com/path/data.bin").unwrap();
+        let info = make_info("data.bin", None);
+        let cfg = make_config(&dir, "myname.txt", false);
+        let p = gen_path(&url, &info, &cfg).await.unwrap();
+        assert_eq!(p.file_name().unwrap(), "myname.txt");
+    }
+
+    #[tokio::test]
+    async fn template_expands_into_subdir() {
+        // parse_filename true + non-empty filename => template branch (lines 20-33).
+        let dir = tempdir("template");
+        let url = Url::parse("https://example.com/a/b/data.bin").unwrap();
+        let info = make_info("data.bin", None);
+        let cfg = make_config(&dir, "{parent_path}/{file_name}", true);
+        let p = gen_path(&url, &info, &cfg).await.unwrap();
+        // parent_path of /a/b/data.bin is "a/b", so the resolved path ends with it.
+        assert!(p.ends_with("a/b/data.bin"), "unexpected path: {p:?}");
+        // The synthesized parent directory must have been created by gen_path.
+        assert!(p.parent().is_some_and(std::path::Path::exists));
+    }
+}

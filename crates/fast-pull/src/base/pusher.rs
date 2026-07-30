@@ -97,3 +97,120 @@ impl BoxPusher {
         Box::new(e)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// A `Pusher` that does not override the default `set_listener` / `flush`.
+    struct DummyPusher;
+    impl Pusher for DummyPusher {
+        type Error = std::io::Error;
+        fn push(
+            &mut self,
+            _range: &ProgressEntry,
+            _content: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_set_listener_is_noop() {
+        // Exercises the default `Pusher::set_listener` body (line 42) and the
+        // default-`flush` `DummyPusher::push` path (lines 112-118).
+        let mut p = DummyPusher;
+        p.set_listener(Box::new(|_| {}));
+        p.push(&(0..0), Bytes::new()).unwrap();
+    }
+
+    #[test]
+    fn upcast_boxes_any_error() {
+        // Exercises `BoxPusher::upcast` (lines 96-98).
+        let boxed: Box<dyn AnyError> = BoxPusher::upcast(std::io::Error::other("boom"));
+        let _ = boxed;
+    }
+
+    /// Records every push and listener install; can be told to fail the next
+    /// `push`/`flush` so the `BoxPusher` (and its `PusherAdapter`) error paths
+    /// are exercised.
+    #[derive(Clone)]
+    struct RecordingPusher {
+        pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
+        fail_push: Arc<AtomicBool>,
+        fail_flush: Arc<AtomicBool>,
+        listener_set: Arc<AtomicBool>,
+    }
+    impl RecordingPusher {
+        fn new() -> Self {
+            Self {
+                pushes: Arc::new(Mutex::new(Vec::new())),
+                fail_push: Arc::new(AtomicBool::new(false)),
+                fail_flush: Arc::new(AtomicBool::new(false)),
+                listener_set: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+    impl Pusher for RecordingPusher {
+        type Error = std::io::Error;
+        fn set_listener(&mut self, _: ProgressListener) {
+            self.listener_set.store(true, Ordering::SeqCst);
+        }
+        fn push(
+            &mut self,
+            range: &ProgressEntry,
+            bytes: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            if self.fail_push.swap(false, Ordering::SeqCst) {
+                return Err((std::io::Error::other("push"), bytes));
+            }
+            self.pushes.lock().unwrap().push((range.clone(), bytes));
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            if self.fail_flush.swap(false, Ordering::SeqCst) {
+                Err(std::io::Error::other("flush"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn box_pusher_forwards_push_flush_and_listener() {
+        // Covers `BoxPusher`/`PusherAdapter` success forwarding (lines 61-69, 75-87).
+        let inner = RecordingPusher::new();
+        let mut bp = BoxPusher::new(inner.clone());
+        bp.set_listener(Box::new(|_| {}));
+        assert!(inner.listener_set.load(Ordering::SeqCst));
+        bp.push(&(0..3), Bytes::copy_from_slice(b"abc")).unwrap();
+        bp.flush().unwrap();
+        let pushes = inner.pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(pushes[0].0, 0..3);
+        drop(pushes);
+    }
+
+    #[test]
+    fn box_pusher_upcasts_push_error() {
+        // Covers `PusherAdapter::push`'s `map_err`/upcast path (lines 80-84).
+        let inner = RecordingPusher::new();
+        inner.fail_push.store(true, Ordering::SeqCst);
+        let mut bp = BoxPusher::new(inner);
+        let res = bp.push(&(0..3), Bytes::copy_from_slice(b"abc"));
+        assert!(res.is_err());
+        let _ = res.unwrap_err();
+    }
+
+    #[test]
+    fn box_pusher_upcasts_flush_error() {
+        // Covers `PusherAdapter::flush`'s `map_err`/upcast path (lines 85-87).
+        let inner = RecordingPusher::new();
+        inner.fail_flush.store(true, Ordering::SeqCst);
+        let mut bp = BoxPusher::new(inner);
+        assert!(bp.flush().is_err());
+    }
+}

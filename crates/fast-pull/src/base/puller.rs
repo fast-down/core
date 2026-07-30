@@ -57,3 +57,28 @@ impl PullerError for std::convert::Infallible {
         match *self {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    /// A `PullerError` that relies on the default `is_irrecoverable` impl.
+    #[derive(Debug)]
+    struct DefaultErr;
+    impl std::fmt::Display for DefaultErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("default error")
+        }
+    }
+    impl std::error::Error for DefaultErr {}
+    impl PullerError for DefaultErr {}
+
+    #[test]
+    fn default_is_irrecoverable_is_false() {
+        // Exercises the default `PullerError::is_irrecoverable` body (lines 49-51) and
+        // the `Display` impl for `DefaultErr` (lines 70-72).
+        assert!(!DefaultErr.is_irrecoverable());
+        assert_eq!(format!("{DefaultErr}"), "default error");
+    }
+}

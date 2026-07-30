@@ -259,4 +259,17 @@ mod tests {
         let s = r#"attachment; filename="a\"b.txt""#;
         assert_eq!(ContentDisposition::parse(s).filename.unwrap(), "a\"b.txt");
     }
+
+    #[test]
+    fn test_empty_key_followed_by_equals_breaks() {
+        // `attachment;=x`: after the `;`, `read_key` yields an empty key and the
+        // next character is `=` (neither `;` nor end-of-string), so the parser
+        // breaks out of the loop (line 41) and extracts no filename.
+        assert_eq!(ContentDisposition::parse("attachment;=x").filename, None);
+        // Same path when the empty-key-then-`=` occurs mid-header.
+        assert_eq!(
+            ContentDisposition::parse("attachment;=x; filename=ok.txt").filename,
+            None
+        );
+    }
 }

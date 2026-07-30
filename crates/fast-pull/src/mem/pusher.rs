@@ -123,4 +123,11 @@ mod tests {
         // Both handles observe the same underlying vec.
         assert_eq!(&p.receive.lock()[..], b"hiya");
     }
+
+    #[test]
+    fn debug_impl() {
+        // Lines 42-46: the `Debug` impl for `MemPusher`.
+        let p = MemPusher::new();
+        let _ = format!("{:?}", &p);
+    }
 }
