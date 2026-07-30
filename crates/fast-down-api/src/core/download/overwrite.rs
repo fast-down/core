@@ -9,18 +9,11 @@
 //! [`crate::Event`] stream, periodically saves progress, and on success renames
 //! the `.part` file to its final destination (or a unique variant when
 //! `overwrite` is disabled).
+use super::progress_reporter::ProgressReporter;
 use crate::{
     DownloadState, Event, PartialConfig, Tx, core::download::pipeline::build_pipeline, tx_err,
 };
-use fast_down::{
-    AnyError, DownloadResult, UrlInfo,
-    fast_puller::FastDownPuller,
-    http::HttpError,
-    invert,
-    multi::{TokioExecutor, download_multi},
-    reqwest::SmartRedirectClient,
-    single::download_single,
-};
+use fast_down::{UrlInfo, invert, multi::download_multi, single::download_single};
 use inherit_config::ConfigLayer;
 use path_helper::tokio::gen_unique_path;
 use reqwest::Response;
@@ -69,7 +62,7 @@ pub struct OverwriteOption {
 #[allow(clippy::too_many_lines)]
 pub async fn overwrite(option: OverwriteOption) {
     let OverwriteOption {
-        mut state,
+        state,
         final_path,
         info,
         resp,
@@ -77,11 +70,14 @@ pub async fn overwrite(option: OverwriteOption) {
         token,
     } = option;
     tx_err!(state.store().await, tx, StateSaveError);
+    let _ = state.take_dirty();
 
-    let inner = state.clone().build();
+    let inner_state = state.lock_inner().clone();
+    let parsed_config = inner_state.config.clone().unwrap_or_default();
+    let inner_state = inner_state.build();
     let tmp_path = state.tmp_path();
-    let url = &inner.url;
-    let config = &inner.config;
+    let url = &inner_state.url;
+    let config = &inner_state.config;
 
     let pipeline = build_pipeline(url, config, &info, resp, &tmp_path, &tx, &token).await;
     let Some((puller, pusher)) = pipeline else {
@@ -91,7 +87,7 @@ pub async fn overwrite(option: OverwriteOption) {
     let _ = tx.send(Event::Start {
         tmp_path: tmp_path.clone(),
         config_path: state.config_path.clone(),
-        parsed_config: state.config.clone().unwrap_or_default(),
+        parsed_config,
     });
 
     let res = if info.fast_download {
@@ -122,9 +118,39 @@ pub async fn overwrite(option: OverwriteOption) {
             },
         )
     };
-    let _guard = abort_ctrl(&token, &res);
 
-    let mut store_time = Instant::now();
+    let abort_handle = {
+        let token = token.clone();
+        let res = res.clone();
+        tokio::spawn(async move {
+            token.cancelled().await;
+            res.abort();
+        })
+    };
+
+    let persist_token = token.child_token();
+    let persist_task = {
+        let st = state.clone();
+        let tx = tx.clone();
+        let stop = persist_token.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep(Duration::from_secs(1)) => {
+                        if st.take_dirty() && let Err(e) = st.store().await {
+                            let _ = tx.send(Event::StateSaveError(e));
+                            st.mark_dirty(); // retry on the next cadence tick
+                        }
+                    }
+                    () = stop.cancelled() => break,
+                }
+            }
+        })
+    };
+
+    let reporter = ProgressReporter::new(inner_state.elapsed, info.size, state.share_inner());
+    let progress_task = reporter.clone().spawn(&tx, config.progress_emit_gap);
+
     while let Ok(e) = res.event_chain().recv().await {
         if let fast_down::Event::PushProgress(range) = &e {
             state.merge_progress(range.clone());
@@ -143,20 +169,26 @@ pub async fn overwrite(option: OverwriteOption) {
             fast_down::Event::FlushError(e) => tx.send(Event::FlushError(anyhow::anyhow!(e))),
             fast_down::Event::Finished(id) => tx.send(Event::Finished(id)),
         };
-        if store_time.elapsed() > Duration::from_secs(1) {
-            if let Err(e) = state.store().await {
-                let _ = tx.send(Event::StateSaveError(e));
-            }
-            store_time = Instant::now();
-        }
     }
+
+    progress_task.abort();
+    let _ = progress_task.await;
+    let sample = reporter.compute(Instant::now(), None);
+    let elapsed = sample.elapsed;
+    let _ = tx.send(Event::Progress(sample));
+    persist_token.cancel();
+    let _ = persist_task.await;
 
     if let Err(e) = res.join().await {
         let _ = tx.send(Event::JoinError(e));
     }
+
+    abort_handle.abort();
+
     let download_complete = info.size == 0
-        || matches!(&state.config, Some(PartialConfig { downloaded_chunk: Some(x), .. }) if x.len() == 1 && x[0] == (0..info.size));
+        || matches!(&state.lock_inner().config, Some(PartialConfig { downloaded_chunk: Some(x), .. }) if x.len() == 1 && x[0] == (0..info.size));
     if token.is_cancelled() || !download_complete {
+        state.set_elapsed(elapsed);
         if let Err(e) = state.store().await {
             let _ = tx.send(Event::StateSaveError(e));
         }
@@ -178,26 +210,3 @@ pub async fn overwrite(option: OverwriteOption) {
     let _ = fs::remove_file(&state.config_path).await;
     let _ = tx.send(Event::Renamed(final_path));
 }
-
-struct Guard(tokio::task::JoinHandle<()>);
-impl Drop for Guard {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-fn abort_ctrl(token: &CancellationToken, res: &MyDownloadResult) -> Guard {
-    let token = token.clone();
-    let res = res.clone();
-    let handle = tokio::spawn(async move {
-        token.cancelled().await;
-        res.abort();
-    });
-    Guard(handle)
-}
-
-type MyDownloadResult = DownloadResult<
-    TokioExecutor<FastDownPuller, Box<dyn AnyError + 'static>>,
-    HttpError<SmartRedirectClient>,
-    Box<dyn AnyError + 'static>,
->;

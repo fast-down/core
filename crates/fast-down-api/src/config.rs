@@ -92,6 +92,8 @@ pub struct Config {
     ///
     /// If the server returns a `Retry-After` header, that value takes precedence.
     #[config(default = Duration::from_millis(500))]
+    #[config(partial_attr(serde(with = "humantime_serde::option")))]
+    #[config(partial_attr(serde(default)))]
     pub retry_gap: Duration,
 
     /// Pull timeout. Recommended: `5s`
@@ -100,7 +102,22 @@ pub struct Config {
     /// the connection is dropped and re-established. This helps TCP detect
     /// congestion and can improve download speed.
     #[config(default = Duration::from_secs(5))]
+    #[config(partial_attr(serde(with = "humantime_serde::option")))]
+    #[config(partial_attr(serde(default)))]
     pub pull_timeout: Duration,
+
+    /// Minimum interval between [`crate::Event::Progress`] emissions. Recommended: `500ms`
+    ///
+    /// The progress reporter runs on its own timer, so this cadence is driven
+    /// purely by `progress_emit_gap` and is never delayed by other download work
+    /// (flushing, state saving, event forwarding) or by a slow consumer — the
+    /// event channel is unbounded, so [`crate::Event::Progress`] is sent without
+    /// blocking. Set it smaller for a smoother progress bar, larger to cut channel
+    /// traffic. `Duration::ZERO` emits at the maximum rate (busy-loop, not recommended).
+    #[config(default = Duration::from_millis(500))]
+    #[config(partial_attr(serde(with = "humantime_serde::option")))]
+    #[config(partial_attr(serde(default)))]
+    pub progress_emit_gap: Duration,
 
     /// Whether to accept invalid certificates (dangerous). Recommended: `false`
     pub accept_invalid_certs: bool,
@@ -142,7 +159,13 @@ pub struct Config {
     #[config(default = 3)]
     pub max_speculative: usize,
 
-    /// Already downloaded chunks. Pass `Vec::new()` to download the entire file.
+    /// Already downloaded chunks (resume progress), stored as an HTTP `Range`-style
+    /// list, e.g. `downloaded_chunk = "1-3,4-9"`. Ends are *inclusive*, matching the
+    /// HTTP `Range` header (`bytes=1-3` covers bytes 1,2,3); the internal half-open
+    /// `start..end` is mapped to `start-(end-1)` on disk. Absent when nothing has
+    /// been downloaded yet.
+    #[config(partial_attr(serde(with = "range_list")))]
+    #[config(partial_attr(serde(default)))]
     pub downloaded_chunk: Vec<ProgressEntry>,
 
     /// Smoothing window for downloaded chunks in bytes. Recommended: `8 * 1024`
@@ -220,5 +243,154 @@ mod tests {
         c.merge_progress(1u64..5);
         c.merge_progress(10u64..20);
         assert_eq!(c.downloaded_chunk, Some(vec![1u64..5, 10u64..20]));
+    }
+}
+
+/// HTTP `Range`-style (de)serialization for [`Config::downloaded_chunk`].
+///
+/// The internal [`ProgressEntry`] is a half-open `start..end` range, while the
+/// HTTP `Range` header uses an *inclusive* end (`bytes=1-3` covers bytes 1,2,3).
+/// We follow that on-disk convention, so `start..end` is written as
+/// `"{start}-{end-1}"` and parsed back as `{start}..{end+1}`. The round-trip is
+/// lossless for any `u64` range and stays a single TOML string, e.g.
+/// `downloaded_chunk = "1-3,4-9"`.
+mod range_list {
+    use fast_down::ProgressEntry;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[allow(clippy::ref_option)]
+    pub fn serialize<S: Serializer>(
+        value: &Option<Vec<ProgressEntry>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            None => serializer.serialize_none(),
+            Some(ranges) => {
+                let text = ranges
+                    .iter()
+                    .map(|r| {
+                        debug_assert!(
+                            r.start < r.end,
+                            "downloaded_chunk range must be non-empty (start < end), got {r:?}"
+                        );
+                        format!("{}-{}", r.start, r.end - 1)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                serializer.serialize_str(&text)
+            }
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<ProgressEntry>>, D::Error> {
+        let raw = Option::<String>::deserialize(deserializer)?;
+        match raw {
+            None => Ok(None),
+            Some(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return Ok(Some(Vec::new()));
+                }
+                let mut ranges = Vec::new();
+                for part in trimmed.split(',') {
+                    let part = part.trim();
+                    let (start_repr, end_repr) = part.split_once('-').ok_or_else(|| {
+                        serde::de::Error::custom(format!(
+                            "invalid range `{part}` in downloaded_chunk"
+                        ))
+                    })?;
+                    let start: u64 = start_repr.trim().parse().map_err(|e| {
+                        serde::de::Error::custom(format!("invalid range start `{start_repr}`: {e}"))
+                    })?;
+                    let end_inclusive: u64 = end_repr.trim().parse().map_err(|e| {
+                        serde::de::Error::custom(format!("invalid range end `{end_repr}`: {e}"))
+                    })?;
+                    if end_inclusive < start {
+                        return Err(serde::de::Error::custom(format!(
+                            "invalid range `{part}` in downloaded_chunk: end {end_inclusive} < start {start}"
+                        )));
+                    }
+                    ranges.push(start..end_inclusive.saturating_add(1));
+                }
+                Ok(Some(ranges))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod range_list_tests {
+    use super::*;
+
+    #[test]
+    fn downloaded_chunk_round_trips_as_http_range_string() {
+        let pc = PartialConfig {
+            downloaded_chunk: Some(vec![1..4, 5..10, 100..101]),
+            ..Default::default()
+        };
+        let toml = toml::to_string(&pc).unwrap();
+        assert!(
+            toml.contains("downloaded_chunk = \"1-3,5-9,100-100\""),
+            "downloaded_chunk should be stored as an HTTP Range string, got:\n{toml}"
+        );
+        let back: PartialConfig = toml::from_str(&toml).unwrap();
+        assert_eq!(back.downloaded_chunk, Some(vec![1..4, 5..10, 100..101]));
+    }
+
+    #[test]
+    fn downloaded_chunk_absent_when_none() {
+        let pc = PartialConfig::default();
+        let toml = toml::to_string(&pc).unwrap();
+        assert!(
+            !toml.contains("downloaded_chunk"),
+            "absent downloaded_chunk must not be serialized, got:\n{toml}"
+        );
+        let back: PartialConfig = toml::from_str(&toml).unwrap();
+        assert_eq!(back.downloaded_chunk, None);
+    }
+
+    #[test]
+    fn downloaded_chunk_empty_string_round_trips_to_empty_vec() {
+        let pc = PartialConfig {
+            downloaded_chunk: Some(Vec::new()),
+            ..Default::default()
+        };
+        let toml = toml::to_string(&pc).unwrap();
+        assert!(
+            toml.contains("downloaded_chunk = \"\""),
+            "an empty downloaded_chunk should serialize as an empty string, got:\n{toml}"
+        );
+        let back: PartialConfig = toml::from_str(&toml).unwrap();
+        assert_eq!(back.downloaded_chunk, Some(Vec::new()));
+    }
+
+    #[test]
+    fn downloaded_chunk_rejects_reversed_range() {
+        let toml = "downloaded_chunk = \"3-1\"\n";
+        let err = toml::from_str::<PartialConfig>(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("3-1") && msg.contains("downloaded_chunk"),
+            "reversed range must be rejected with a clear error, got: {msg}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn downloaded_chunk_single_byte_range_round_trips() {
+        // HTTP Range `5-5` is a single byte (offset 5), i.e. the half-open `5..6`.
+        let pc = PartialConfig {
+            downloaded_chunk: Some(vec![5..6]),
+            ..Default::default()
+        };
+        let toml = toml::to_string(&pc).unwrap();
+        assert!(
+            toml.contains("downloaded_chunk = \"5-5\""),
+            "single-byte range should keep its inclusive end, got:\n{toml}"
+        );
+        let back: PartialConfig = toml::from_str(&toml).unwrap();
+        assert_eq!(back.downloaded_chunk, Some(vec![5..6]));
     }
 }

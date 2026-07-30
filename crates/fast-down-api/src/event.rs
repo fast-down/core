@@ -1,16 +1,17 @@
 use crate::{PartialConfig, StateError};
 use fast_down::{ProgressEntry, UrlInfo, WorkerId, reqwest::ReqwestResponseError};
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 /// Events emitted by a download run, consumed through the crossfire channel
 /// returned by [`crate::create_channel`].
 ///
 /// Events cover the full lifecycle: prefetch ([`Event::Prefetch`]), pipeline
 /// setup ([`Event::Start`]), per-worker fetch/write progress
-/// ([`Event::Pulling`] … [`Event::Finished`]), resume ([`Event::Resumed`],
-/// [`Event::ResumeError`]), and completion ([`Event::Renamed`]). Error variants
-/// (`*Error`) report failures without aborting the stream, so a consumer can
-/// decide whether to retry, cancel, or surface them in a UI.
+/// ([`Event::Pulling`] … [`Event::Finished`]), aggregated progress
+/// ([`Event::Progress`]), resume ([`Event::Resumed`], [`Event::ResumeError`]),
+/// and completion ([`Event::Renamed`]). Error variants (`*Error`) report failures
+/// without aborting the stream, so a consumer can decide whether to retry,
+/// cancel, or surface them in a UI.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// Emitted after the prefetch step resolves the remote file's metadata.
@@ -98,10 +99,62 @@ pub enum Event {
     /// intentionally emitted before `fsync`, so it reflects "written", not
     /// "durably flushed".
     PushProgress(ProgressEntry),
+
+    /// Aggregated download progress, emitted on a fixed cadence
+    /// ([`crate::Config::progress_emit_gap`]) by a dedicated reporter task.
+    ///
+    /// Unlike [`Event::PushProgress`], which fires once per written byte range,
+    /// this carries a full [`ProgressSample`] — the current progress snapshot
+    /// plus computed transfer rates — so a consumer can render a progress bar
+    /// directly without re-accumulating individual ranges.
+    ///
+    /// The reporter runs on its own timer, so the cadence is driven purely by
+    /// `progress_emit_gap` and is never delayed by flushing, state saving, event
+    /// forwarding, or a slow consumer (the channel is unbounded). One final
+    /// `Progress` is sent when the run ends (success, cancellation, or error).
+    Progress(ProgressSample),
     /// The sink is being flushed and synced to the `.part` file.
     Flushing,
     /// Flushing / syncing the sink failed.
     FlushError(anyhow::Error),
     /// Worker `id` completed its assigned range and exited.
     Finished(WorkerId),
+}
+
+/// Computed aggregate view of the current download progress, carried by
+/// [`Event::Progress`].
+#[derive(Debug, Clone)]
+pub struct ProgressSample {
+    /// Already-written byte ranges — the same source of truth used for resume
+    /// bookkeeping (normalized and de-duplicated).
+    pub progress: Vec<ProgressEntry>,
+    /// Recent transfer rate in bytes/second, smoothed with an exponential
+    /// moving average (time constant ≈ 3s) over the per-interval deltas, so it
+    /// tracks real throughput changes within a few seconds without the
+    /// sub-second jitter of raw window deltas. `0` on the first emit and on
+    /// the final emit.
+    pub bps: u64,
+    /// Average transfer rate in bytes/second over the whole download session
+    /// (all resume runs combined): total `downloaded` divided by total
+    /// `elapsed`, so it stays correct across a resume instead of resetting to
+    /// zero. `0` while the total elapsed time is still too small to measure.
+    pub avg_bps: u64,
+    /// Total bytes written so far (the sum of all `progress` range lengths).
+    pub downloaded: u64,
+    /// Download percentage as a `0.0..=100.0` value (`downloaded * 100 /
+    /// total`); `100.0` when `total == 0` (an empty file is already complete).
+    pub percent: f64,
+    /// Remote file size in bytes, so the consumer can derive a percentage
+    /// without tracking it separately.
+    pub total: u64,
+    /// Total active download time accumulated across all resume runs,
+    /// persisted in the `.fd` state so a resume continues the clock.
+    pub elapsed: Duration,
+    /// Estimated time remaining, computed as `(total - downloaded) / rate`
+    /// where `rate` is the smoothed recent `bps` (preferred: it reflects the
+    /// *current* link speed, so the estimate stays honest after a resume at a
+    /// different speed), falling back to `avg_bps` while `bps` is still zero.
+    /// `None` until a rate can be measured (the very first emit, or a stalled
+    /// connection) and `Some(Duration::ZERO)` once `downloaded == total`.
+    pub eta: Option<Duration>,
 }

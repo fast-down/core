@@ -15,6 +15,7 @@ use url::Url;
 
 mod overwrite;
 mod pipeline;
+mod progress_reporter;
 
 fn open_existing() -> OpenOptions {
     let mut o = OpenOptions::new();
@@ -151,7 +152,7 @@ async fn download(
         let tmp_path = origin_path.with_added_extension("part");
 
         let state = if can_resume
-            && let Ok(mut s) = DownloadState::load(&cfg_path).await
+            && let Ok(s) = DownloadState::load(&cfg_path).await
             && s.validate(&info).is_ok()
             && fs::try_exists(&tmp_path).await.unwrap_or(false)
         {
@@ -186,7 +187,7 @@ async fn download(
         let cfg_path = base_path.with_added_extension("fd");
 
         let state = if can_resume
-            && let Ok(mut s) = DownloadState::load(&cfg_path).await
+            && let Ok(s) = DownloadState::load(&cfg_path).await
             && s.validate(&info).is_ok()
             && fs::try_exists(&tmp_path).await.unwrap_or(false)
         {
@@ -229,7 +230,7 @@ async fn resume(
     }
 
     let cfg_path = tmp_path.with_extension("fd");
-    let mut state = tx_err!(DownloadState::load(&cfg_path).await, tx, ResumeError, None);
+    let state = tx_err!(DownloadState::load(&cfg_path).await, tx, ResumeError, None);
 
     partial_config.resume = Some(true);
     let config = partial_config.clone().build();

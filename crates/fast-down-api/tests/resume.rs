@@ -668,3 +668,251 @@ async fn test_fresh_download_writes_full_file() {
         ".fd must be removed after a successful fresh download"
     );
 }
+
+/// Verify the `Event::Progress` aggregator: it is emitted on the configured
+/// cadence (not merely once), carries the full progress snapshot + a transfer
+/// rate, reports the correct total size, and reaches 100% coverage on a complete
+/// download. Regression guard for the dedicated, independent progress reporter.
+#[tokio::test]
+async fn test_progress_event_emitted() {
+    let dir = temp_dir("progress_event");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let mut cfg = make_config(&dir);
+    // Emit Progress frequently so the cadence is observable.
+    cfg.progress_emit_gap = Some(Duration::from_millis(30));
+
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = drain(rx).await;
+
+    // At least one Progress event, and it must fire on its own timer (not just
+    // the terminal one) — this is the whole point of the dedicated reporter.
+    let progresses: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Progress(s) => Some((
+                s.progress.clone(),
+                s.bps,
+                s.avg_bps,
+                s.downloaded,
+                s.percent,
+                s.total,
+                s.elapsed,
+                s.eta,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !progresses.is_empty(),
+        "expected at least one Event::Progress"
+    );
+    assert!(
+        progresses.len() >= 2,
+        "Event::Progress must fire on its own cadence, not only once (got {})",
+        progresses.len()
+    );
+
+    // Every Progress reports the correct total size.
+    assert!(
+        progresses
+            .iter()
+            .all(|(_, _, _, _, _, total, _, _)| *total == FILE_SIZE as u64),
+        "Event::Progress.total must equal the file size"
+    );
+
+    // Structural invariants for the new aggregate fields.
+    for (p, _, avg_bps, downloaded, percent, _, elapsed, _) in &progresses {
+        let sum: u64 = p.iter().map(|r| r.end - r.start).sum();
+        assert_eq!(
+            sum, *downloaded,
+            "Event::Progress.downloaded must equal sum(progress ranges)"
+        );
+        assert!(
+            (*percent >= 0.0) && (*percent <= 100.0),
+            "percent out of range: {percent}"
+        );
+        // avg_bps is session-wide bytes/sec; it can never exceed
+        // downloaded * 1000 (the rate if the whole file arrived in 1ms).
+        assert!(
+            *avg_bps <= (*downloaded).saturating_mul(1000).max(1),
+            "avg_bps implausibly high: {avg_bps}"
+        );
+        assert!(
+            *elapsed >= Duration::ZERO,
+            "elapsed must be non-negative: {elapsed:?}"
+        );
+    }
+
+    // `elapsed` (cumulative active time) must be non-decreasing across frames.
+    let mut prev_elapsed = Duration::ZERO;
+    for (_, _, _, _, _, _, el, _) in &progresses {
+        assert!(
+            *el >= prev_elapsed,
+            "Event::Progress.elapsed must be non-decreasing: {el:?} < {prev_elapsed:?}"
+        );
+        prev_elapsed = *el;
+    }
+
+    // `eta` (estimated remaining time) invariants:
+    // - At least one intermediate frame must carry a positive `eta`, proving ETA
+    //   is actually computed mid-download (the run is not instant).
+    // - `eta == (total - downloaded) / rate` with millisecond rounding, so we
+    //   check it within a 1ms tolerance against the effective rate.
+    assert!(
+        progresses
+            .iter()
+            .any(|(_, _, _, d, _, t, _, eta)| *d < *t && eta.is_some_and(|e| e > Duration::ZERO)),
+        "expected at least one intermediate Progress with eta > 0"
+    );
+    for (_, bps, avg_bps, downloaded, _, total, _, eta) in &progresses {
+        let remaining = total.saturating_sub(*downloaded);
+        // Mirrors the production formula: prefer the smoothed recent `bps`,
+        // fall back to the session-wide `avg_bps` while the EMA warms up.
+        let rate = if *bps > 0 { *bps } else { *avg_bps };
+        if remaining == 0 {
+            // Fully written: eta must be ZERO (absent only if rate is still 0).
+            assert!(
+                eta.map_or(rate == 0, |e| e == Duration::ZERO),
+                "eta must be ZERO once fully downloaded, got {eta:?}"
+            );
+        } else if rate > 0 {
+            let Some(d) = eta else {
+                panic!("eta must be Some while downloading with a measurable rate");
+            };
+            let expected_ms = u128::from(
+                remaining
+                    .checked_mul(1000)
+                    .and_then(|x| x.checked_div(rate))
+                    .expect("rate > 0"),
+            );
+            let got_ms = d.as_millis();
+            let diff = got_ms.abs_diff(expected_ms);
+            assert!(
+                diff <= 1,
+                "eta {got_ms}ms disagrees with computed {expected_ms}ms"
+            );
+        } else {
+            assert!(eta.is_none(), "eta must be None with no measurable rate");
+        }
+    }
+
+    // The download actually progressed: at some point the full size was reported.
+    let max_downloaded: u64 = progresses
+        .iter()
+        .map(|(_, _, _, d, _, _, _, _)| *d)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        max_downloaded, FILE_SIZE as u64,
+        "downloaded must reach the full file size"
+    );
+
+    // At least one intermediate frame reported a positive instantaneous rate.
+    assert!(
+        progresses.iter().any(|(_, bps, _, _, _, _, _, _)| *bps > 0),
+        "expected at least one Event::Progress with bps > 0"
+    );
+
+    // The terminal Progress reflects 100% coverage of the whole file.
+    let last = progresses.last().expect("last Progress");
+    assert_eq!(
+        last.0,
+        vec![0u64..FILE_SIZE as u64],
+        "final Event::Progress must cover the whole file"
+    );
+    assert_eq!(last.5, FILE_SIZE as u64);
+    assert!(
+        (last.4 - 100.0).abs() < f64::EPSILON,
+        "final Event::Progress.percent must be 100.0, got {}",
+        last.4
+    );
+}
+
+/// Regression guard for persisted `elapsed`: after a mid-download cancel the
+/// `.fd` state records the active time spent; a subsequent `resume()` must
+/// continue that clock (its first `Progress` reports an `elapsed` at least as
+/// large as the cancelled run's last one) instead of resetting to zero, so the
+/// session-wide `avg_bps` and `downloaded` span the whole download.
+#[tokio::test]
+async fn test_progress_elapsed_persisted_across_resume() {
+    let dir = temp_dir("progress_elapsed_resume");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    let partial_events = partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let partial_elapsed_max = partial_events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Progress(s) => Some(s.elapsed),
+            _ => None,
+        })
+        .max()
+        .expect("partial run must emit at least one Progress with elapsed");
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(
+        part.exists() && fd.exists(),
+        "cancel must preserve both .part and .fd"
+    );
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let resume_cancel = create_cancellation_token();
+    let _handle = DownloadHandle::resume(
+        part.clone(),
+        Url::parse(&url).expect("valid url"),
+        cfg,
+        tx,
+        resume_cancel,
+    );
+    let events = drain(rx).await;
+
+    let resume_progress: Vec<(Vec<fast_down::ProgressEntry>, u64, Duration, f64, u64)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Progress(s) => {
+                Some((s.progress.clone(), s.downloaded, s.elapsed, s.percent, s.total))
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !resume_progress.is_empty(),
+        "resume must emit Event::Progress"
+    );
+    // The resume run continues the elapsed clock: its smallest reported elapsed
+    // must be at least the cancelled run's largest (no reset to zero).
+    let resume_elapsed_min = resume_progress
+        .iter()
+        .map(|(_, _, el, _, _)| *el)
+        .min()
+        .expect("resume Progress must carry elapsed");
+    assert!(
+        resume_elapsed_min >= partial_elapsed_max,
+        "resume elapsed ({resume_elapsed_min:?}) must carry over partial elapsed ({partial_elapsed_max:?})"
+    );
+    // And it finishes correctly, covering the whole file at 100%.
+    let last = resume_progress.last().expect("last resume Progress");
+    assert_eq!(
+        last.0,
+        vec![0u64..FILE_SIZE as u64],
+        "resume must cover the whole file"
+    );
+    assert_eq!(last.4, FILE_SIZE as u64);
+    assert!(
+        (last.3 - 100.0).abs() < f64::EPSILON,
+        "resume percent must be 100.0, got {}",
+        last.3
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "resume must complete with Renamed"
+    );
+}
