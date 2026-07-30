@@ -43,7 +43,7 @@ jobs:
       - name: Run Clippy
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo hack clippy --feature-powerset
+        run: cargo hack clippy --all-targets --feature-powerset
 
   test:
     name: Test (${{ matrix.os }} - ${{ matrix.channel }})
