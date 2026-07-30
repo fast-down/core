@@ -241,3 +241,67 @@ where
         self.inner.is_aborted()
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "mem")]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use crate::mem::MemPusher;
+    use crate::mock::{MockPuller, build_mock_data};
+    use crate::multi::{DownloadOptions, download_multi};
+    use tokio::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn download_result_debug_and_set_threads() {
+        let mock_data = build_mock_data(1024);
+        let puller = MockPuller::new(&mock_data);
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 4,
+                retry_gap: Duration::from_secs(1),
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+        // Lines 63-68: `Debug` of `DownloadResultInner` (via the derived `Debug`).
+        let _ = format!("{result:?}");
+        // Lines 234-236 (forwarding) and 111-123 (inner task-queue adjustment).
+        result.set_threads(4, 1);
+        result.join().await.unwrap();
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn download_result_clone_and_set_threads_no_queue() {
+        use crate::single::download_single;
+        let mock_data = build_mock_data(1024);
+        let puller = MockPuller::new(&mock_data);
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        // Single-threaded sessions have no task queue, so `set_threads` is a no-op
+        // (covers the `if let` else path, line 122 of `DownloadResultInner`).
+        let result = download_single(
+            puller,
+            pusher,
+            crate::single::DownloadOptions {
+                retry_gap: Duration::from_secs(1),
+                push_queue_cap: 1024,
+            },
+        );
+        // Lines 167-171: `DownloadResult` is `Clone`.
+        let _clone = result.clone();
+        result.set_threads(4, 1);
+        while result.event_chain().recv().await.is_ok() {}
+        result.join().await.unwrap();
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+}

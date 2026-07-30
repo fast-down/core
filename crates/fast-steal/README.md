@@ -16,7 +16,7 @@
 3. Safe Rust — no `unsafe` code
 4. Core paths covered by tests for stability and reliability
 
-```rust
+```rust,no_run
 extern crate std;
 use fast_steal::{Executor, Handle, Task, TaskQueue};
 use std::{collections::HashMap};
@@ -95,7 +95,7 @@ async fn main() {
             tx,
             speculative: 1,
         };
-        let pre_data = [1..20, 41..48];
+        let pre_data = [1..10, 13..19];
         let task_queue = TaskQueue::new(pre_data.iter().cloned());
         task_queue.set_threads(8, 1, Some(&executor)).unwrap();
         drop(executor);

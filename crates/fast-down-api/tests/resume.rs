@@ -37,6 +37,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -667,4 +668,586 @@ async fn test_fresh_download_writes_full_file() {
         !fd.exists(),
         ".fd must be removed after a successful fresh download"
     );
+}
+
+/// Verify the `Event::Progress` aggregator: it is emitted on the configured
+/// cadence (not merely once), carries the full progress snapshot + a transfer
+/// rate, reports the correct total size, and reaches 100% coverage on a complete
+/// download. Regression guard for the dedicated, independent progress reporter.
+#[tokio::test]
+async fn test_progress_event_emitted() {
+    let dir = temp_dir("progress_event");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let mut cfg = make_config(&dir);
+    // Emit Progress frequently so the cadence is observable.
+    cfg.progress_emit_gap = Some(Duration::from_millis(30));
+
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = drain(rx).await;
+
+    // At least one Progress event, and it must fire on its own timer (not just
+    // the terminal one) — this is the whole point of the dedicated reporter.
+    let progresses: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Progress(s) => Some((
+                s.progress.clone(),
+                s.bps,
+                s.avg_bps,
+                s.downloaded,
+                s.percent,
+                s.total,
+                s.elapsed,
+                s.eta,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !progresses.is_empty(),
+        "expected at least one Event::Progress"
+    );
+    assert!(
+        progresses.len() >= 2,
+        "Event::Progress must fire on its own cadence, not only once (got {})",
+        progresses.len()
+    );
+
+    // Every Progress reports the correct total size.
+    assert!(
+        progresses
+            .iter()
+            .all(|(_, _, _, _, _, total, _, _)| *total == FILE_SIZE as u64),
+        "Event::Progress.total must equal the file size"
+    );
+
+    // Structural invariants for the new aggregate fields.
+    for (p, _, avg_bps, downloaded, percent, _, elapsed, _) in &progresses {
+        let sum: u64 = p.iter().map(|r| r.end - r.start).sum();
+        assert_eq!(
+            sum, *downloaded,
+            "Event::Progress.downloaded must equal sum(progress ranges)"
+        );
+        assert!(
+            (*percent >= 0.0) && (*percent <= 100.0),
+            "percent out of range: {percent}"
+        );
+        // avg_bps is session-wide bytes/sec; it can never exceed
+        // downloaded * 1000 (the rate if the whole file arrived in 1ms).
+        assert!(
+            *avg_bps <= (*downloaded).saturating_mul(1000).max(1),
+            "avg_bps implausibly high: {avg_bps}"
+        );
+        assert!(
+            *elapsed >= Duration::ZERO,
+            "elapsed must be non-negative: {elapsed:?}"
+        );
+    }
+
+    // `elapsed` (cumulative active time) must be non-decreasing across frames.
+    let mut prev_elapsed = Duration::ZERO;
+    for (_, _, _, _, _, _, el, _) in &progresses {
+        assert!(
+            *el >= prev_elapsed,
+            "Event::Progress.elapsed must be non-decreasing: {el:?} < {prev_elapsed:?}"
+        );
+        prev_elapsed = *el;
+    }
+
+    // `eta` (estimated remaining time) invariants:
+    // - At least one intermediate frame must carry a positive `eta`, proving ETA
+    //   is actually computed mid-download (the run is not instant).
+    // - `eta == (total - downloaded) / rate` with millisecond rounding, so we
+    //   check it within a 1ms tolerance against the effective rate.
+    assert!(
+        progresses
+            .iter()
+            .any(|(_, _, _, d, _, t, _, eta)| *d < *t && eta.is_some_and(|e| e > Duration::ZERO)),
+        "expected at least one intermediate Progress with eta > 0"
+    );
+    for (_, bps, avg_bps, downloaded, _, total, _, eta) in &progresses {
+        let remaining = total.saturating_sub(*downloaded);
+        // Mirrors the production formula: prefer the smoothed recent `bps`,
+        // fall back to the session-wide `avg_bps` while the EMA warms up.
+        let rate = if *bps > 0 { *bps } else { *avg_bps };
+        if remaining == 0 {
+            // Fully written: eta must be ZERO (absent only if rate is still 0).
+            assert!(
+                eta.map_or(rate == 0, |e| e == Duration::ZERO),
+                "eta must be ZERO once fully downloaded, got {eta:?}"
+            );
+        } else if rate > 0 {
+            let Some(d) = eta else {
+                panic!("eta must be Some while downloading with a measurable rate");
+            };
+            let expected_ms = u128::from(
+                remaining
+                    .checked_mul(1000)
+                    .and_then(|x| x.checked_div(rate))
+                    .expect("rate > 0"),
+            );
+            let got_ms = d.as_millis();
+            let diff = got_ms.abs_diff(expected_ms);
+            assert!(
+                diff <= 1,
+                "eta {got_ms}ms disagrees with computed {expected_ms}ms"
+            );
+        } else {
+            assert!(eta.is_none(), "eta must be None with no measurable rate");
+        }
+    }
+
+    // The download actually progressed: at some point the full size was reported.
+    let max_downloaded: u64 = progresses
+        .iter()
+        .map(|(_, _, _, d, _, _, _, _)| *d)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        max_downloaded, FILE_SIZE as u64,
+        "downloaded must reach the full file size"
+    );
+
+    // At least one intermediate frame reported a positive instantaneous rate.
+    assert!(
+        progresses.iter().any(|(_, bps, _, _, _, _, _, _)| *bps > 0),
+        "expected at least one Event::Progress with bps > 0"
+    );
+
+    // The terminal Progress reflects 100% coverage of the whole file.
+    let last = progresses.last().expect("last Progress");
+    assert_eq!(
+        last.0,
+        vec![0u64..FILE_SIZE as u64],
+        "final Event::Progress must cover the whole file"
+    );
+    assert_eq!(last.5, FILE_SIZE as u64);
+    assert!(
+        (last.4 - 100.0).abs() < f64::EPSILON,
+        "final Event::Progress.percent must be 100.0, got {}",
+        last.4
+    );
+}
+
+/// Regression guard for persisted `elapsed`: after a mid-download cancel the
+/// `.fd` state records the active time spent; a subsequent `resume()` must
+/// continue that clock (its first `Progress` reports an `elapsed` at least as
+/// large as the cancelled run's last one) instead of resetting to zero, so the
+/// session-wide `avg_bps` and `downloaded` span the whole download.
+#[tokio::test]
+async fn test_progress_elapsed_persisted_across_resume() {
+    let dir = temp_dir("progress_elapsed_resume");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    let partial_events = partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let partial_elapsed_max = partial_events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Progress(s) => Some(s.elapsed),
+            _ => None,
+        })
+        .max()
+        .expect("partial run must emit at least one Progress with elapsed");
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(
+        part.exists() && fd.exists(),
+        "cancel must preserve both .part and .fd"
+    );
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let resume_cancel = create_cancellation_token();
+    let _handle = DownloadHandle::resume(
+        part.clone(),
+        Url::parse(&url).expect("valid url"),
+        cfg,
+        tx,
+        resume_cancel,
+    );
+    let events = drain(rx).await;
+
+    let resume_progress: Vec<(Vec<fast_down::ProgressEntry>, u64, Duration, f64, u64)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Progress(s) => Some((
+                s.progress.clone(),
+                s.downloaded,
+                s.elapsed,
+                s.percent,
+                s.total,
+            )),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !resume_progress.is_empty(),
+        "resume must emit Event::Progress"
+    );
+    // The resume run continues the elapsed clock: its smallest reported elapsed
+    // must be at least the cancelled run's largest (no reset to zero).
+    let resume_elapsed_min = resume_progress
+        .iter()
+        .map(|(_, _, el, _, _)| *el)
+        .min()
+        .expect("resume Progress must carry elapsed");
+    assert!(
+        resume_elapsed_min >= partial_elapsed_max,
+        "resume elapsed ({resume_elapsed_min:?}) must carry over partial elapsed ({partial_elapsed_max:?})"
+    );
+    // And it finishes correctly, covering the whole file at 100%.
+    let last = resume_progress.last().expect("last resume Progress");
+    assert_eq!(
+        last.0,
+        vec![0u64..FILE_SIZE as u64],
+        "resume must cover the whole file"
+    );
+    assert_eq!(last.4, FILE_SIZE as u64);
+    assert!(
+        (last.3 - 100.0).abs() < f64::EPSILON,
+        "resume percent must be 100.0, got {}",
+        last.3
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "resume must complete with Renamed"
+    );
+}
+
+/// `DownloadHandle::join` resolves once the spawned task finishes, covering
+/// `download/mod.rs:54-56`. A fresh full download completes (Renamed) and
+/// `join` must return `Ok(())`, proving the detached task did not panic.
+#[tokio::test]
+async fn test_download_join_resolves() {
+    let dir = temp_dir("join");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    let handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = drain(rx).await;
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "fresh download must complete with Renamed"
+    );
+    handle
+        .join()
+        .await
+        .expect("download task must not have panicked");
+}
+
+/// Like [`make_config`] but with `overwrite = false`, so downloads fall into the
+/// unique-path branch and resume from a `.part`/`.fd` via the non-overwrite arm of
+/// `download()` (mod.rs lines 189-213, overwrite.rs 198-202).
+fn make_config_no_overwrite(save_dir: &Path) -> PartialConfig {
+    PartialConfig {
+        save_dir: Some(save_dir.to_path_buf()),
+        filename: Some("out.bin".to_string()),
+        parse_filename: Some(false),
+        overwrite: Some(false),
+        write_method: Some(WriteMethod::Mmap),
+        min_chunk_size: Some(1024 * 1024),
+        threads: Some(1),
+        ..Default::default()
+    }
+}
+
+/// Generic variant of [`partial_download_via_cancel`] that accepts an explicit
+/// config (e.g. `overwrite = false`) so the non-overwrite resume branch can be
+/// exercised.
+async fn partial_download_via_cancel_with(
+    url: &str,
+    cancel: CancellationToken,
+    cfg: PartialConfig,
+) -> Vec<Event> {
+    let (tx, rx) = create_channel();
+    let _handle =
+        DownloadHandle::download(Url::parse(url).expect("valid url"), cfg, tx, cancel.clone());
+    let mut events = Vec::new();
+    let mut started = false;
+    while let Ok(e) = rx.recv().await {
+        if matches!(e, Event::Start { .. }) && !started {
+            started = true;
+            cancel.cancel();
+        }
+        events.push(e);
+    }
+    assert!(started, "expected Event::Start during the partial download");
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "a cancelled download must not rename the .part file"
+    );
+    events
+}
+
+/// `DownloadHandle::join()` (mod.rs lines 54-56) completes cleanly for a
+/// successful download.
+#[tokio::test]
+async fn test_handle_join_completes() {
+    let dir = temp_dir("handle_join");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    let handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download must complete"
+    );
+    handle
+        .join()
+        .await
+        .expect("join must succeed for a clean download");
+}
+
+/// `download()` silently resumes (emitting `Event::Resumed`) when a valid
+/// `.fd`/`.part` already exists and `overwrite = true` (mod.rs lines 157-165).
+#[tokio::test]
+async fn test_download_silent_resume_overwrite() {
+    let dir = temp_dir("silent_resume_overwrite");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(
+        part.exists() && fd.exists(),
+        "cancel must leave .part and .fd"
+    );
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel2 = create_cancellation_token();
+    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel2);
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "download() must silently resume (emit Event::Resumed)"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download() must complete after a silent resume"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::ResumeError(_))),
+        "download() must NOT emit a ResumeError"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(got, original_bytes(), "resumed content mismatch");
+}
+
+/// `download()` with `overwrite = false` resumes via the non-overwrite arm
+/// (mod.rs lines 189-204) and renames into a unique path (overwrite.rs 198-202).
+#[tokio::test]
+async fn test_download_resume_without_overwrite() {
+    let dir = temp_dir("resume_no_overwrite");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    let cfg1 = make_config_no_overwrite(&dir);
+    partial_download_via_cancel_with(&url, cancel, cfg1).await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(
+        part.exists() && fd.exists(),
+        "cancel must leave .part and .fd"
+    );
+
+    let cfg2 = make_config_no_overwrite(&dir);
+    let (tx, rx) = create_channel();
+    let cancel2 = create_cancellation_token();
+    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg2, tx, cancel2);
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "download() must silently resume (emit Event::Resumed)"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download() must complete after resume"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::ResumeError(_))),
+        "download() must NOT emit a ResumeError"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(got, original_bytes(), "resumed content mismatch");
+}
+
+/// When `resume()` is pointed at a `.part` that is actually a *directory*, the
+/// sink file cannot be opened, so `build_pipeline` fails and `overwrite` returns
+/// early (overwrite.rs line 84) emitting `Event::BuildPusherError` — no rename,
+/// and crucially not a `ResumeError` (that path is reserved for state/validation
+/// failures, not a plain IO open error).
+#[tokio::test]
+async fn test_resume_with_directory_part_fails_pipeline() {
+    let dir = temp_dir("resume_dir_part");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(part.exists() && fd.exists());
+
+    // Replace the `.part` FILE with a DIRECTORY of the same name.
+    std::fs::remove_file(&part).unwrap();
+    std::fs::create_dir(&part).unwrap();
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel2 = create_cancellation_token();
+    let _handle = DownloadHandle::resume(
+        part.clone(),
+        Url::parse(&url).expect("valid url"),
+        cfg,
+        tx,
+        cancel2,
+    );
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::BuildPusherError(_))),
+        "opening a directory as the sink must emit Event::BuildPusherError"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "must NOT rename when the pipeline fails to build"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::ResumeError(_))),
+        "a file-open failure is not a StateError resume failure"
+    );
+    // The directory `.part` is left untouched (we don't delete it; the task only
+    // removes real `.part` files on a successful rename).
+    assert!(part.is_dir(), "the directory .part must remain");
+    let _ = std::fs::remove_dir_all(&part);
+    let _ = std::fs::remove_file(&fd);
+}
+
+/// `prefetch` retries on failure and gives up (returns `None`, so `download`
+/// never proceeds) once `retry_times` attempts are exhausted (prefetch.rs 24-30).
+#[tokio::test]
+async fn test_prefetch_retries_then_gives_up() {
+    // Stand up a server that always answers 500 so every prefetch attempt fails.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind server socket");
+    let addr = listener.local_addr().expect("resolve local addr");
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.expect("accept connection");
+            let io = TokioIo::new(stream);
+            tokio::spawn(async move {
+                let service = service_fn(|_req: Request<Incoming>| async move {
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(BoxBody::new(http_body_util::Empty::<Bytes>::new()))
+                            .expect("build 500 response"),
+                    )
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+    let url = format!("http://{addr}");
+
+    let dir = temp_dir("prefetch_retry");
+    let mut cfg = make_config(&dir);
+    cfg.retry_times = Some(2);
+    cfg.retry_gap = Some(Duration::from_millis(10));
+
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = timeout(Duration::from_secs(20), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::PrefetchError(_))),
+        "expected Event::PrefetchError from the failing server"
+    );
+    assert!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::PrefetchError(_)))
+            .count()
+            >= 2,
+        "prefetch must retry up to retry_times times"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download must not complete against a failing server"
+    );
+}
+
+/// A zero-byte file reports `total == 0`; `ProgressSample::percent` is then
+/// forced to `0.0` (`progress_reporter.rs` line 134) rather than dividing by zero.
+#[tokio::test]
+async fn test_progress_zero_total_file() {
+    let dir = temp_dir("progress_zero");
+    // An empty body, range-capable.
+    let (_server, url) = start_server(vec![], "etag0", "LM-0", true).await;
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = timeout(Duration::from_secs(20), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "a 0-byte download must still complete"
+    );
+    let progresses: Vec<_> = events
+        .iter()
+        .filter_map(|e| {
+            if let Event::Progress(s) = e {
+                Some(s)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(!progresses.is_empty(), "expected Event::Progress events");
+    assert!(
+        progresses.iter().all(|s| s.percent == 0.0),
+        "percent must be exactly 0.0 for a zero-byte file (line 134)"
+    );
+    let final_path = dir.join("out.bin");
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert!(got.is_empty(), "0-byte file must produce a 0-byte file");
 }

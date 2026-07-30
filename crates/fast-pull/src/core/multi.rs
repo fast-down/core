@@ -262,6 +262,7 @@ where
 #[cfg(test)]
 #[cfg(feature = "mem")]
 mod tests {
+    #![allow(clippy::cast_possible_truncation)]
     use vec::Vec;
 
     use super::*;
@@ -473,5 +474,449 @@ mod tests {
             "abort must stop before the full source is written (got {written} of {})",
             mock_data.len()
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Coverage for the push/flush error-retry paths (lines 62-67, 77-81) and the
+    // pull / stream error paths (lines 188-192, 239-248) plus the empty-chunk
+    // skip (line 217) and the `SlowMockPuller` `None` branch (line 402).
+    // -------------------------------------------------------------------------
+
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct FatalErr;
+    impl std::fmt::Display for FatalErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("fatal")
+        }
+    }
+    impl std::error::Error for FatalErr {}
+    impl crate::PullerError for FatalErr {
+        fn is_irrecoverable(&self) -> bool {
+            true
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecoverableErr;
+    impl std::fmt::Display for RecoverableErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("recoverable")
+        }
+    }
+    impl std::error::Error for RecoverableErr {}
+    impl crate::PullerError for RecoverableErr {
+        fn is_irrecoverable(&self) -> bool {
+            false
+        }
+    }
+
+    /// In-memory sink that can be told to fail the next `push` (lines 62-67) or
+    /// `flush` (lines 77-81).
+    struct FlakySink {
+        fail_push: Arc<AtomicBool>,
+        fail_flush: Arc<AtomicBool>,
+        receive: Arc<Mutex<Vec<u8>>>,
+        listener: Option<crate::ProgressListener>,
+    }
+    impl FlakySink {
+        fn new() -> Self {
+            Self {
+                fail_push: Arc::new(AtomicBool::new(false)),
+                fail_flush: Arc::new(AtomicBool::new(false)),
+                receive: Arc::new(Mutex::new(Vec::new())),
+                listener: None,
+            }
+        }
+    }
+    impl crate::Pusher for FlakySink {
+        type Error = std::io::Error;
+        fn set_listener(&mut self, cb: crate::ProgressListener) {
+            self.listener = Some(cb);
+        }
+        fn push(
+            &mut self,
+            range: &crate::ProgressEntry,
+            bytes: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            if self.fail_push.swap(false, Ordering::SeqCst) {
+                return Err((std::io::Error::other("push"), bytes));
+            }
+            let mut g = self.receive.lock();
+            if range.start as usize == g.len() {
+                g.extend_from_slice(&bytes);
+            } else {
+                if g.len() < range.end as usize {
+                    g.resize(range.end as usize, 0);
+                }
+                g[range.start as usize..range.end as usize].copy_from_slice(&bytes);
+            }
+            drop(g);
+            if let Some(l) = &mut self.listener {
+                l(range.clone());
+            }
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            if self.fail_flush.swap(false, Ordering::SeqCst) {
+                Err(std::io::Error::other("flush"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct EmptyChunkPuller {
+        data: Arc<[u8]>,
+    }
+    impl crate::Puller for EmptyChunkPuller {
+        type Error = std::convert::Infallible;
+        fn pull(
+            &mut self,
+            range: Option<&crate::ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            let data = match range {
+                Some(r) => &self.data[r.start as usize..r.end as usize],
+                None => &self.data,
+            };
+            let mut items: Vec<Result<Bytes, (std::convert::Infallible, Option<Duration>)>> =
+                vec![Ok(Bytes::new())];
+            items.extend(data.chunks(2).map(|c| Ok(Bytes::copy_from_slice(c))));
+            std::future::ready(Ok(stream::iter(items)))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct PullErrOncePuller {
+        data: Arc<[u8]>,
+        failed: Arc<AtomicBool>,
+    }
+    impl crate::Puller for PullErrOncePuller {
+        type Error = RecoverableErr;
+        fn pull(
+            &mut self,
+            range: Option<&crate::ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                return std::future::ready(Err((RecoverableErr, Some(Duration::ZERO))));
+            }
+            let data = match range {
+                Some(r) => &self.data[r.start as usize..r.end as usize],
+                None => &self.data,
+            };
+            let items: Vec<Result<Bytes, (RecoverableErr, Option<Duration>)>> = data
+                .chunks(2)
+                .map(|c| Ok(Bytes::copy_from_slice(c)))
+                .collect();
+            std::future::ready(Ok(stream::iter(items)))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct StreamErrOncePuller {
+        data: Arc<[u8]>,
+        failed: Arc<AtomicBool>,
+    }
+    impl crate::Puller for StreamErrOncePuller {
+        type Error = FatalErr;
+        fn pull(
+            &mut self,
+            range: Option<&crate::ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                let items: Vec<Result<Bytes, (FatalErr, Option<Duration>)>> =
+                    vec![Err((FatalErr, Some(Duration::ZERO)))];
+                return std::future::ready(Ok(stream::iter(items)));
+            }
+            let data = match range {
+                Some(r) => &self.data[r.start as usize..r.end as usize],
+                None => &self.data,
+            };
+            let items: Vec<Result<Bytes, (FatalErr, Option<Duration>)>> = data
+                .chunks(2)
+                .map(|c| Ok(Bytes::copy_from_slice(c)))
+                .collect();
+            std::future::ready(Ok(stream::iter(items)))
+        }
+    }
+
+    /// Like [`StreamErrOncePuller`] but yields a *recoverable* stream error first,
+    /// so the `is_irrecoverable == false` fall-through (line 248) is exercised.
+    #[derive(Debug, Clone)]
+    struct RecoverableStreamErrOncePuller {
+        data: Arc<[u8]>,
+        failed: Arc<AtomicBool>,
+    }
+    impl crate::Puller for RecoverableStreamErrOncePuller {
+        type Error = RecoverableErr;
+        fn pull(
+            &mut self,
+            range: Option<&crate::ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                let items: Vec<Result<Bytes, (RecoverableErr, Option<Duration>)>> =
+                    vec![Err((RecoverableErr, Some(Duration::ZERO)))];
+                return std::future::ready(Ok(stream::iter(items)));
+            }
+            let data = match range {
+                Some(r) => &self.data[r.start as usize..r.end as usize],
+                None => &self.data,
+            };
+            let items: Vec<Result<Bytes, (RecoverableErr, Option<Duration>)>> = data
+                .chunks(2)
+                .map(|c| Ok(Bytes::copy_from_slice(c)))
+                .collect();
+            std::future::ready(Ok(stream::iter(items)))
+        }
+    }
+
+    async fn drain<R, WE>(result: &DownloadResult<TokioExecutor<R, WE>, R::Error, WE>)
+    where
+        R: crate::Puller,
+        WE: Send + Unpin + 'static,
+    {
+        while result.event_chain().recv().await.is_ok() {}
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_push_error_retries() {
+        // Lines 62-67: a failing inner push is retried after `park_timeout`.
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = MockPuller::new(&mock_data);
+        let sink = FlakySink::new();
+        sink.fail_push.store(true, Ordering::SeqCst);
+        let receive = sink.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            sink,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+        drain(&result).await;
+        result.join().await.unwrap();
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_flush_error_retries() {
+        // Lines 77-81: a failing inner flush is retried after `park_timeout`.
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = MockPuller::new(&mock_data);
+        let sink = FlakySink::new();
+        sink.fail_flush.store(true, Ordering::SeqCst);
+        let receive = sink.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            sink,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+        drain(&result).await;
+        result.join().await.unwrap();
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_pull_error_retries() {
+        // Lines 188-192: a `pull` error (recoverable) is retried.
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = PullErrOncePuller {
+            data: Arc::from(mock_data.as_slice()),
+            failed: Arc::new(AtomicBool::new(false)),
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+        drain(&result).await;
+        result.join().await.unwrap();
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_empty_chunk_is_skipped() {
+        // Line 217: an empty chunk yielded by the stream is skipped without error.
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = EmptyChunkPuller {
+            data: Arc::from(mock_data.as_slice()),
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+        drain(&result).await;
+        result.join().await.unwrap();
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_stream_error_irrecoverable_retries() {
+        // Lines 239-248: a stream error whose `is_irrecoverable` is true triggers a
+        // `continue 'task` and a re-pull, which then succeeds.
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = StreamErrOncePuller {
+            data: Arc::from(mock_data.as_slice()),
+            failed: Arc::new(AtomicBool::new(false)),
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+        drain(&result).await;
+        result.join().await.unwrap();
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_stream_error_recoverable_retries() {
+        // Lines 239-248: a stream error whose `is_irrecoverable` is false does NOT
+        // `continue 'task`; instead it falls through (line 248) and retries the pull,
+        // which then succeeds.
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = RecoverableStreamErrOncePuller {
+            data: Arc::from(mock_data.as_slice()),
+            failed: Arc::new(AtomicBool::new(false)),
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+        drain(&result).await;
+        result.join().await.unwrap();
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test]
+    async fn puller_and_error_coverage() {
+        // Exercise `Display` for the test error types and the `None` arm of each
+        // test puller's `match range` (lines 586, 613, 641).
+        assert_eq!(format!("{FatalErr}"), "fatal");
+        assert_eq!(format!("{RecoverableErr}"), "recoverable");
+
+        let mut empty = EmptyChunkPuller {
+            data: Arc::from(b"abcdef".as_slice()),
+        };
+        let _ = empty.pull(Some(&(0..2u64))).await;
+        let _ = empty.pull(None).await;
+
+        let mut pull_err = PullErrOncePuller {
+            data: Arc::from(b"abcdef".as_slice()),
+            failed: Arc::new(AtomicBool::new(false)),
+        };
+        let _ = pull_err.pull(Some(&(0..2u64))).await; // first call errors, sets `failed`
+        let _ = pull_err.pull(None).await; // success path, `None` arm
+
+        let mut stream_err = StreamErrOncePuller {
+            data: Arc::from(b"abcdef".as_slice()),
+            failed: Arc::new(AtomicBool::new(false)),
+        };
+        let _ = stream_err.pull(Some(&(0..2u64))).await;
+        let _ = stream_err.pull(None).await;
+
+        let mut rec_stream_err = RecoverableStreamErrOncePuller {
+            data: Arc::from(b"abcdef".as_slice()),
+            failed: Arc::new(AtomicBool::new(false)),
+        };
+        let _ = rec_stream_err.pull(Some(&(0..2u64))).await; // first: `Some` arm + error
+        let _ = rec_stream_err.pull(Some(&(0..2u64))).await; // not-first: `Some` arm
+        let _ = rec_stream_err.pull(None).await; // `None` arm
+    }
+
+    #[tokio::test]
+    async fn test_slow_mock_puller_none_range() {
+        // Line 402: the `None` branch of `SlowMockPuller::pull` (only the `Some`
+        // branch is exercised by the concurrent download path).
+        let mut p = SlowMockPuller {
+            data: Arc::from(b"hello world".as_slice()),
+            delay: Duration::ZERO,
+        };
+        assert!(p.pull(None).await.is_ok());
+        let mut p2 = SlowMockPuller {
+            data: Arc::from(b"hello world".as_slice()),
+            delay: Duration::ZERO,
+        };
+        assert!(p2.pull(Some(&(0..5))).await.is_ok());
     }
 }

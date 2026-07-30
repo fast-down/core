@@ -654,4 +654,215 @@ mod tests {
             .expect_err("exceeding max_redirects should fail");
         assert!(matches!(err.0, ReqwestResponseError::StatusCode(_)));
     }
+
+    #[test]
+    fn parse_retry_after_missing_is_none() {
+        let headers = HeaderMap::new();
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn parse_retry_after_delta_seconds() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("120"));
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_mins(2)));
+    }
+
+    #[test]
+    fn parse_retry_after_http_date() {
+        let mut headers = HeaderMap::new();
+        // Build a guaranteed-valid future HTTP date via httpdate's own formatter,
+        // so `parse_http_date` round-trips it successfully.
+        let future = SystemTime::now() + Duration::from_hours(1);
+        let date_str = httpdate::fmt_http_date(future);
+        headers.insert(
+            header::RETRY_AFTER,
+            HeaderValue::from_str(&date_str).unwrap(),
+        );
+        let delay = parse_retry_after(&headers);
+        assert!(delay.is_some());
+        assert!(delay.unwrap() > Duration::ZERO);
+    }
+
+    #[test]
+    fn parse_retry_after_unparseable_is_none() {
+        // Not a number and not a valid HTTP date -> falls through to `None`.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("not-a-time"));
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn parse_retry_after_past_date_is_none() {
+        // A valid HTTP date in the past yields a negative duration -> `None`.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::RETRY_AFTER,
+            HeaderValue::from_static("Mon, 01 Jan 2001 00:00:00 GMT"),
+        );
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn test_smart_redirect_404_returns_status_code_error() {
+        let mut server = mockito::Server::new_async().await;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let _mock = server
+            .mock("GET", "/404")
+            .with_status(404)
+            .create_async()
+            .await;
+        let redirect_client = SmartRedirectClient::new(client, None, None, None, None, None, 10);
+        let url = Url::parse(&format!("{}/404", server.url())).unwrap();
+        let err = redirect_client
+            .get(url, None)
+            .send()
+            .await
+            .expect_err("404 should produce a StatusCode error");
+        assert!(matches!(err.0, ReqwestResponseError::StatusCode(_)));
+    }
+
+    #[tokio::test]
+    async fn test_smart_redirect_302_without_location_errors() {
+        let mut server = mockito::Server::new_async().await;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let _mock = server
+            .mock("GET", "/redir")
+            .with_status(302)
+            .create_async()
+            .await;
+        let redirect_client = SmartRedirectClient::new(client, None, None, None, None, None, 10);
+        let url = Url::parse(&format!("{}/redir", server.url())).unwrap();
+        let err = redirect_client
+            .get(url, None)
+            .send()
+            .await
+            .expect_err("a 302 without Location should error");
+        assert!(matches!(err.0, ReqwestResponseError::StatusCode(_)));
+    }
+
+    #[tokio::test]
+    async fn test_smart_redirect_302_unjoinable_location_errors() {
+        let mut server = mockito::Server::new_async().await;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let _mock = server
+            .mock("GET", "/redir")
+            .with_status(302)
+            .with_header("Location", "http://")
+            .create_async()
+            .await;
+        let redirect_client = SmartRedirectClient::new(client, None, None, None, None, None, 10);
+        let url = Url::parse(&format!("{}/redir", server.url())).unwrap();
+        let err = redirect_client
+            .get(url, None)
+            .send()
+            .await
+            .expect_err("an unjoinable Location should error");
+        assert!(matches!(err.0, ReqwestResponseError::StatusCode(_)));
+    }
+
+    #[tokio::test]
+    async fn test_smart_redirect_reads_referrer_policy() {
+        let mut server = mockito::Server::new_async().await;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let _mock_redir = server
+            .mock("GET", "/src")
+            .with_status(302)
+            .with_header("Location", "/dst")
+            .with_header("Referrer-Policy", "no-referrer")
+            .create_async()
+            .await;
+        let _mock_dst = server
+            .mock("GET", "/dst")
+            .with_status(200)
+            .with_header("Content-Length", "5")
+            .with_body("hello")
+            .create_async()
+            .await;
+        let redirect_client = SmartRedirectClient::new(client, None, None, None, None, None, 10);
+        let url = Url::parse(&format!("{}/src", server.url())).unwrap();
+        let resp = redirect_client
+            .get(url, None)
+            .send()
+            .await
+            .expect("redirect with Referrer-Policy should succeed");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_smart_redirect_injects_resource_headers() {
+        let mut server = mockito::Server::new_async().await;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let _mock = server
+            .mock("GET", "/dst")
+            .with_status(200)
+            .with_header("Content-Length", "5")
+            .with_body("hello")
+            .create_async()
+            .await;
+        // First-hop resource-specific headers are injected only on redirect_count == 0.
+        let redirect_client = SmartRedirectClient::new(
+            client,
+            None,
+            Some(ReferrerPolicy::NoReferrer),
+            Some(HeaderValue::from_static("https://origin.example")),
+            Some(HeaderValue::from_static("secret-token")),
+            Some(HeaderValue::from_static("cookie-value")),
+            10,
+        );
+        let url = Url::parse(&format!("{}/dst", server.url())).unwrap();
+        let resp = redirect_client
+            .get(url, None)
+            .send()
+            .await
+            .expect("request with resource headers should succeed");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_smart_redirect_with_range_request() {
+        let mut server = mockito::Server::new_async().await;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let _mock = server
+            .mock("GET", "/range")
+            .with_status(200)
+            .with_header("Content-Length", "4")
+            .with_body("data")
+            .create_async()
+            .await;
+        let redirect_client = SmartRedirectClient::new(client, None, None, None, None, None, 10);
+        let url = Url::parse(&format!("{}/range", server.url())).unwrap();
+        // A ranged request exercises the `if let Some(ref range)` branch that
+        // attaches the `Range` header (lines 219-224).
+        let resp = redirect_client
+            .get(url, Some(0..3))
+            .send()
+            .await
+            .expect("ranged request must succeed");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }

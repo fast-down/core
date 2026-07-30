@@ -307,4 +307,217 @@ mod tests {
             }
         }
     }
+
+    #[derive(Debug)]
+    struct MismatchHeaders;
+    impl HttpHeaders for MismatchHeaders {
+        type GetHeaderError = MockError;
+        fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
+            if header == "etag" {
+                Ok(Cow::Borrowed("etag-x"))
+            } else {
+                Err(MockError)
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct MismatchClient;
+    impl HttpClient for MismatchClient {
+        type RequestBuilder = MismatchRequestBuilder;
+        fn get(&self, _url: Url, _range: Option<ProgressEntry>) -> Self::RequestBuilder {
+            MismatchRequestBuilder
+        }
+    }
+    struct MismatchRequestBuilder;
+    impl HttpRequestBuilder for MismatchRequestBuilder {
+        type Response = MismatchResponse;
+        type RequestError = MockError;
+        fn send(
+            self,
+        ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send
+        {
+            std::future::ready(Ok(MismatchResponse::new()))
+        }
+    }
+    #[derive(Debug)]
+    struct MismatchResponse {
+        url: Url,
+    }
+    impl MismatchResponse {
+        fn new() -> Self {
+            Self {
+                url: Url::parse("http://mock-url").unwrap(),
+            }
+        }
+    }
+    impl HttpResponse for MismatchResponse {
+        type Headers = MismatchHeaders;
+        type ChunkError = MockError;
+        fn headers(&self) -> &Self::Headers {
+            &MismatchHeaders
+        }
+        fn url(&self) -> &Url {
+            &self.url
+        }
+        fn chunk(
+            &mut self,
+        ) -> impl Future<Output = Result<Option<Bytes>, Self::ChunkError>> + Send {
+            std::future::ready(Ok(None))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct ReqErrClient;
+    impl HttpClient for ReqErrClient {
+        type RequestBuilder = ReqErrRequestBuilder;
+        fn get(&self, _url: Url, _range: Option<ProgressEntry>) -> Self::RequestBuilder {
+            ReqErrRequestBuilder
+        }
+    }
+    struct ReqErrRequestBuilder;
+    impl HttpRequestBuilder for ReqErrRequestBuilder {
+        type Response = MockResponse;
+        type RequestError = MockError;
+        fn send(
+            self,
+        ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send
+        {
+            std::future::ready(Err((MockError, None)))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct ChunkErrClient;
+    impl HttpClient for ChunkErrClient {
+        type RequestBuilder = ChunkErrRequestBuilder;
+        fn get(&self, _url: Url, _range: Option<ProgressEntry>) -> Self::RequestBuilder {
+            ChunkErrRequestBuilder
+        }
+    }
+    struct ChunkErrRequestBuilder;
+    impl HttpRequestBuilder for ChunkErrRequestBuilder {
+        type Response = ChunkErrResponse;
+        type RequestError = MockError;
+        fn send(
+            self,
+        ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send
+        {
+            std::future::ready(Ok(ChunkErrResponse::new()))
+        }
+    }
+    #[derive(Debug)]
+    struct ChunkErrResponse {
+        url: Url,
+    }
+    impl ChunkErrResponse {
+        fn new() -> Self {
+            Self {
+                url: Url::parse("http://mock-url").unwrap(),
+            }
+        }
+    }
+    impl HttpResponse for ChunkErrResponse {
+        type Headers = MockHeaders;
+        type ChunkError = MockError;
+        fn headers(&self) -> &Self::Headers {
+            &MockHeaders
+        }
+        fn url(&self) -> &Url {
+            &self.url
+        }
+        fn chunk(
+            &mut self,
+        ) -> impl Future<Output = Result<Option<Bytes>, Self::ChunkError>> + Send {
+            std::future::ready(Err(MockError))
+        }
+    }
+
+    #[test]
+    fn http_puller_debug_formats() {
+        let url = Url::parse("http://localhost").unwrap();
+        let puller = HttpPuller::new(Arc::new(url), MockClient, None, FileId::new(None, None));
+        let s = format!("{puller:?}");
+        assert!(s.contains("HttpPuller"));
+        assert!(s.contains("url"));
+    }
+
+    #[test]
+    fn mock_response_url_is_accessible() {
+        let r = MockResponse::new();
+        assert_eq!(r.url().as_str(), "http://mock-url/");
+    }
+
+    #[tokio::test]
+    async fn test_http_puller_mismatched_body() {
+        let url = Url::parse("http://localhost").unwrap();
+        let client = MismatchClient;
+        let file_id = FileId::new(None, None);
+        let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
+        let mut stream = Puller::pull(&mut puller, None).await.unwrap();
+        let result = stream.try_next().await;
+        assert!(matches!(
+            result,
+            Err((HttpError::MismatchedBody(_, _), None))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_http_puller_request_error() {
+        let url = Url::parse("http://localhost").unwrap();
+        let client = ReqErrClient;
+        let file_id = FileId::new(None, None);
+        let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
+        let mut stream = Puller::pull(&mut puller, None).await.unwrap();
+        let result = stream.try_next().await;
+        assert!(matches!(result, Err((HttpError::Request(_), None))));
+    }
+
+    #[tokio::test]
+    async fn test_http_puller_chunk_error_then_irrecoverable() {
+        let url = Url::parse("http://localhost").unwrap();
+        let client = ChunkErrClient;
+        let file_id = FileId::new(None, None);
+        let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
+        let mut stream = Puller::pull(&mut puller, None).await.unwrap();
+        // Full-file pull: Pending -> Ok(resp) -> file_id matches -> Streaming.
+        // The first poll of the stream yields the chunk error.
+        let first = stream.try_next().await;
+        assert!(matches!(first, Err((HttpError::Chunk(_, _), None))));
+        // The chunk error leaves state == None with range.end == u64::MAX, so the
+        // next poll returns HttpError::Irrecoverable.
+        let second = stream.try_next().await;
+        assert!(matches!(second, Err((HttpError::Irrecoverable, None))));
+    }
+
+    #[tokio::test]
+    async fn test_http_puller_partial_range_request() {
+        let url = Url::parse("http://localhost").unwrap();
+        let client = MockClient;
+        let file_id = FileId::new(None, None);
+        let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
+        let range = 10..100;
+        let mut stream = Puller::pull(&mut puller, Some(&range)).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), stream.try_next()).await;
+        match result {
+            Ok(Ok(Some(bytes))) => assert_eq!(bytes, Bytes::from_static(b"success")),
+            e => panic!("expected a successful chunk, got {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_http_puller_reuses_response() {
+        let url = Url::parse("http://localhost").unwrap();
+        // Hand a pre-opened response to the puller; a full-file pull should reuse
+        // it directly (lines 119-123) instead of issuing a new request.
+        let resp = Some(Arc::new(parking_lot::Mutex::new(Some(MockResponse::new()))));
+        let file_id = FileId::new(None, None);
+        let mut puller = HttpPuller::new(Arc::new(url), MockClient, resp, file_id);
+        let mut stream = Puller::pull(&mut puller, None).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), stream.try_next()).await;
+        match result {
+            Ok(Ok(Some(bytes))) => assert_eq!(bytes, Bytes::from_static(b"success")),
+            e => panic!("expected the reused response to yield data, got {e:?}"),
+        }
+    }
 }

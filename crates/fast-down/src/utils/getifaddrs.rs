@@ -81,3 +81,78 @@ pub struct InterfaceInfo {
     pub name: String,
     pub ip: IpAddr,
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::{get_available_local_ips, is_link_local};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn is_link_local_v4_true() {
+        assert!(is_link_local(&IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1))));
+    }
+
+    #[test]
+    fn is_link_local_v4_false() {
+        assert!(!is_link_local(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        assert!(!is_link_local(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(!is_link_local(&IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn is_link_local_v6_true() {
+        assert!(is_link_local(&IpAddr::V6(Ipv6Addr::new(
+            0xfe80, 0, 0, 0, 0, 0, 0, 1
+        ))));
+    }
+
+    #[test]
+    fn is_link_local_v6_false() {
+        assert!(!is_link_local(&IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0xdb8, 0, 0, 0, 0, 0, 1
+        ))));
+        assert!(!is_link_local(&IpAddr::V6(Ipv6Addr::new(
+            0x2606, 0x4700, 0, 0, 0, 0, 0, 1
+        ))));
+    }
+
+    #[test]
+    fn get_available_local_ips_satisfies_invariants() {
+        let ips = get_available_local_ips().expect("get_available_local_ips must succeed");
+        let virtual_keywords = [
+            "docker",
+            "veth",
+            "br-",
+            "utun",
+            "tun",
+            "tap",
+            "vboxnet",
+            "vmnet",
+            "lo",
+            "tailscale",
+            "zerotier",
+            "bridge",
+            "dummy",
+            "virtual",
+            "pseudo",
+        ];
+        for iface in &ips {
+            assert!(
+                !iface.ip.is_unspecified(),
+                "returned ip {} must not be unspecified",
+                iface.ip
+            );
+            assert!(
+                !is_link_local(&iface.ip),
+                "returned ip {} must not be link-local (filtered by get_available_local_ips)",
+                iface.ip
+            );
+            let name = iface.name.to_lowercase();
+            assert!(
+                !virtual_keywords.iter().any(|k| name.contains(k)),
+                "returned interface name {name} must not match a virtual-keyword"
+            );
+        }
+    }
+}

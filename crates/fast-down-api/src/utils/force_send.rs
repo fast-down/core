@@ -27,3 +27,27 @@ impl<F> ForceSendExt for F {
         ForceSend(self)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future;
+
+    #[tokio::test]
+    async fn force_send_awaits_inner_future() {
+        let wrapped = ForceSend(future::ready(7u32));
+        assert_eq!(wrapped.await, 7);
+    }
+
+    #[tokio::test]
+    async fn force_send_ext_transfers_poll_to_inner() {
+        let wrapped = future::ready(123u32).force_send();
+        assert_eq!(wrapped.await, 123);
+    }
+
+    #[test]
+    fn force_send_ext_constructs_wrapper() {
+        let w = "hello".to_string().force_send();
+        assert_eq!(w.0, "hello");
+    }
+}

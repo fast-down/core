@@ -107,3 +107,103 @@ impl<C: HttpClient> PullerError for HttpError<C> {
         matches!(self, Self::Irrecoverable)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::{HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse};
+    use crate::url_info::FileId;
+    use bytes::Bytes;
+    use fast_pull::PullerError;
+    use std::{borrow::Cow, future::Future, time::Duration};
+    use url::Url;
+
+    #[derive(Clone, Debug)]
+    struct MockClient;
+    impl HttpClient for MockClient {
+        type RequestBuilder = MockRequestBuilder;
+        fn get(&self, _url: Url, _range: Option<fast_pull::ProgressEntry>) -> Self::RequestBuilder {
+            MockRequestBuilder
+        }
+    }
+    struct MockRequestBuilder;
+    impl HttpRequestBuilder for MockRequestBuilder {
+        type Response = MockResponse;
+        type RequestError = MockErr;
+        fn send(
+            self,
+        ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send
+        {
+            std::future::ready(Ok(MockResponse::new()))
+        }
+    }
+    #[derive(Debug)]
+    struct MockResponse {
+        url: Url,
+    }
+    impl MockResponse {
+        fn new() -> Self {
+            Self {
+                url: Url::parse("http://mock-url").unwrap(),
+            }
+        }
+    }
+    impl HttpResponse for MockResponse {
+        type Headers = MockHeaders;
+        type ChunkError = MockErr;
+        fn headers(&self) -> &Self::Headers {
+            &MockHeaders
+        }
+        fn url(&self) -> &Url {
+            &self.url
+        }
+        fn chunk(
+            &mut self,
+        ) -> impl Future<Output = Result<Option<Bytes>, Self::ChunkError>> + Send {
+            std::future::ready(Ok(None))
+        }
+    }
+    #[derive(Debug)]
+    struct MockHeaders;
+    impl HttpHeaders for MockHeaders {
+        type GetHeaderError = MockErr;
+        fn get(&self, _header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
+            Err(MockErr)
+        }
+    }
+    #[derive(Debug, thiserror::Error)]
+    #[error("MockError")]
+    struct MockErr;
+
+    #[test]
+    fn debug_impl_formats_every_variant() {
+        let request = HttpError::<MockClient>::Request(MockErr);
+        assert!(format!("{request:?}").contains("Request"));
+
+        let chunk = HttpError::<MockClient>::Chunk(MockErr, MockResponse::new());
+        assert!(format!("{chunk:?}").contains("Chunk"));
+
+        let irrecoverable = HttpError::<MockClient>::Irrecoverable;
+        assert_eq!(format!("{irrecoverable:?}"), "Irrecoverable");
+
+        let mismatched = HttpError::<MockClient>::MismatchedBody(
+            FileId::new(Some("etag-x"), None),
+            MockResponse::new(),
+        );
+        assert!(format!("{mismatched:?}").contains("MismatchedBody"));
+    }
+
+    #[test]
+    fn is_irrecoverable_only_for_variant() {
+        assert!(HttpError::<MockClient>::Irrecoverable.is_irrecoverable());
+        assert!(!HttpError::<MockClient>::Request(MockErr).is_irrecoverable());
+        assert!(!HttpError::<MockClient>::Chunk(MockErr, MockResponse::new()).is_irrecoverable());
+        assert!(
+            !HttpError::<MockClient>::MismatchedBody(
+                FileId::new(Some("x"), None),
+                MockResponse::new()
+            )
+            .is_irrecoverable()
+        );
+    }
+}

@@ -19,7 +19,7 @@ drain progress events, resume after interruption, and cancel cooperatively.
 
 ## Quick start
 
-```rust,ignore
+```rust,no_run
 use fast_down_api::{create_cancellation_token, create_channel, DownloadHandle, Event, PartialConfig};
 use std::path::PathBuf;
 use url::Url;
@@ -46,6 +46,29 @@ async fn main() -> anyhow::Result<()> {
     // 4. Drain events until the task finishes or is cancelled.
     while let Ok(event) = rx.recv().await {
         match event {
+            // Aggregated progress on a fixed cadence (Config::progress_emit_gap).
+            // Convenient for a progress bar — no need to re-accumulate ranges.
+            Event::Progress(sample) => {
+                // `downloaded`, `percent`, and `total` are pre-computed for you;
+                // the fields below are equivalent to deriving them from `progress`.
+                let written: u64 = sample.progress.iter().map(|r| r.end - r.start).sum();
+                assert_eq!(written, sample.downloaded);
+                let pct = if sample.total > 0 {
+                    written * 100 / sample.total
+                } else {
+                    0
+                };
+                // `eta` is the estimated remaining time, or `None` until a rate
+                // can be measured.
+                let eta_str = sample
+                    .eta
+                    .map_or_else(|| "?".to_string(), |d| format!("{d:?}"));
+                println!(
+                    "progress: {pct}% ({:.1}%)  {written}/{} bytes  \
+                     {} B/s (inst)  {} B/s (avg)  elapsed {:?}  eta {eta_str}",
+                    sample.percent, sample.total, sample.bps, sample.avg_bps, sample.elapsed
+                );
+            }
             Event::PushProgress(p) => println!("wrote range: {p:?}"),
             Event::Renamed(path) => {
                 println!("done -> {path:?}");

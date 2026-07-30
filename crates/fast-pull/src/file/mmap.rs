@@ -88,6 +88,7 @@ impl Pusher for MmapFilePusher {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use std::sync::{Arc, Mutex};
     use std::{fs::File, io::Read, vec::Vec};
     use tempfile::NamedTempFile;
 
@@ -115,5 +116,40 @@ mod tests {
             .read_to_end(&mut file_content)
             .unwrap();
         assert_eq!(file_content, b"\0\x00234\0\0\0\0\0");
+    }
+
+    #[tokio::test]
+    async fn test_debug_and_sync_all_flush() {
+        // Lines 25-29: `Debug` impl. Line 80: the `sync_all == true` branch of `flush`.
+        let temp_file = NamedTempFile::new().unwrap();
+        let file_path = temp_file.path().to_path_buf();
+        let mut pusher = MmapFilePusher::new(&temp_file.reopen().unwrap().into(), 10, true)
+            .await
+            .unwrap();
+        let _ = format!("{pusher:?}");
+        pusher.push(&(2..5), b"234"[..].into()).unwrap();
+        pusher.flush().unwrap();
+        let mut file_content = Vec::new();
+        File::open(&file_path)
+            .unwrap()
+            .read_to_end(&mut file_content)
+            .unwrap();
+        assert_eq!(file_content, b"\0\x00234\0\0\0\0\0");
+    }
+
+    #[tokio::test]
+    async fn test_listener_invoked_on_push() {
+        // Lines 66-68 (`set_listener`) and 73-75 (listener call inside `push`).
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut pusher = MmapFilePusher::new(&temp_file.reopen().unwrap().into(), 10, false)
+            .await
+            .unwrap();
+        let seen = Arc::new(Mutex::new(None::<ProgressEntry>));
+        let seen2 = seen.clone();
+        pusher.set_listener(Box::new(move |r| {
+            *seen2.lock().unwrap() = Some(r);
+        }));
+        pusher.push(&(2..5), b"234"[..].into()).unwrap();
+        assert_eq!(*seen.lock().unwrap(), Some(2..5));
     }
 }

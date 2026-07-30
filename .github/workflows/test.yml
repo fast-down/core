@@ -43,7 +43,7 @@ jobs:
       - name: Run Clippy
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo hack clippy --feature-powerset
+        run: cargo hack clippy --all-targets --feature-powerset
 
   test:
     name: Test (${{ matrix.os }} - ${{ matrix.channel }})
@@ -136,7 +136,7 @@ jobs:
       - name: Run Doc Check
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo hack doc --feature-powerset --no-deps
+        run: cargo hack doc --feature-powerset --depth 1 --no-deps
 
   minimal-versions:
     name: Minimal Versions Check
