@@ -329,31 +329,41 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_set_threads_decrease_keeps_all_work() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let executor = TokioExecutor { tx, speculative: 1 };
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor = StealExecutor {
+            tx,
+            speculative: 1,
+            next_id: Arc::new(Mutex::new(0)),
+            released: released.clone(),
+        };
         let pre_data = [1..20, 41..48];
         let task_queue = TaskQueue::new(pre_data.iter().cloned());
-        // Spin up 8 workers, let them make progress, then shrink to 2 mid-run.
+        // Spin up 8 workers and hold them in-flight on the `released` gate, then
+        // shrink to 2 mid-run. The 6 excess workers are genuinely cancelled (the
+        // worker loop's `.await` point makes `abort` effective) and their
+        // remaining ranges are reclaimed into `waiting`.
         task_queue.set_threads(8, 1, Some(&executor)).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
         task_queue.set_threads(2, 1, Some(&executor)).unwrap();
         // The decrease branch must have actually reduced the running pool.
         assert_eq!(task_queue.inner.lock().running.len(), 2);
+        // Release the survivors so they drain `waiting` via a working `steal`
+        // and finish every number exactly once.
+        released.store(true, std::sync::atomic::Ordering::Relaxed);
         drop(executor);
-        // Every number must still be computed exactly once despite the shrink.
-        let mut data = HashMap::new();
-        while let Some((i, res)) = rx.recv().await {
-            assert!(
-                data.insert(i, res).is_none(),
-                "number {i} with value {res} was computed twice"
-            );
+        let mut seen = HashSet::new();
+        while let Some((_, i, res)) = rx.recv().await {
+            assert!(seen.insert(i), "number {i} was computed twice");
+            assert_eq!(res, i);
         }
+        // Every number must be present despite the mid-run shrink: the reclaimed
+        // ranges were picked up by the survivors via a working `steal` (this is
+        // the invariant `TokioExecutor`'s broken `is_self` could never prove).
         for range in pre_data {
             for i in range {
-                assert_eq!((i, data.get(&i)), (i, Some(&fib_fast(i))));
-                data.remove(&i);
+                assert!(seen.contains(&i), "number {i} was never computed");
             }
         }
-        assert_eq!(data.len(), 0);
+        assert_eq!(seen.len(), 26);
     }
 
     /// A *correct* executor used to genuinely exercise work-stealing and
