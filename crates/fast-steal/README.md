@@ -19,7 +19,10 @@
 ```rust,no_run
 extern crate std;
 use fast_steal::{Executor, Handle, Task, TaskQueue};
-use std::{collections::HashMap};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use tokio::{
     sync::mpsc,
     task::AbortHandle,
@@ -28,32 +31,48 @@ use tokio::{
 pub struct TokioExecutor {
     tx: mpsc::UnboundedSender<(u64, u64)>,
     speculative: usize,
+    // Hands out a distinct id per spawned worker. That id is the worker's
+    // *only* registration key with the queue -- see `is_self` below.
+    next_id: AtomicUsize,
 }
 #[derive(Clone)]
-pub struct TokioHandle(AbortHandle);
+pub struct TokioHandle {
+    id: usize,
+    abort: AbortHandle,
+}
 
 impl Handle for TokioHandle {
-    type Output = ();
-    type Id = ();
-    fn abort(&mut self) -> Self::Output {
-        self.0.abort();
+    type Id = usize;
+    fn abort(&mut self) {
+        self.abort.abort();
     }
-    fn is_self(&mut self, _: &Self::Id) -> bool {
-        false
+    // Must report `true` for the id of the worker this handle was returned for.
+    // Get this wrong (e.g. always `false`) and `steal` cannot authenticate the
+    // caller: it returns `false`, which the worker reads as "no work left" and
+    // exits -- while the waiting queue still holds work. No error, no panic,
+    // just permanently stranded tasks.
+    fn is_self(&self, id: &Self::Id) -> bool {
+        self.id == *id
     }
 }
 
 impl Executor for TokioExecutor {
     type Handle = TokioHandle;
     fn execute(&self, mut task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
-        println!("execute");
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let tx = self.tx.clone();
         let speculative = self.speculative;
+        // Note: `execute` runs while the queue's internal lock is held. Never
+        // touch `task_queue` synchronously here -- defer it into the spawned
+        // task, which starts after the lock is released.
         let handle = tokio::spawn(async move {
             loop {
                 while task.start() < task.end() {
                     let i = task.start();
                     let res = fib(i);
+                    // `safe_add_start` is what makes speculative sharing safe:
+                    // if another worker already claimed `i`, this fails and we
+                    // simply drop our (duplicate) result instead of sending it.
                     let Ok(_) = task.safe_add_start(i, 1) else {
                         println!("task-failed: {i} = {res}");
                         continue;
@@ -61,13 +80,13 @@ impl Executor for TokioExecutor {
                     println!("task: {i} = {res}");
                     tx.send((i, res)).unwrap();
                 }
-                if !task_queue.steal(&(), &mut task, 1, speculative) {
+                if !task_queue.steal(&id, &mut task, 1, speculative) {
                     break;
                 }
             }
         });
-        let abort_handle = handle.abort_handle();
-        TokioHandle(abort_handle)
+        let abort = handle.abort_handle();
+        TokioHandle { id, abort }
     }
 }
 
@@ -94,6 +113,7 @@ async fn main() {
         let executor = TokioExecutor {
             tx,
             speculative: 1,
+            next_id: AtomicUsize::new(0),
         };
         let pre_data = [1..10, 13..19];
         let task_queue = TaskQueue::new(pre_data.iter().cloned());
@@ -122,6 +142,7 @@ async fn main() {
         let executor = TokioExecutor {
             tx,
             speculative: 2,
+            next_id: AtomicUsize::new(0),
         };
         let pre_data = [1..20, 41..48];
         let task_queue = TaskQueue::new(pre_data.iter().cloned());

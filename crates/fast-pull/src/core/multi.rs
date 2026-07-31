@@ -116,12 +116,11 @@ pub struct TokioHandle {
     notify: Arc<Notify>,
 }
 impl Handle for TokioHandle {
-    type Output = ();
     type Id = usize;
-    fn abort(&mut self) -> Self::Output {
+    fn abort(&mut self) {
         self.notify.notify_one();
     }
-    fn is_self(&mut self, id: &Self::Id) -> bool {
+    fn is_self(&self, id: &Self::Id) -> bool {
         self.id == *id
     }
 }
