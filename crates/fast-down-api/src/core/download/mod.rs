@@ -198,10 +198,15 @@ async fn download(
                 size: info.size,
             });
             s
-        } else if open_create_new().open(&tmp_path).await.is_ok() {
-            DownloadState::new(&url, &info, &partial_config, &cfg_path)
         } else {
-            continue;
+            match open_create_new().open(&tmp_path).await {
+                Ok(_) => DownloadState::new(&url, &info, &partial_config, &cfg_path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    let _ = tx.send(Event::BuildPusherError(e));
+                    return None;
+                }
+            }
         };
         return Some(OverwriteOption {
             state,
