@@ -221,15 +221,19 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// Build a deterministic config that targets `<dir>/out.bin` and downloads with
-/// a single thread and small chunks so the cancel lands predictably mid-flight.
+/// Build a config that targets `<dir>/out.bin` and drives the genuinely
+/// concurrent path (several `download_multi` workers racing on different
+/// offsets). The server is throttled, so a cancel still lands predictably
+/// mid-flight; with many workers the partial run leaves fragmented
+/// (multi-range) progress, exercising the resume path on real concurrency
+/// rather than the single-worker one.
 fn make_config(save_dir: &Path) -> PartialConfig {
-    make_config_with(save_dir, 1, 1024 * 1024)
+    make_config_with(save_dir, 32, 1024 * 1024)
 }
 
 /// Like [`make_config`] but with an explicit worker count and chunk size, so a
-/// test can drive the genuinely concurrent path (several `download_multi`
-/// workers racing on different offsets) rather than the single-worker one.
+/// test can pin a specific layout (e.g. exactly 8 workers for a controlled
+/// fragmented progress) rather than the default 32-worker run.
 fn make_config_with(save_dir: &Path, threads: usize, min_chunk_size: u64) -> PartialConfig {
     PartialConfig {
         save_dir: Some(save_dir.to_path_buf()),
@@ -1099,7 +1103,7 @@ fn make_config_no_overwrite(save_dir: &Path) -> PartialConfig {
         overwrite: Some(false),
         write_method: Some(WriteMethod::Mmap),
         min_chunk_size: Some(1024 * 1024),
-        threads: Some(1),
+        threads: Some(32),
         ..Default::default()
     }
 }
