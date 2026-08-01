@@ -480,6 +480,7 @@ mod range_list_tests {
     /// Serialize must reject an empty range (start == end) with an error instead
     /// of relying on a `debug_assert!` that release builds compile out (R3).
     #[test]
+    #[allow(clippy::single_range_in_vec_init)]
     fn downloaded_chunk_serialization_rejects_empty_range() {
         let pc = PartialConfig {
             downloaded_chunk: Some(vec![1..1]),

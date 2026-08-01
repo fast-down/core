@@ -360,6 +360,61 @@ mod tests {
         assert_eq!(&**receive.lock(), mock_data);
     }
 
+    /// A puller that answers every ranged request with the full body starting at
+    /// offset 0, as a server would when it ignores `Range` and returns `200 OK`.
+    #[derive(Debug, Clone)]
+    struct IgnoreRangePuller(std::sync::Arc<[u8]>);
+    impl Puller for IgnoreRangePuller {
+        type Error = std::convert::Infallible;
+        fn pull(
+            &mut self,
+            _range: Option<&ProgressEntry>,
+        ) -> impl Future<Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>>
+        {
+            let data = &self.0;
+            std::future::ready(Ok(stream::iter(
+                data.chunks(2).map(|c| Ok(c.iter().copied().collect())),
+            )))
+        }
+    }
+
+    // The puller answers every ranged request with the full body starting at
+    // offset 0, as a server would when it ignores `Range` and returns `200 OK`.
+    // With `concurrent > 1` the session splits into tasks that begin past
+    // offset 0, so each worker that pulls the full body must end up writing
+    // only the bytes that belong to its own range; the final file must equal
+    // the source.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_puller_returning_full_body_writes_only_own_range() {
+        let mock_data = build_mock_data(16 * 1024);
+        let puller = IgnoreRangePuller(std::sync::Arc::from(mock_data.as_slice()));
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::from_secs(1),
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+        let mut push_progress: Vec<ProgressEntry> = Vec::new();
+        while let Ok(e) = result.event_chain().recv().await {
+            if let Event::PushProgress(p) = e {
+                push_progress.merge_progress(p);
+            }
+        }
+        result.join().await.unwrap();
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_concurrent_download_abort_discards() {
         let mock_data = build_mock_data(3 * 1024);

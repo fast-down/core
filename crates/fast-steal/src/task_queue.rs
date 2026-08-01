@@ -511,19 +511,23 @@ mod tests {
         }
         assert_eq!(seen.len(), 1000, "not all numbers were computed");
         // The discriminating check: with working steal, crumb workers steal from
-        // the big peer and end up doing far more than their initial 1-number
-        // crumb. A broken `is_self` makes `steal` a no-op, leaving *exactly one*
-        // worker (the big one) above 1.
+        // the big peer, so at least one of them ends up doing far more than its
+        // initial 1-number crumb. A broken `is_self` makes `steal` a no-op (no
+        // `worker_idx` is found), leaving *exactly one* worker (the big one)
+        // above 1.
         //
-        // The threshold is deliberately loose. How many crumb workers get a bite
-        // depends on scheduling: a crumb worker that wakes late may find the big
-        // range already drained by its peers and legitimately finish with 1. So
-        // we assert "several workers shared the big range", not "all of them" —
-        // that still fails hard (1 < 3) when steal is broken, without being
-        // flaky under an unlucky interleaving.
+        // The threshold is therefore `>= 2`: it is the sound invariant, not a
+        // statistical guess. A working steal *always* yields at least 2 workers
+        // above 1 (the big worker plus at least one stealer) — the only way to
+        // land at 1 is zero steals, i.e. the broken case. Asserting a higher
+        // count (>= 3) was flaky: how many crumb workers get a bite depends on
+        // scheduling, and on a fast or loaded runner two hot workers can drain
+        // the whole range before their peers win the race to steal,
+        // legitimately leaving exactly 2 workers above 1. That is still correct
+        // stealing, so it must not fail the test.
         let multi = per_worker.values().filter(|&&c| c > 1).count();
         assert!(
-            multi >= 3,
+            multi >= 2,
             "steal did not distribute work; only {multi} workers exceeded their \
              initial crumb (per-worker counts: {per_worker:?})"
         );

@@ -138,9 +138,11 @@ where
 /// long as **any** clone is alive, and is cancelled only once the last clone is
 /// dropped. An explicit [`abort`](Self::abort) cancels immediately.
 ///
-/// `DownloadResult` derefs to `DownloadResultInner`, so all session methods
-/// (`join`, `abort`, `set_threads`, `is_aborted`) and the [`event_chain`](Self::event_chain)
-/// method are reachable directly on the handle.
+/// `DownloadResult` wraps `Arc<DownloadResultInner>` and exposes the session
+/// methods (`join`, `abort`, `set_threads`, `is_aborted`) and
+/// [`event_chain`](Self::event_chain) directly; each delegates to the inner
+/// value. There is intentionally **no** `Deref` impl — `DownloadResultInner`
+/// is private, so callers reach session state only through these methods.
 #[derive(Debug)]
 pub struct DownloadResult<E, PullError, PushError>
 where
