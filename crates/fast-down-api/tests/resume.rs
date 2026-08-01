@@ -1393,7 +1393,9 @@ async fn test_non_overwrite_create_new_fatal_error_reports_not_hangs() {
     let dir = temp_dir("fa01_readonly_create_new");
     // Make the save dir read-only so `open_create_new` on any candidate `.part`
     // fails with `PermissionDenied` (a non-`AlreadyExists` error).
-    let mut perms = std::fs::metadata(&dir).expect("stat save dir").permissions();
+    let mut perms = std::fs::metadata(&dir)
+        .expect("stat save dir")
+        .permissions();
     perms.set_mode(0o555);
     std::fs::set_permissions(&dir, perms).expect("chmod save dir read-only");
 
@@ -1412,8 +1414,7 @@ async fn test_non_overwrite_create_new_fatal_error_reports_not_hangs() {
     };
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
-    let _handle =
-        DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
 
     // Guard against the pre-fix infinite loop: a hung task never closes the
     // channel, so `drain` would block past this timeout and the test would fail
@@ -1435,7 +1436,9 @@ async fn test_non_overwrite_create_new_fatal_error_reports_not_hangs() {
 
     // Best-effort restore so a later run's cleanup of this temp dir is not
     // blocked by the read-only bit.
-    let mut restore = std::fs::metadata(&dir).expect("stat save dir").permissions();
+    let mut restore = std::fs::metadata(&dir)
+        .expect("stat save dir")
+        .permissions();
     restore.set_mode(0o755);
     let _ = std::fs::set_permissions(&dir, restore);
 }

@@ -13,6 +13,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 /// without aborting the stream, so a consumer can decide whether to retry,
 /// cancel, or surface them in a UI.
 #[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
 pub enum Event {
     /// Emitted after the prefetch step resolves the remote file's metadata.
     ///
