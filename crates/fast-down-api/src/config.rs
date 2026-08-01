@@ -268,14 +268,20 @@ mod range_list {
             Some(ranges) => {
                 let text = ranges
                     .iter()
-                    .map(|r| {
-                        debug_assert!(
-                            r.start < r.end,
-                            "downloaded_chunk range must be non-empty (start < end), got {r:?}"
-                        );
-                        format!("{}-{}", r.start, r.end - 1)
+                    .map(|r| -> Result<String, S::Error> {
+                        let end_inclusive = r.end.checked_sub(1).ok_or_else(|| {
+                            serde::ser::Error::custom(format!(
+                                "downloaded_chunk range must be non-empty (end > 0), got {r:?}"
+                            ))
+                        })?;
+                        if r.start > end_inclusive {
+                            return Err(serde::ser::Error::custom(format!(
+                                "downloaded_chunk range must be non-empty (start <= end), got {r:?}"
+                            )));
+                        }
+                        Ok(format!("{}-{}", r.start, end_inclusive))
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Result<Vec<_>, S::Error>>()?
                     .join(",");
                 serializer.serialize_str(&text)
             }
@@ -307,6 +313,11 @@ mod range_list {
                     let end_inclusive: u64 = end_repr.trim().parse().map_err(|e| {
                         serde::de::Error::custom(format!("invalid range end `{end_repr}`: {e}"))
                     })?;
+                    if end_inclusive == u64::MAX {
+                        return Err(serde::de::Error::custom(format!(
+                            "invalid range `{part}` in downloaded_chunk: end {end_inclusive} is a malformed (wrapping) value"
+                        )));
+                    }
                     if end_inclusive < start {
                         return Err(serde::de::Error::custom(format!(
                             "invalid range `{part}` in downloaded_chunk: end {end_inclusive} < start {start}"
@@ -464,5 +475,33 @@ mod range_list_tests {
         let de = serde::de::value::UnitDeserializer::<serde::de::value::Error>::new();
         let parsed = range_list::deserialize(de).unwrap();
         assert_eq!(parsed, None);
+    }
+
+    /// Serialize must reject an empty range (start == end) with an error instead
+    /// of relying on a `debug_assert!` that release builds compile out (R3).
+    #[test]
+    fn downloaded_chunk_serialization_rejects_empty_range() {
+        let pc = PartialConfig {
+            downloaded_chunk: Some(vec![1..1]),
+            ..Default::default()
+        };
+        let result = toml::to_string(&pc);
+        assert!(
+            result.is_err(),
+            "an empty downloaded_chunk range must fail to serialize, got: {result:?}"
+        );
+    }
+
+    /// Deserialize must reject the `u64::MAX` inclusive end that a wrapping
+    /// underflow would produce, symmetrically to the serialize-side guard (R3).
+    #[test]
+    fn downloaded_chunk_deserialization_rejects_wrapping_end() {
+        let toml = "downloaded_chunk = \"0-18446744073709551615\"\n";
+        let err = toml::from_str::<PartialConfig>(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("downloaded_chunk"),
+            "wrapping end must be rejected with a clear error, got: {msg}"
+        );
     }
 }
