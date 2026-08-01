@@ -68,9 +68,7 @@ async fn prefetch<Client: HttpClient>(client: &Client, url: Url) -> PrefetchResu
     );
     let (result_no_range, result_range) = tokio::join!(no_range_fut, range_fut);
     let mut res = result_no_range?;
-    if let Ok(supports_range) = result_range
-        && supports_range
-    {
+    if matches!(result_range, Ok(true)) {
         res.0.supports_range = true;
         if res.0.size != 0 {
             res.0.fast_download = true;
