@@ -152,4 +152,17 @@ mod tests {
         pusher.push(&(2..5), b"234"[..].into()).unwrap();
         assert_eq!(*seen.lock().unwrap(), Some(2..5));
     }
+
+    #[tokio::test]
+    async fn test_mmap_pusher_zero_length_file() {
+        // Hypothesis: an empty download (size == 0) must still construct a usable
+        // pusher. `MmapMut::map_mut` on a zero-length file returns EINVAL on Unix,
+        // so this probes whether `new(0)` is a latent break for 0-byte resources.
+        let temp_file = NamedTempFile::new().unwrap();
+        let result = MmapFilePusher::new(&temp_file.reopen().unwrap().into(), 0, false).await;
+        assert!(
+            result.is_ok(),
+            "zero-length download should construct an mmap pusher, got: {result:?}"
+        );
+    }
 }

@@ -1371,3 +1371,71 @@ async fn test_progress_zero_total_file() {
     let got = tokio::fs::read(&final_path).await.expect("read final file");
     assert!(got.is_empty(), "0-byte file must produce a 0-byte file");
 }
+
+/// Regression test for F-A01: in the **non-overwrite** path, a fatal I/O error
+/// while creating the `.part` file must surface as `Event::BuildPusherError` and
+/// end the task — NOT spin forever on the unbounded `iter_stem` iterator. The
+/// pre-fix code did `else { continue }` unconditionally, so a full disk / read
+/// only target (any `create_new` failure that is not `AlreadyExists`) made the
+/// download task hang indefinitely.
+///
+/// The fatal case is simulated on unix by making `save_dir` read-only
+/// (`0o555`): `gen_path` still succeeds (`create_dir_all` is a no-op on an
+/// existing dir) but `open_create_new` on any candidate `.part` fails with
+/// `PermissionDenied`. The Windows readonly attribute does not block file
+/// creation, so this is intentionally unix-only; the fix itself is cross
+/// platform (the `io::ErrorKind` branch runs everywhere).
+#[cfg(unix)]
+#[tokio::test]
+async fn test_non_overwrite_create_new_fatal_error_reports_not_hangs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_dir("fa01_readonly_create_new");
+    // Make the save dir read-only so `open_create_new` on any candidate `.part`
+    // fails with `PermissionDenied` (a non-`AlreadyExists` error).
+    let mut perms = std::fs::metadata(&dir).expect("stat save dir").permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(&dir, perms).expect("chmod save dir read-only");
+
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cfg = PartialConfig {
+        save_dir: Some(dir.clone()),
+        filename: Some("out.bin".to_string()),
+        parse_filename: Some(false),
+        overwrite: Some(false),
+        resume: Some(false),
+        write_method: Some(WriteMethod::Mmap),
+        min_chunk_size: Some(1024 * 1024),
+        threads: Some(32),
+        ..Default::default()
+    };
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    let _handle =
+        DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+
+    // Guard against the pre-fix infinite loop: a hung task never closes the
+    // channel, so `drain` would block past this timeout and the test would fail
+    // with a clear message instead of hanging the whole suite.
+    let events = timeout(Duration::from_secs(15), drain(rx))
+        .await
+        .expect("download task hung on a fatal create_new error (F-A01 regression)");
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::BuildPusherError(_))),
+        "a fatal .part creation error must emit Event::BuildPusherError, got: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download must not complete when the .part cannot be created"
+    );
+
+    // Best-effort restore so a later run's cleanup of this temp dir is not
+    // blocked by the read-only bit.
+    let mut restore = std::fs::metadata(&dir).expect("stat save dir").permissions();
+    restore.set_mode(0o755);
+    let _ = std::fs::set_permissions(&dir, restore);
+}
