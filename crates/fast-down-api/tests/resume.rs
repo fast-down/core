@@ -239,6 +239,17 @@ fn make_config_with(save_dir: &Path, threads: usize, min_chunk_size: u64) -> Par
         write_method: Some(WriteMethod::Mmap),
         min_chunk_size: Some(min_chunk_size),
         threads: Some(threads),
+        // A server without range support turns off the mmap pusher and falls
+        // back to the cached file pusher, whose default watermarks (16 MiB)
+        // are larger than `FILE_SIZE`. Nothing would reach the leaf sink until
+        // the final flush, and since only the leaf emits `PushProgress`, a test
+        // watching that event could not cancel before the whole file was
+        // already written. Writing through on every chunk keeps a mid-download
+        // cancel observable. The mmap pusher ignores these three fields, so
+        // range-capable tests are unaffected.
+        cache_high_watermark: Some(1),
+        cache_low_watermark: Some(0),
+        write_buffer_size: Some(1),
         ..Default::default()
     }
 }
@@ -287,24 +298,32 @@ async fn partial_download_via_cancel_with(
     let mut events = Vec::new();
     let mut started = false;
     let mut written = 0u64;
-    let mut cancelled = false;
+    let mut cancelled_at = None;
     while let Ok(e) = rx.recv().await {
         if matches!(e, Event::Start { .. }) {
             started = true;
         }
         if let Event::PushProgress(ref p) = e {
             written += p.end - p.start;
-            if !cancelled && written >= cancel_after {
-                cancelled = true;
+            if cancelled_at.is_none() && written >= cancel_after {
+                cancelled_at = Some(written);
                 cancel.cancel();
             }
         }
         events.push(e);
     }
     assert!(started, "expected Event::Start during the partial download");
+    let Some(cancelled_at) = cancelled_at else {
+        panic!("expected at least {cancel_after} bytes written before cancelling (got {written})")
+    };
+    // Without this the test degrades silently rather than failing: if the sink
+    // buffers the whole file, the first and only `PushProgress` arrives from the
+    // final flush, the cancel fires after the download already finished, and
+    // every assertion below still passes while testing nothing.
     assert!(
-        cancelled,
-        "expected at least {cancel_after} bytes written before cancelling (got {written})"
+        cancelled_at < FILE_SIZE as u64,
+        "cancel must land mid-download, but all {cancelled_at} of {FILE_SIZE} bytes \
+         had already reached the sink when it fired"
     );
     assert!(
         !events.iter().any(|e| matches!(e, Event::Renamed(_))),
