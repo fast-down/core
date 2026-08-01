@@ -8,11 +8,21 @@ use crate::ProgressEntry;
 pub trait Merge {
     /// Merge `new` into the existing (sorted) progress list, coalescing overlaps
     /// so the list stays sorted and gap-free where ranges touch.
+    ///
+    /// # Preconditions
+    ///
+    /// The list must already be **sorted by `start` and non-overlapping**. This
+    /// holds automatically for lists built exclusively through this method; it is
+    /// checked by a `debug_assert` for hand-built lists.
     fn merge_progress(&mut self, new: ProgressEntry);
 }
 
 impl Merge for Vec<ProgressEntry> {
     fn merge_progress(&mut self, new: ProgressEntry) {
+        debug_assert!(
+            self.windows(2).all(|w| w[0].end <= w[1].start),
+            "merge_progress requires a sorted, non-overlapping list; merge the entries first"
+        );
         if new.start >= new.end {
             return;
         }
@@ -187,5 +197,86 @@ mod tests {
         }
         assert_eq!(w, vec![0..200]);
         assert!(w.len() == 1 && w[0] == (0..200));
+    }
+
+    /// Independent reference implementation: sort, then sweep and coalesce.
+    ///
+    /// Used as an oracle to check that the incremental `merge_progress` always
+    /// produces the same covered set as a batch merge, regardless of insertion
+    /// order.
+    fn reference_merge(ranges: &[ProgressEntry]) -> Vec<ProgressEntry> {
+        let mut sorted: Vec<ProgressEntry> =
+            ranges.iter().filter(|r| r.start < r.end).cloned().collect();
+        if sorted.is_empty() {
+            return vec![];
+        }
+        sorted.sort_by_key(|r| r.start);
+        let mut merged: Vec<ProgressEntry> = vec![sorted[0].clone()];
+        for r in sorted.iter().skip(1) {
+            let last = merged.last_mut().unwrap();
+            if r.start <= last.end {
+                last.end = last.end.max(r.end); // overlapping or touching -> extend
+            } else {
+                merged.push(r.clone());
+            }
+        }
+        merged
+    }
+
+    #[test]
+    fn merge_agrees_with_reference_oracle() {
+        // Whatever the insertion order, the incremental merge must equal the
+        // covered set computed by the batch oracle.
+        let cases: &[&[ProgressEntry]] = &[
+            &[1..5, 8..10, 3..12],
+            &[0..10, 20..30, 5..25],
+            &[10..20, 0..5, 4..6, 19..21],
+            &[0..50, 40..60, 55..70, 10..45],
+            &[100..200, 0..50, 50..100],
+            &[0..10, 30..40, 10..30], // last entry exactly fills the gap
+        ];
+        for ranges in cases {
+            let mut v: Vec<ProgressEntry> = vec![];
+            for r in *ranges {
+                v.merge_progress(r.clone());
+            }
+            assert_eq!(v, reference_merge(ranges), "case {ranges:?}");
+        }
+    }
+
+    #[test]
+    fn merge_full_file_coalesces_to_single_regardless_of_order() {
+        // 50 four-byte chunks of a 200-byte file, merged in a shuffled order,
+        // must collapse into a single [0..200] entry. `download_complete` relies
+        // on this: it tests the list length instead of the covered byte count.
+        let chunks: Vec<ProgressEntry> = (0..50).map(|i| (i * 4)..(i * 4 + 4)).collect();
+        let mut order: Vec<usize> = (0..50).collect();
+        order.sort_by_key(|&i| (i % 7, i)); // deterministic shuffle
+        let mut v: Vec<ProgressEntry> = vec![];
+        for &i in &order {
+            v.merge_progress(chunks[i].clone());
+        }
+        assert_eq!(v, vec![0..200]);
+    }
+
+    #[test]
+    fn merge_new_fills_gap_and_coalesces_all_three() {
+        #![allow(clippy::single_range_in_vec_init)]
+        // A new entry that exactly fills the gap between two disjoint entries,
+        // touching both ends, coalesces all three into one.
+        let mut v = vec![0..10, 30..40];
+        v.merge_progress(10..30);
+        assert_eq!(v, vec![0..40]);
+    }
+
+    #[test]
+    fn merge_accepts_touching_entries() {
+        #![allow(clippy::single_range_in_vec_init)]
+        // `merge_progress` itself never leaves touching entries behind, but a
+        // hand-built list containing them still satisfies the "sorted and
+        // non-overlapping" precondition and merges correctly.
+        let mut v = vec![0..10, 10..20];
+        v.merge_progress(5..15);
+        assert_eq!(v, vec![0..20]);
     }
 }

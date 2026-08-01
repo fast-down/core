@@ -3,14 +3,14 @@
 use crate::{DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, WorkerId};
 use bytes::Bytes;
 use core::{
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 use crossfire::{MAsyncTx, MTx, mpmc, mpsc};
 use fast_steal::{Executor, Handle, Task, TaskQueue};
 use futures::TryStreamExt;
-use std::sync::Arc;
-use tokio::sync::Notify;
+use std::sync::{Arc, Weak};
+use tokio_util::sync::CancellationToken;
 
 /// Options for a multi-threaded concurrent download.
 ///
@@ -24,6 +24,29 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
     pub push_queue_cap: usize,
     pub min_chunk_size: u64,
     pub max_speculative: usize,
+}
+
+/// The outbound channels of one session, shared by every live worker.
+///
+/// The strong count of the enclosing `Arc` is exactly the number of live
+/// workers: [`Executor::execute`] upgrades the executor's [`Weak`] into the
+/// worker it spawns, and that worker releases the reference as its last action.
+/// The worker that leaves last therefore drops both senders, which closes the
+/// write queue (ending the push driver) and gives up the executor's share of the
+/// event channel.
+///
+/// Holding these behind a [`Weak`] in the executor is what decouples "the
+/// session has finished" from "the executor has been dropped". [`DownloadResult`]
+/// keeps the executor alive for the whole session so it can spawn more workers
+/// on demand, and that no longer keeps a finished session's channels open.
+#[derive(Debug)]
+struct SessionChannels<PullError, PushError>
+where
+    PullError: Send + Unpin + 'static,
+    PushError: Send + Unpin + 'static,
+{
+    tx: MTx<mpmc::List<Event<PullError, PushError>>>,
+    tx_push: MAsyncTx<mpsc::Array<(WorkerId, ProgressEntry, Bytes)>>,
 }
 
 /// # Panics
@@ -43,47 +66,14 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         mpsc::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     let rx_push = rx_push.into_blocking();
-    let abort_flag = Arc::new(AtomicBool::new(false));
-    let abort_flag_clone = abort_flag.clone();
+    let abort_token = CancellationToken::new();
+    let abort_token_clone = abort_token.clone();
     let push_worker = Arc::new(std::sync::OnceLock::new());
     let push_worker_clone = push_worker.clone();
-    let push_handle = tokio::task::spawn_blocking(move || {
-        // Publish our thread handle first so `abort()` can `unpark()` us out
-        // of a `park_timeout` retry backoff.
-        let _ = push_worker_clone.set(std::thread::current());
-        'outer: while let Ok((id, spin, mut data)) = rx_push.recv() {
-            loop {
-                if abort_flag_clone.load(Ordering::Relaxed) {
-                    break 'outer;
-                }
-                let _ = tx_clone.send(Event::Pushing(id, spin.clone()));
-                match pusher.push(&spin, data) {
-                    Ok(()) => break,
-                    Err((err, bytes)) => {
-                        data = bytes;
-                        let _ = tx_clone.send(Event::PushError(id, spin.clone(), err));
-                    }
-                }
-                std::thread::park_timeout(options.retry_gap);
-            }
-        }
-        loop {
-            if abort_flag_clone.load(Ordering::Relaxed) {
-                break;
-            }
-            let _ = tx_clone.send(Event::Flushing);
-            match pusher.flush() {
-                Ok(()) => break,
-                Err(err) => {
-                    let _ = tx_clone.send(Event::FlushError(err));
-                }
-            }
-            std::thread::park_timeout(options.retry_gap);
-        }
-    });
+    let channels = Arc::new(SessionChannels { tx, tx_push });
     let executor: Arc<TokioExecutor<R, W::Error>> = Arc::new(TokioExecutor {
-        tx,
-        tx_push,
+        channels: Arc::downgrade(&channels),
+        abort_token: abort_token.clone(),
         puller,
         pull_timeout: options.pull_timeout,
         retry_gap: options.retry_gap,
@@ -99,26 +89,65 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
             Some(executor.as_ref()),
         )
         .unwrap();
+    drop(channels);
+    let push_handle = tokio::task::spawn_blocking(move || {
+        // Publish our thread handle first so `abort()` can `unpark()` us out
+        // of a `park_timeout` retry backoff.
+        let _ = push_worker_clone.set(std::thread::current());
+        while let Ok((id, mut spin, mut data)) = rx_push.recv() {
+            loop {
+                if abort_token_clone.is_cancelled() {
+                    return;
+                }
+                let _ = tx_clone.send(Event::Pushing(id, spin.clone()));
+                let len_before_push = data.len();
+                match pusher.push(&spin, data) {
+                    Ok(()) => break,
+                    Err((err, bytes)) => {
+                        let _ = tx_clone.send(Event::PushError(id, spin.clone(), err));
+                        let written = len_before_push.saturating_sub(bytes.len());
+                        data = bytes;
+                        spin.start += written as u64;
+                    }
+                }
+                std::thread::park_timeout(options.retry_gap);
+            }
+        }
+        loop {
+            if abort_token_clone.is_cancelled() {
+                break;
+            }
+            let _ = tx_clone.send(Event::Flushing);
+            match pusher.flush() {
+                Ok(()) => break,
+                Err(err) => {
+                    let _ = tx_clone.send(Event::FlushError(err));
+                }
+            }
+            std::thread::park_timeout(options.retry_gap);
+        }
+    });
     DownloadResult::new(
         event_chain,
         push_handle,
         None,
-        Some((Arc::downgrade(&executor), task_queue)),
-        abort_flag,
+        Some((executor, task_queue)),
+        abort_token,
         push_worker,
     )
 }
 
-/// A [`Handle`] implementation using tokio's [`Notify`] for cancellation.
+/// A [`Handle`] implementation whose cancellation is a worker-local
+/// [`CancellationToken`], itself a child of the session's root token.
 #[derive(Debug, Clone)]
 pub struct TokioHandle {
     id: usize,
-    notify: Arc<Notify>,
+    token: CancellationToken,
 }
 impl Handle for TokioHandle {
     type Id = usize;
     fn abort(&mut self) {
-        self.notify.notify_one();
+        self.token.cancel();
     }
     fn is_self(&self, id: &Self::Id) -> bool {
         self.id == *id
@@ -128,14 +157,24 @@ impl Handle for TokioHandle {
 ///
 /// Each worker is a `tokio::spawn`-ed task that pulls chunks from the puller,
 /// sends them to the write queue, and steals new work via [`TaskQueue`].
+///
+/// The executor outlives the workers — [`DownloadResult::set_threads`] uses it
+/// to grow the pool mid-session — so it must not own anything that keeps a
+/// finished session alive. It therefore reaches the session's channels through
+/// a [`Weak`]: once every worker is gone the upgrade fails and no further worker
+/// can be spawned.
 #[derive(Debug)]
 pub struct TokioExecutor<R, WE>
 where
     R: Puller,
     WE: Send + Unpin + 'static,
 {
-    tx: MTx<mpmc::List<Event<R::Error, WE>>>,
-    tx_push: MAsyncTx<mpsc::Array<(WorkerId, ProgressEntry, Bytes)>>,
+    channels: Weak<SessionChannels<R::Error, WE>>,
+    /// Session-wide cancellation token, shared with the push driver and with
+    /// [`DownloadResult::abort`]. Cancelling it broadcasts to every linked
+    /// worker token (including ones spawned after the cancel call), so a worker
+    /// only has to observe the cancel once to know the session is over.
+    abort_token: CancellationToken,
     puller: R,
     retry_gap: Duration,
     pull_timeout: Duration,
@@ -152,42 +191,41 @@ where
     #[allow(clippy::too_many_lines)]
     fn execute(&self, mut task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
         let id = self.id.fetch_add(1, Ordering::SeqCst);
+        let token = self.abort_token.child_token();
+        let Some(channels) = self.channels.upgrade() else {
+            return TokioHandle { id, token };
+        };
         let mut puller = self.puller.clone();
         let min_chunk_size = self.min_chunk_size;
         let pull_timeout = self.pull_timeout;
         let cfg_retry_gap = self.retry_gap;
         let max_speculative = self.max_speculative;
-        let tx = self.tx.clone();
-        let tx_push = self.tx_push.clone();
-        let notify = Arc::new(Notify::new());
-        let notify_clone = notify.clone();
+        let worker_token = token.clone();
         tokio::spawn(async move {
             'task: loop {
+                if worker_token.is_cancelled() {
+                    break 'task;
+                }
                 let mut start = task.start();
                 if start >= task.end() {
                     if task_queue.steal(&id, &mut task, min_chunk_size, max_speculative) {
-                        tokio::select! {
-                            biased;
-                            () = notify.notified() => {}
-                            () = async {} => {}
-                        }
                         continue 'task;
                     }
                     break;
                 }
-                let _ = tx.send(Event::Pulling(id));
+                let _ = channels.tx.send(Event::Pulling(id));
                 let download_range = start..task.end();
                 let mut stream = loop {
                     let t = tokio::select! {
-                        () = notify.notified() => break 'task,
+                        () = worker_token.cancelled() => break 'task,
                         t = puller.pull(Some(&download_range)) => t
                     };
                     match t {
                         Ok(t) => break t,
                         Err((e, retry_gap)) => {
-                            let _ = tx.send(Event::PullError(id, e));
+                            let _ = channels.tx.send(Event::PullError(id, e));
                             tokio::select! {
-                                () = notify.notified() => break 'task,
+                                () = worker_token.cancelled() => break 'task,
                                 () = tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)) => {}
                             };
                         }
@@ -201,9 +239,9 @@ where
                         .as_mut()
                         .reset(tokio::time::Instant::now() + pull_timeout);
                     let t = tokio::select! {
-                        () = notify.notified() => break 'task,
+                        () = worker_token.cancelled() => break 'task,
                         () = &mut sleep => {
-                            let _ = tx.send(Event::PullTimeout(id));
+                            let _ = channels.tx.send(Event::PullTimeout(id));
                             drop(stream);
                             puller = puller.clone();
                             continue 'task;
@@ -228,8 +266,8 @@ where
                                 (span.start - start) as usize..(span.end - start) as usize;
                             chunk = chunk.slice(slice_span);
                             start = span.end;
-                            let _ = tx.send(Event::PullProgress(id, span.clone()));
-                            let _ = tx_push.send((id, span, chunk)).await;
+                            let _ = channels.tx.send(Event::PullProgress(id, span.clone()));
+                            let _ = channels.tx_push.send((id, span, chunk)).await;
                             if start >= task.end() {
                                 continue 'task;
                             }
@@ -237,9 +275,9 @@ where
                         Ok(None) => continue 'task,
                         Err((e, retry_gap)) => {
                             let is_irrecoverable = e.is_irrecoverable();
-                            let _ = tx.send(Event::PullError(id, e));
+                            let _ = channels.tx.send(Event::PullError(id, e));
                             tokio::select! {
-                                () = notify.notified() => break 'task,
+                                () = worker_token.cancelled() => break 'task,
                                 () = tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)) => {}
                             };
                             if is_irrecoverable {
@@ -249,12 +287,9 @@ where
                     }
                 }
             }
-            let _ = tx.send(Event::Finished(id));
+            let _ = channels.tx.send(Event::Finished(id));
         });
-        TokioHandle {
-            id,
-            notify: notify_clone,
-        }
+        TokioHandle { id, token }
     }
 }
 
@@ -271,7 +306,7 @@ mod tests {
         mem::MemPusher,
         mock::{MockPuller, build_mock_data},
     };
-    use futures::stream;
+    use futures::{StreamExt, stream};
     use std::{dbg, vec};
     use tokio::time::{sleep, timeout};
 
@@ -917,5 +952,116 @@ mod tests {
             delay: Duration::ZERO,
         };
         assert!(p2.pull(Some(&(0..5))).await.is_ok());
+    }
+
+    /// A [`Puller`] that yields one chunk on its *first* pull, then a stream that
+    /// never completes — forcing the worker's `pull_timeout` branch (lines 203-210)
+    /// to fire. The *second* pull returns the remaining range, so the download
+    /// recovers by re-pulling instead of hanging.
+    #[derive(Debug, Clone)]
+    struct TimeoutOncePuller {
+        data: Arc<[u8]>,
+        first: Arc<AtomicBool>,
+    }
+    impl crate::Puller for TimeoutOncePuller {
+        type Error = std::convert::Infallible;
+        fn pull(
+            &mut self,
+            range: Option<&crate::ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            let is_first = !self.first.swap(true, Ordering::SeqCst);
+            let data: Vec<u8> = match range {
+                Some(r) => self.data[r.start as usize..r.end as usize].to_vec(),
+                None => self.data.to_vec(),
+            };
+            async move {
+                if is_first {
+                    // Yield one chunk, then a stream that never completes, so the
+                    // worker's `pull_timeout` branch (lines 203-210) fires and the
+                    // worker re-pulls the remaining range.
+                    let head = data.get(..2).unwrap_or(&data);
+                    let items = vec![Ok(Bytes::copy_from_slice(head))];
+                    let pending = stream::pending::<
+                        Result<Bytes, (std::convert::Infallible, Option<Duration>)>,
+                    >();
+                    Ok(stream::iter(items).chain(pending))
+                } else {
+                    // Subsequent pulls return the full remaining range; the trailing
+                    // `pending` is never polled because the worker exits the read
+                    // loop on `start >= end` before reaching it.
+                    let items: Vec<Result<Bytes, (std::convert::Infallible, Option<Duration>)>> =
+                        data.chunks(2)
+                            .map(|c| Ok(Bytes::copy_from_slice(c)))
+                            .collect();
+                    let pending = stream::pending::<
+                        Result<Bytes, (std::convert::Infallible, Option<Duration>)>,
+                    >();
+                    Ok(stream::iter(items).chain(pending))
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_pull_timeout_recovers_by_repulling() {
+        // Lines 203-210: a stalled stream (first pull yields one chunk then hangs)
+        // must trigger `PullTimeout`, drop the stream, and re-pull the remaining
+        // range — the download still completes with the full payload.
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = TimeoutOncePuller {
+            data: Arc::from(mock_data.as_slice()),
+            first: Arc::new(AtomicBool::new(false)),
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_millis(50),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+        drain(&result).await;
+        result.join().await.unwrap();
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_download_empty_chunks() {
+        // Degenerate input: an empty `download_chunks` list must not hang or panic.
+        // With no work queued, `set_threads` spawns zero workers and `join()`
+        // returns once the push worker sees the closed channel.
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = MockPuller::new(&mock_data);
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 32,
+                retry_gap: Duration::from_secs(1),
+                push_queue_cap: 1024,
+                download_chunks: std::iter::empty(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+        let joined = timeout(Duration::from_secs(10), result.join())
+            .await
+            .expect("join() hung on empty chunks");
+        assert!(joined.is_ok());
+        assert_eq!(receive.lock().len(), 0);
     }
 }

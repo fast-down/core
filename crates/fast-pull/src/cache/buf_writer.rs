@@ -25,10 +25,10 @@ use bytes::{Bytes, BytesMut};
 /// at the new offset.
 ///
 /// # Error semantics
-/// On an inner `push` failure during flush, the unwritten tail is retained in the
-/// buffer and `Err((e, Bytes::new()))` is returned — the caller does not need to
-/// retry, mirroring the other decorators in this module which keep failed data
-/// internally.
+/// On an inner `push` failure during flush, the buffered run is retained internally
+/// for retry and the incoming `bytes` are handed back as `Err((e, bytes))` so the
+/// caller can retry them; this mirrors the other decorators in this module, which
+/// keep failed data internally rather than dropping it.
 #[derive(Debug)]
 pub struct BufWriterPusher<P> {
     inner: P,
@@ -67,8 +67,7 @@ impl<P: Pusher> BufWriterPusher<P> {
         match self.inner.push(&(start..start + len as u64), chunk) {
             Ok(()) => Ok(()),
             Err((e, rem)) => {
-                // Keep the unwritten tail so it can be retried on the next flush.
-                let written = len - rem.len();
+                let written = len.saturating_sub(rem.len());
                 self.buf.extend_from_slice(&rem);
                 self.run_start = start + written as u64;
                 Err(e)
@@ -173,6 +172,61 @@ mod tests {
             self.did_fail
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             Err((std::io::Error::other("boom"), bytes))
+        }
+    }
+
+    /// Inner pusher that writes only the first 2 bytes of the chunk on its first call,
+    /// then fails returning the unwritten tail as `rem`. Exercises partial-write handling.
+    #[derive(Clone, Debug)]
+    struct PartialPusher {
+        log: PushLog,
+        wrote_partial: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Pusher for PartialPusher {
+        type Error = std::io::Error;
+        fn push(
+            &mut self,
+            range: &ProgressEntry,
+            bytes: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            self.log
+                .lock()
+                .unwrap()
+                .push((range.start, range.end, bytes.to_vec()));
+            if !self
+                .wrote_partial
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                // Pretend we persisted the first 2 bytes, then failed with the tail left over.
+                let rem = bytes.slice(2..);
+                return Err((std::io::Error::other("partial"), rem));
+            }
+            Ok(())
+        }
+    }
+
+    /// Inner pusher that records every `set_listener` call and fires the listener on each
+    /// successful `push`, so the test can observe whether `BufWriterPusher` forwards it.
+    #[derive(Default)]
+    struct ListenerRecordingPusher {
+        fired: Arc<Mutex<Vec<(u64, u64)>>>,
+        listener: Option<ProgressListener>,
+    }
+    impl Pusher for ListenerRecordingPusher {
+        type Error = std::io::Error;
+        fn set_listener(&mut self, cb: ProgressListener) {
+            self.listener = Some(cb);
+        }
+        fn push(
+            &mut self,
+            range: &ProgressEntry,
+            _bytes: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            if let Some(cb) = &mut self.listener {
+                cb(range.clone());
+            }
+            self.fired.lock().unwrap().push((range.start, range.end));
+            Ok(())
         }
     }
 
@@ -301,5 +355,88 @@ mod tests {
         assert!(res.is_err());
         let (_e, remaining) = res.unwrap_err();
         assert_eq!(&remaining[..], b"efgh");
+    }
+
+    #[test]
+    fn flush_buf_partial_write_is_retained_and_retried() {
+        // A partial inner write (first 2 of 4 bytes persisted, then failure with the
+        // 2-byte tail as `rem`) must leave exactly that tail buffered for retry.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut bp = BufWriterPusher::new(
+            PartialPusher {
+                log: log.clone(),
+                wrote_partial: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            1024,
+        );
+        bp.push(&(0..4), Bytes::from_static(b"abcd")).unwrap();
+        // First flush hits the partial failure; the 2-byte tail stays in `self.buf`.
+        assert!(bp.flush().is_err());
+        // Retry flushes only the retained tail.
+        bp.flush().unwrap();
+
+        let l = log.lock().unwrap();
+        // The inner saw the full 4-byte chunk first, then the 2-byte tail on retry.
+        assert_eq!(l.len(), 2);
+        assert_eq!(l[0], (0, 4, b"abcd".to_vec()));
+        assert_eq!(l[1], (2, 4, b"cd".to_vec()));
+    }
+
+    #[test]
+    fn buf_writer_forwards_set_listener_and_fires_on_flush() {
+        let sink = ListenerRecordingPusher::default();
+        let fired = sink.fired.clone();
+        let mut bp = BufWriterPusher::new(sink, 1024);
+        bp.set_listener(Box::new(|_r: ProgressEntry| {}));
+        bp.push(&(0..4), Bytes::from_static(b"abcd")).unwrap();
+        // A buffered write has not reached the inner sink yet, so no listener fired.
+        assert!(
+            fired.lock().unwrap().is_empty(),
+            "buffered write must not reach the inner listener before flush"
+        );
+        bp.flush().unwrap();
+        // On flush the coalesced range reaches the inner sink and its listener fires.
+        assert_eq!(fired.lock().unwrap().as_slice(), &[(0, 4)]);
+    }
+
+    #[test]
+    fn capacity_full_does_not_flush_prematurely() {
+        // Capacity 4: two contiguous 2-byte writes fill the buffer exactly. Reaching
+        // `== capacity` must NOT trigger a flush; only `> capacity` does.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut bp = BufWriterPusher::new(RecordingPusher { log: log.clone() }, 4);
+        bp.push(&(0..2), Bytes::from_static(b"ab")).unwrap();
+        bp.push(&(2..4), Bytes::from_static(b"cd")).unwrap();
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "reaching exactly capacity must not flush"
+        );
+        bp.flush().unwrap();
+        let l = log.lock().unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0], (0, 4, b"abcd".to_vec()));
+    }
+
+    #[test]
+    fn failed_noncontiguous_flush_keeps_old_run_for_retry() {
+        // A non-contiguous write forces a flush of the buffered [0..4) run; when that
+        // flush fails, the caller's bytes are returned AND the old run is kept so it can
+        // be retried on the next flush.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut bp = BufWriterPusher::new(
+            FlakyPusher {
+                log: log.clone(),
+                did_fail: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            1024,
+        );
+        bp.push(&(0..4), Bytes::from_static(b"abcd")).unwrap();
+        let res = bp.push(&(10..14), Bytes::from_static(b"efgh"));
+        assert!(res.is_err());
+        // The old run must still be retryable.
+        bp.flush().unwrap();
+        let l = log.lock().unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0], (0, 4, b"abcd".to_vec()));
     }
 }

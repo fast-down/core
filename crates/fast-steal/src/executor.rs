@@ -122,7 +122,7 @@ mod tests {
         assert_eq!(task.get(), 10..20);
     }
 
-    /// AUDIT FINDING B-03: a broken `is_self` (always `false`) makes `steal`
+    /// A broken `is_self` (always `false`) makes `steal`
     /// return `false` -- indistinguishable from "no work left" -- while the
     /// waiting queue still holds `10..20`. The worker exits and that work is
     /// silently stranded. Nothing in the trait signature or docs prevents this.

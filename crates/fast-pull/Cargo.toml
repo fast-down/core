@@ -20,6 +20,7 @@ futures.workspace = true
 memmap2 = { version = "0.9", optional = true }
 parking_lot.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util = "0.7"
 
 [dev-dependencies]
 tempfile = "3.1"

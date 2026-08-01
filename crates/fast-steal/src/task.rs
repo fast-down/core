@@ -16,8 +16,7 @@ use portable_atomic::AtomicU128;
 /// (an `Arc<TaskInner>`), giving every worker a **distinct identity** even when
 /// two workers speculatively share the same progress cursor. This identity is
 /// what `set_threads`'s liveness sweep keys off (via `WeakTask`), so a dead
-/// worker is reclaimed regardless of how many twins still reference its cursor
-/// — see audit finding C-03.
+/// worker is reclaimed regardless of how many twins still reference its cursor.
 ///
 /// The range is stored as a single atomic `u128` inside `TaskInner`, allowing
 /// lock-free reads and fine-grained progress updates. Multiple workers can
@@ -78,7 +77,7 @@ impl WeakTask {
     /// Returns `true` if at least one strong [`Task`] reference to this worker's
     /// identity still exists. This is the exact "is this worker alive?" test the
     /// liveness sweep relies on — it is independent of how many twins share the
-    /// worker's progress cursor (C-03 fix).
+    /// worker's progress cursor.
     #[must_use]
     pub fn is_alive(&self) -> bool {
         self.0.strong_count() > 0
@@ -208,7 +207,7 @@ impl Task {
             if range.start > range.end {
                 return Err(RangeError);
             }
-            let mid = range.start + (range.end - range.start) / 2;
+            let mid = range.start.midpoint(range.end);
             if mid == range.start {
                 return Ok(None);
             }
@@ -299,7 +298,7 @@ impl Task {
     /// victim's cursor without copying it, and — unlike a plain `clone` — remains
     /// a *separate* worker identity. That separation is what lets the liveness
     /// sweep in `set_threads` still track each worker independently even after
-    /// sharing, fixing audit finding C-03.
+    /// sharing.
     pub(crate) fn share_state(&mut self, other: &Self) {
         *self = Self(Arc::new(TaskInner {
             state: other.0.state.clone(),
@@ -625,8 +624,8 @@ mod tests {
         assert_eq!(task.get(), 0..u64::MAX);
     }
 
-    /// AUDIT FINDING: `safe_add_start` never verifies that the caller-supplied
-    /// `start` matches the task's real cursor. It only rejects a *stale* start
+    /// `safe_add_start` never verifies that the caller-supplied `start` matches
+    /// the task's real cursor. It only rejects a *stale* start
     /// (via `new_start <= range.start`); a start that runs *ahead* of reality
     /// is trusted blindly, jumping the cursor over work nobody executed and
     /// returning a span far wider than `bias`.
@@ -669,7 +668,7 @@ mod tests {
         assert_eq!(task.start(), 8);
     }
 
-    /// AUDIT FINDING (hardened): `take` used to guard with `start == end` while
+    /// `take` used to guard with `start == end` while
     /// `split_two` used `start > end -> Err`, so a corrupted (inverted) state
     /// made `take` hand back a *reversed* Range that iterates as empty -- work
     /// silently dropped, evidence erased by the normalising CAS. Both methods
@@ -775,8 +774,8 @@ mod tests {
 
     /// Pins the post-cleanup invariant: `Task::strong_count` counts *worker
     /// identity* (like `WeakTask::strong_count`), NOT the shared cursor -- and the
-    /// two paired accessors stay equal. This is the exact regression guard for the
-    /// count-API inconsistency that was caught after the C-03 D1 change.
+    /// two paired accessors stay equal. This guards against the count-API
+    /// inconsistency introduced when identity was split from the shared cursor.
     #[test]
     fn task_strong_count_counts_identity_not_cursor() {
         let task = Task::new(0..10);
@@ -804,7 +803,7 @@ mod tests {
     }
 
     /// `WeakTask::is_alive` reports whether the worker *identity* is still held,
-    /// independent of how many twins share the cursor (the C-03 fix).
+    /// independent of how many twins share the cursor.
     #[test]
     fn weak_task_is_alive_tracks_identity_not_cursor() {
         let task = Task::new(0..10);

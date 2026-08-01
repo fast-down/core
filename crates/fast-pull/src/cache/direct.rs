@@ -24,6 +24,14 @@ impl<P: Pusher> CacheDirectPusher<P> {
     ///
     /// Eviction to the inner pusher triggers once the buffered size reaches
     /// `high_watermark`, and stops once it falls back to `low_watermark`.
+    ///
+    /// `low_watermark` must not exceed `high_watermark`. A larger `low_watermark`
+    /// makes `high_watermark` irrelevant, because eviction does nothing until the
+    /// buffered size passes `low_watermark`, which then acts as the sole watermark.
+    ///
+    /// With `high_watermark == low_watermark`, a push that lands the buffered size
+    /// exactly on the watermark evicts nothing; the next push takes it above and
+    /// eviction proceeds as usual.
     pub const fn new(inner: P, high_watermark: usize, low_watermark: usize) -> Self {
         Self {
             inner,
@@ -77,8 +85,10 @@ impl<P: Pusher> CacheDirectPusher<P> {
                 if let Err((e, ret_bytes)) = self.inner.push(&range, chunk) {
                     if !ret_bytes.is_empty() {
                         self.cache_size += ret_bytes.len();
-                        let retry_start = start + (len - ret_bytes.len()) as u64;
-                        self.cache.insert(retry_start, ret_bytes);
+                        let written = len.saturating_sub(ret_bytes.len());
+                        if let Some(old) = self.cache.insert(start + written as u64, ret_bytes) {
+                            self.cache_size -= old.len();
+                        }
                     }
                     return Err(e);
                 }
@@ -169,6 +179,33 @@ mod tests {
         }
     }
 
+    /// Inner pusher that writes only the first 2 bytes of the chunk on its first call,
+    /// then fails returning the unwritten tail as `rem`. Exercises `evict_until`'s
+    /// per-chunk partial-write re-buffering.
+    #[derive(Clone)]
+    struct PartialSinkDirect {
+        pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
+        partial: Arc<AtomicBool>,
+    }
+    impl Pusher for PartialSinkDirect {
+        type Error = std::io::Error;
+        fn push(
+            &mut self,
+            range: &ProgressEntry,
+            bytes: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            self.pushes
+                .lock()
+                .unwrap()
+                .push((range.clone(), bytes.clone()));
+            if !self.partial.swap(true, Ordering::SeqCst) {
+                let rem = bytes.slice(2..);
+                return Err((std::io::Error::other("partial"), rem));
+            }
+            Ok(())
+        }
+    }
+
     fn bb(s: &str) -> Bytes {
         Bytes::copy_from_slice(s.as_bytes())
     }
@@ -183,13 +220,24 @@ mod tests {
     }
 
     #[test]
-    fn equal_watermarks_noop_eviction() {
-        // Lines 38-39: with high == low, reaching the watermark makes evict_until
-        // return immediately because `cache_size <= target_size`.
+    fn equal_watermarks_skip_only_the_exact_hit() {
+        // With high == low, `evict_until` returns early only while `cache_size` is
+        // exactly on the watermark. It is not a permanent no-op: the next push takes
+        // the buffer above the watermark and eviction runs normally.
         let sink = RecordingSink::new();
         let mut p = CacheDirectPusher::new(sink.clone(), 10, 10);
         p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
         assert!(sink.pushes.lock().unwrap().is_empty());
+
+        p.push(&(10..11), bb("B")).unwrap();
+        let ranges: Vec<_> = sink
+            .pushes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(r, _)| r.clone())
+            .collect();
+        assert_eq!(ranges, vec![0..10, 10..11]);
     }
 
     #[test]
@@ -286,5 +334,30 @@ mod tests {
         let mut p = CacheDirectPusher::new(sink.clone(), 100, 0);
         p.set_listener(Box::new(|_| {}));
         assert!(sink.listener_set.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn direct_evict_partial_write_rebuffers_chunk_tail_at_correct_offset() {
+        // A run of three 10-byte chunks [0..30) is evicted chunk-by-chunk; a partial
+        // inner write on the first chunk (first 2 bytes persisted, tail returned) must
+        // re-buffer that chunk's 8-byte tail at offset 2 and retry it on flush.
+        let sink = PartialSinkDirect {
+            pushes: Arc::new(Mutex::new(Vec::new())),
+            partial: Arc::new(AtomicBool::new(false)),
+        };
+        let mut p = CacheDirectPusher::new(sink.clone(), 30, 0);
+        p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
+        p.push(&(10..20), bb(&"B".repeat(10))).unwrap();
+        let res = p.push(&(20..30), bb(&"C".repeat(10)));
+        assert!(res.is_err());
+        p.flush().unwrap();
+        let pushes = sink.pushes.lock().unwrap();
+        // First chunk handed to inner, then its tail retried at [2..10), then the rest.
+        assert_eq!(pushes.len(), 4);
+        assert_eq!(pushes[0].0, 0..10);
+        assert_eq!(pushes[1].0, 2..10);
+        assert_eq!(&pushes[1].1[..], b"AAAAAAAA");
+        assert_eq!(pushes[2].0, 10..20);
+        assert_eq!(pushes[3].0, 20..30);
     }
 }

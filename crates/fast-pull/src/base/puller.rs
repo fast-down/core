@@ -44,8 +44,9 @@ pub trait PullerError: std::error::Error + Send + Sync + Unpin + 'static {
     /// Whether an error is fatal and must **not** be retried.
     ///
     /// The default (`false`) means the error is recoverable and the engine will
-    /// retry after the configured backoff. Return `true` to stop retrying and
-    /// abort the affected worker.
+    /// retry after the configured backoff. Implementors **must** override this to
+    /// return `true` for fatal errors: forgetting to do so lets the engine retry
+    /// indefinitely until its backoff gives up.
     fn is_irrecoverable(&self) -> bool {
         false
     }
@@ -80,5 +81,51 @@ mod tests {
         // the `Display` impl for `DefaultErr` (lines 70-72).
         assert!(!DefaultErr.is_irrecoverable());
         assert_eq!(format!("{DefaultErr}"), "default error");
+    }
+
+    /// A `PullerError` that overrides `is_irrecoverable` to report a fatal error.
+    #[derive(Debug)]
+    struct FatalErr;
+    impl std::fmt::Display for FatalErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("fatal error")
+        }
+    }
+    impl std::error::Error for FatalErr {}
+    impl PullerError for FatalErr {
+        fn is_irrecoverable(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn override_is_irrecoverable_is_true() {
+        // An error that overrides the method reports `true`, which is how the
+        // engine learns to stop retrying. Pinned alongside the default `false`.
+        assert!(FatalErr.is_irrecoverable());
+        assert!(!DefaultErr.is_irrecoverable());
+    }
+
+    #[test]
+    fn irrecoverable_contract_allows_dynamic_decision() {
+        // The answer may depend on the error's own state; it is not required to
+        // be a compile-time constant per type.
+        #[derive(Debug)]
+        struct StatefulErr {
+            fatal: bool,
+        }
+        impl std::fmt::Display for StatefulErr {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("stateful")
+            }
+        }
+        impl std::error::Error for StatefulErr {}
+        impl PullerError for StatefulErr {
+            fn is_irrecoverable(&self) -> bool {
+                self.fatal
+            }
+        }
+        assert!(!StatefulErr { fatal: false }.is_irrecoverable());
+        assert!(StatefulErr { fatal: true }.is_irrecoverable());
     }
 }

@@ -224,14 +224,21 @@ fn temp_dir(name: &str) -> PathBuf {
 /// Build a deterministic config that targets `<dir>/out.bin` and downloads with
 /// a single thread and small chunks so the cancel lands predictably mid-flight.
 fn make_config(save_dir: &Path) -> PartialConfig {
+    make_config_with(save_dir, 1, 1024 * 1024)
+}
+
+/// Like [`make_config`] but with an explicit worker count and chunk size, so a
+/// test can drive the genuinely concurrent path (several `download_multi`
+/// workers racing on different offsets) rather than the single-worker one.
+fn make_config_with(save_dir: &Path, threads: usize, min_chunk_size: u64) -> PartialConfig {
     PartialConfig {
         save_dir: Some(save_dir.to_path_buf()),
         filename: Some("out.bin".to_string()),
         parse_filename: Some(false),
         overwrite: Some(true),
         write_method: Some(WriteMethod::Mmap),
-        min_chunk_size: Some(1024 * 1024),
-        threads: Some(1),
+        min_chunk_size: Some(min_chunk_size),
+        threads: Some(threads),
         ..Default::default()
     }
 }
@@ -245,29 +252,60 @@ async fn drain(rx: Rx) -> Vec<Event> {
     events
 }
 
-/// Start a normal `download()` and cancel it a fixed time after `Event::Start`,
-/// leaving a real partial `.part`/`.fd` on disk. Returns the collected events.
-/// `DownloadHelper` 的 `partial_download_via_cancel` 版本——开始下载后收到 `Start` 立即取消。
+/// Bytes that must actually reach the sink before a partial download is
+/// cancelled. Cancelling on `Event::Start` instead would land before any write,
+/// leaving `downloaded_chunk` absent from the `.fd` — the subsequent `resume()`
+/// would then silently re-download everything and exercise none of the resume
+/// path. Two throttle chunks is a small fraction of `FILE_SIZE`, so the download
+/// is still far from finishing when the cancel fires.
+const CANCEL_AFTER_BYTES: u64 = (THROTTLE_CHUNK * 2) as u64;
+
+/// Start a normal `download()` and cancel it once at least [`CANCEL_AFTER_BYTES`]
+/// have been written, leaving a real partial `.part`/`.fd` on disk with non-empty
+/// resume progress. Returns the collected events.
 async fn partial_download_via_cancel(
     url: &str,
     save_dir: &Path,
     cancel: CancellationToken,
 ) -> Vec<Event> {
-    let cfg = make_config(save_dir);
+    partial_download_via_cancel_with(url, make_config(save_dir), cancel, CANCEL_AFTER_BYTES).await
+}
+
+/// [`partial_download_via_cancel`] with an explicit config and cancel threshold,
+/// so a test can interrupt a concurrent run after enough workers have written to
+/// leave fragmented (multi-range) progress behind.
+async fn partial_download_via_cancel_with(
+    url: &str,
+    cfg: PartialConfig,
+    cancel: CancellationToken,
+    cancel_after: u64,
+) -> Vec<Event> {
     let (tx, rx) = create_channel();
     let _handle =
         DownloadHandle::download(Url::parse(url).expect("valid url"), cfg, tx, cancel.clone());
 
     let mut events = Vec::new();
     let mut started = false;
+    let mut written = 0u64;
+    let mut cancelled = false;
     while let Ok(e) = rx.recv().await {
-        if matches!(e, Event::Start { .. }) && !started {
+        if matches!(e, Event::Start { .. }) {
             started = true;
-            cancel.cancel();
+        }
+        if let Event::PushProgress(ref p) = e {
+            written += p.end - p.start;
+            if !cancelled && written >= cancel_after {
+                cancelled = true;
+                cancel.cancel();
+            }
         }
         events.push(e);
     }
     assert!(started, "expected Event::Start during the partial download");
+    assert!(
+        cancelled,
+        "expected at least {cancel_after} bytes written before cancelling (got {written})"
+    );
     assert!(
         !events.iter().any(|e| matches!(e, Event::Renamed(_))),
         "a cancelled download must not rename the .part file"
@@ -540,6 +578,15 @@ async fn test_cancel_keeps_part_and_fd_then_resume() {
         "cancel must NOT create the final file"
     );
 
+    // The cancelled run must have persisted real progress, otherwise the
+    // `resume()` below would just re-download the whole file and assert nothing
+    // about the resume path.
+    let fd_text = std::fs::read_to_string(&fd).expect("read .fd");
+    assert!(
+        fd_text.contains("downloaded_chunk"),
+        "cancelled .fd must carry resume progress, got:\n{fd_text}"
+    );
+
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let resume_cancel = create_cancellation_token();
@@ -556,6 +603,18 @@ async fn test_cancel_keeps_part_and_fd_then_resume() {
         events.iter().any(|e| matches!(e, Event::Renamed(_))),
         "resume() must complete with Renamed after a cancel"
     );
+    // The resume must continue from the persisted progress rather than restart.
+    let resumed_from = events.iter().find_map(|e| match e {
+        Event::Resumed { progress, .. } => Some(progress.clone()),
+        _ => None,
+    });
+    let resumed_from = resumed_from.expect("resume() must emit Event::Resumed");
+    let resumed_bytes: u64 = resumed_from.iter().map(|r| r.end - r.start).sum();
+    assert!(
+        resumed_bytes >= CANCEL_AFTER_BYTES,
+        "resume must inherit the cancelled run's progress, got {resumed_bytes} bytes \
+         from {resumed_from:?}"
+    );
     assert!(
         !fd.exists(),
         ".fd must be removed after the resume completes"
@@ -567,6 +626,72 @@ async fn test_cancel_keeps_part_and_fd_then_resume() {
         got,
         original_bytes(),
         "final content must match after resume"
+    );
+}
+
+/// Several concurrent workers write ranges out of order, so an interrupted run
+/// persists a *fragmented* `downloaded_chunk` holding more than one range — the
+/// single-worker path can only ever leave one leading range, so this is the only
+/// test that exercises multi-range state on a real socket and a real file.
+/// Resuming from it must request exactly the gaps and reassemble the file byte
+/// for byte.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_resume_with_fragmented_progress() {
+    let dir = temp_dir("concurrent_fragmented");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    // 8 workers over 64 KiB chunks each start at a different offset, so the
+    // persisted progress is non-contiguous. Cancelling only after six chunks'
+    // worth of bytes have landed guarantees several distinct ranges.
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel_with(
+        &url,
+        make_config_with(&dir, 8, 64 * 1024),
+        cancel,
+        (THROTTLE_CHUNK * 6) as u64,
+    )
+    .await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(
+        part.exists() && fd.exists(),
+        "cancel must preserve both .part and .fd"
+    );
+
+    let fd_text = std::fs::read_to_string(&fd).expect("read .fd");
+    let chunk_line = fd_text
+        .lines()
+        .find(|l| l.trim_start().starts_with("downloaded_chunk"))
+        .unwrap_or_else(|| panic!("concurrent .fd must carry progress, got:\n{fd_text}"));
+    assert!(
+        chunk_line.contains(','),
+        "a cancelled concurrent run must persist multiple ranges, got: {chunk_line}"
+    );
+
+    let (tx, rx) = create_channel();
+    let resume_cancel = create_cancellation_token();
+    let _handle = DownloadHandle::resume(
+        part.clone(),
+        Url::parse(&url).expect("valid url"),
+        make_config_with(&dir, 8, 64 * 1024),
+        tx,
+        resume_cancel,
+    );
+    let events = drain(rx).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "resume() must complete with Renamed"
+    );
+    let got = tokio::fs::read(&final_path)
+        .await
+        .expect("final file should exist after resume");
+    assert_eq!(
+        got,
+        original_bytes(),
+        "resuming fragmented progress must reassemble the file exactly"
     );
 }
 
@@ -960,34 +1085,6 @@ fn make_config_no_overwrite(save_dir: &Path) -> PartialConfig {
     }
 }
 
-/// Generic variant of [`partial_download_via_cancel`] that accepts an explicit
-/// config (e.g. `overwrite = false`) so the non-overwrite resume branch can be
-/// exercised.
-async fn partial_download_via_cancel_with(
-    url: &str,
-    cancel: CancellationToken,
-    cfg: PartialConfig,
-) -> Vec<Event> {
-    let (tx, rx) = create_channel();
-    let _handle =
-        DownloadHandle::download(Url::parse(url).expect("valid url"), cfg, tx, cancel.clone());
-    let mut events = Vec::new();
-    let mut started = false;
-    while let Ok(e) = rx.recv().await {
-        if matches!(e, Event::Start { .. }) && !started {
-            started = true;
-            cancel.cancel();
-        }
-        events.push(e);
-    }
-    assert!(started, "expected Event::Start during the partial download");
-    assert!(
-        !events.iter().any(|e| matches!(e, Event::Renamed(_))),
-        "a cancelled download must not rename the .part file"
-    );
-    events
-}
-
 /// `DownloadHandle::join()` (mod.rs lines 54-56) completes cleanly for a
 /// successful download.
 #[tokio::test]
@@ -1064,7 +1161,7 @@ async fn test_download_resume_without_overwrite() {
 
     let cancel = create_cancellation_token();
     let cfg1 = make_config_no_overwrite(&dir);
-    partial_download_via_cancel_with(&url, cancel, cfg1).await;
+    partial_download_via_cancel_with(&url, cfg1, cancel, CANCEL_AFTER_BYTES).await;
 
     let final_path = dir.join("out.bin");
     let part = final_path.with_added_extension("part");

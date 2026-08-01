@@ -8,7 +8,28 @@ use core::time::Duration;
 use crossfire::{mpmc, spsc};
 use futures::TryStreamExt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use tokio_util::sync::CancellationToken;
+
+/// Spawn a task that awaits the push and pull drivers and surfaces either
+/// task's *panic* through `join()`.
+///
+/// `abort()` exits the push driver through the shared cancellation token
+/// (returning `Ok(())`) rather than by cancelling its task, so any `JoinError`
+/// from `push` can only be a genuine panic and is escalated. The pull task's
+/// `JoinError` may instead be benign cancellation, so it is only asserted.
+fn spawn_join_watch(
+    push_handle: tokio::task::JoinHandle<()>,
+    pull_handle: tokio::task::JoinHandle<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(e) = push_handle.await {
+            panic!("push task panicked: {e}");
+        }
+        if let Err(e) = pull_handle.await {
+            assert!(e.is_cancelled(), "pull task panicked: {e}");
+        }
+    })
+}
 
 /// Options for a single-threaded download.
 #[derive(Debug, Clone, Copy)]
@@ -21,6 +42,12 @@ pub struct DownloadOptions {
 ///
 /// The puller fetches the entire file sequentially, chunk by chunk.
 /// Supports retries and progress events via [`DownloadResult`].
+/// # Panics
+///
+/// The spawned `join_handle` task panics if either the pull or the push task
+/// panics, so that [`DownloadResult::join`] surfaces it as a `JoinError`
+/// instead of silently returning `Ok(())` for a truncated download. Normal
+/// cancellation (via `abort()`) is ignored.
 pub fn download_single<R: Puller, W: Pusher>(
     mut puller: R,
     mut pusher: W,
@@ -35,32 +62,35 @@ pub fn download_single<R: Puller, W: Pusher>(
     let (tx_push, rx_push) = spsc::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);
     let tx_clone = tx.clone();
     let rx_push = rx_push.into_blocking();
-    let abort_flag = Arc::new(AtomicBool::new(false));
-    let abort_flag_clone = abort_flag.clone();
+    let abort_token = CancellationToken::new();
+    let abort_token_clone = abort_token.clone();
     let push_worker = Arc::new(std::sync::OnceLock::new());
     let push_worker_clone = push_worker.clone();
     let push_handle = tokio::task::spawn_blocking(move || {
         // Publish our thread handle first so `abort()` can `unpark()` us out
         // of a `park_timeout` retry backoff.
         let _ = push_worker_clone.set(std::thread::current());
-        'outer: while let Ok((spin, mut data)) = rx_push.recv() {
+        while let Ok((mut spin, mut data)) = rx_push.recv() {
             loop {
-                if abort_flag_clone.load(Ordering::Relaxed) {
-                    break 'outer;
+                if abort_token_clone.is_cancelled() {
+                    return;
                 }
                 let _ = tx_clone.send(Event::Pushing(ID, spin.clone()));
+                let len_before_push = data.len();
                 match pusher.push(&spin, data) {
                     Ok(()) => break,
                     Err((err, bytes)) => {
-                        data = bytes;
                         let _ = tx_clone.send(Event::PushError(ID, spin.clone(), err));
+                        let written = len_before_push.saturating_sub(bytes.len());
+                        data = bytes;
+                        spin.start += written as u64;
                     }
                 }
                 std::thread::park_timeout(options.retry_gap);
             }
         }
         loop {
-            if abort_flag_clone.load(Ordering::Relaxed) {
+            if abort_token_clone.is_cancelled() {
                 break;
             }
             let _ = tx_clone.send(Event::Flushing);
@@ -73,7 +103,7 @@ pub fn download_single<R: Puller, W: Pusher>(
             std::thread::park_timeout(options.retry_gap);
         }
     });
-    let handle = tokio::spawn(async move {
+    let pull_handle = tokio::spawn(async move {
         'redownload: loop {
             let _ = tx.send(Event::Pulling(ID));
             let mut downloaded: u64 = 0;
@@ -109,12 +139,14 @@ pub fn download_single<R: Puller, W: Pusher>(
         }
         let _ = tx.send(Event::Finished(ID));
     });
+    let pull_abort = pull_handle.abort_handle();
+    let join_handle = spawn_join_watch(push_handle, pull_handle);
     DownloadResult::new(
         event_chain,
-        push_handle,
-        Some(&[handle.abort_handle()]),
+        join_handle,
+        Some(&[pull_abort]),
         None,
-        abort_flag,
+        abort_token,
         push_worker,
     )
 }
@@ -722,5 +754,128 @@ mod tests {
             delay: Duration::ZERO,
         };
         assert!(p.pull(Some(&(0..5))).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_sequential_download_empty_file() {
+        // 0-byte source: the pull stream yields `Ok(None)` immediately, the
+        // `downloaded` counter stays 0, and the push worker must still flush and
+        // exit without hanging or writing anything.
+        let mock_data: Vec<u8> = Vec::new();
+        let puller = MockPuller::new(&mock_data);
+        let pusher = MemPusher::with_capacity(0);
+        let receive = pusher.receive.clone();
+        let result = download_single(
+            puller,
+            pusher,
+            DownloadOptions {
+                retry_gap: Duration::from_secs(1),
+                push_queue_cap: 1024,
+            },
+        );
+        // Drain events so `event_chain` does not pin the task open.
+        while result.event_chain().recv().await.is_ok() {}
+        let joined = timeout(Duration::from_secs(10), result.join())
+            .await
+            .expect("join() hung on empty file");
+        assert!(joined.is_ok());
+        assert_eq!(receive.lock().len(), 0);
+    }
+
+    /// Like `PullErrOncePuller` but the first `pull` fails with `None` as the retry
+    /// gap, exercising the `retry_gap.unwrap_or(options.retry_gap)` fallback.
+    #[derive(Debug, Clone)]
+    struct PullErrNoGapPuller {
+        data: Arc<[u8]>,
+        failed: Arc<AtomicBool>,
+    }
+    impl crate::Puller for PullErrNoGapPuller {
+        type Error = RecoverableErr;
+        fn pull(
+            &mut self,
+            range: Option<&crate::ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                return std::future::ready(Err((RecoverableErr, None)));
+            }
+            let data = match range {
+                Some(r) => &self.data[r.start as usize..r.end as usize],
+                None => &self.data,
+            };
+            let items: Vec<Result<Bytes, (RecoverableErr, Option<Duration>)>> = data
+                .chunks(2)
+                .map(|c| Ok(Bytes::copy_from_slice(c)))
+                .collect();
+            std::future::ready(Ok(stream::iter(items)))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_single_pull_error_without_retry_gap_uses_options_default() {
+        // Lines 83-85: a `pull` error carrying `None` as the retry gap must fall
+        // back to `options.retry_gap` rather than panicking or stalling.
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = PullErrNoGapPuller {
+            data: Arc::from(mock_data.as_slice()),
+            failed: Arc::new(AtomicBool::new(false)),
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        let result = download_single(
+            puller,
+            pusher,
+            DownloadOptions {
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+            },
+        );
+        while result.event_chain().recv().await.is_ok() {}
+        result.join().await.unwrap();
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    // -------------------------------------------------------------------------
+    // Regression: a panicking *push* task must surface through `join()` exactly
+    // like a panicking pull task. Before the fix, `push_handle.await` was
+    // discarded with `let _ =`, so a panic in the blocking push driver was
+    // swallowed — leaving the pull side stranded on backpressure (and `join()`
+    // either hanging or, after an `abort()`, returning `Ok(())` for a truncated
+    // download). The fix escalates any `JoinError` from the push handle.
+    // -------------------------------------------------------------------------
+
+    /// A sink whose `push` unconditionally panics. Its error type is never
+    /// actually produced, but must satisfy the `Pusher` bound.
+    #[derive(Debug)]
+    struct PanickingSink;
+    impl crate::Pusher for PanickingSink {
+        type Error = std::convert::Infallible;
+        fn push(
+            &mut self,
+            _range: &crate::ProgressEntry,
+            _bytes: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            panic!("push panicked on purpose");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_push_panic_surfaces_in_join() {
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = MockPuller::new(&mock_data);
+        let result = download_single(
+            puller,
+            PanickingSink,
+            DownloadOptions {
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+            },
+        );
+        // `join()` must return `Err`, never `Ok(())` and never hang.
+        let joined = timeout(Duration::from_secs(10), result.join())
+            .await
+            .expect("join() hung on push panic");
+        assert!(joined.is_err(), "push panic must surface in join()");
     }
 }

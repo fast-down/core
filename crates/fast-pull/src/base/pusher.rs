@@ -36,8 +36,8 @@ pub trait Pusher: Send + 'static {
     /// pushed to its destination.
     ///
     /// The default implementation is a no-op. Leaf sinks override this to store
-    /// the callback; every wrapper overrides this to forward it to its inner
-    /// pusher. Omitting the forwarding in any wrapper silently drops progress.
+    /// the callback; every wrapper **must** override this to forward it to its
+    /// inner pusher, otherwise progress events are silently dropped.
     #[allow(clippy::needless_pass_by_value)]
     fn set_listener(&mut self, _cb: ProgressListener) {}
 }
@@ -143,6 +143,7 @@ mod tests {
         fail_push: Arc<AtomicBool>,
         fail_flush: Arc<AtomicBool>,
         listener_set: Arc<AtomicBool>,
+        listener: Arc<Mutex<Option<ProgressListener>>>,
     }
     impl RecordingPusher {
         fn new() -> Self {
@@ -151,13 +152,15 @@ mod tests {
                 fail_push: Arc::new(AtomicBool::new(false)),
                 fail_flush: Arc::new(AtomicBool::new(false)),
                 listener_set: Arc::new(AtomicBool::new(false)),
+                listener: Arc::new(Mutex::new(None)),
             }
         }
     }
     impl Pusher for RecordingPusher {
         type Error = std::io::Error;
-        fn set_listener(&mut self, _: ProgressListener) {
+        fn set_listener(&mut self, cb: ProgressListener) {
             self.listener_set.store(true, Ordering::SeqCst);
+            *self.listener.lock().unwrap() = Some(cb);
         }
         fn push(
             &mut self,
@@ -166,6 +169,9 @@ mod tests {
         ) -> Result<(), (Self::Error, Bytes)> {
             if self.fail_push.swap(false, Ordering::SeqCst) {
                 return Err((std::io::Error::other("push"), bytes));
+            }
+            if let Some(cb) = self.listener.lock().unwrap().as_mut() {
+                cb(range.clone());
             }
             self.pushes.lock().unwrap().push((range.clone(), bytes));
             Ok(())
@@ -212,5 +218,43 @@ mod tests {
         inner.fail_flush.store(true, Ordering::SeqCst);
         let mut bp = BoxPusher::new(inner);
         assert!(bp.flush().is_err());
+    }
+
+    #[test]
+    fn box_pusher_listener_fires_on_successful_push() {
+        // End-to-end progress path: the listener is forwarded down to the leaf
+        // sink, and firing it is tied to a successful write, with the correct
+        // range reported.
+        let inner = RecordingPusher::new();
+        let seen = Arc::new(Mutex::new(Vec::<ProgressEntry>::new()));
+        let seen2 = seen.clone();
+        let mut bp = BoxPusher::new(inner);
+        bp.set_listener(Box::new(move |r| seen2.lock().unwrap().push(r)));
+        bp.push(&(0..3), Bytes::copy_from_slice(b"abc")).unwrap();
+        let s = seen.lock().unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0], 0..3);
+    }
+
+    #[test]
+    fn box_pusher_push_error_preserves_unwritten_bytes() {
+        // On failure the unwritten bytes must survive `PusherAdapter`'s `map_err`
+        // untouched; swallowing them would leave the engine unable to retry that
+        // chunk, silently losing data.
+        let inner = RecordingPusher::new();
+        inner.fail_push.store(true, Ordering::SeqCst);
+        let mut bp = BoxPusher::new(inner);
+        let payload = Bytes::copy_from_slice(b"hello");
+        let res = bp.push(&(0..5), payload.clone());
+        let (_, unwritten) = res.unwrap_err();
+        assert_eq!(unwritten, payload);
+    }
+
+    #[test]
+    fn box_pusher_default_flush_is_ok() {
+        // `DummyPusher` does not override `flush`, so the default no-op runs and
+        // must still succeed after being forwarded through `BoxPusher`.
+        let mut bp = BoxPusher::new(DummyPusher);
+        assert!(bp.flush().is_ok());
     }
 }

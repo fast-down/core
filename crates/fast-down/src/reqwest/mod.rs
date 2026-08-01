@@ -450,35 +450,7 @@ mod tests {
         let mock_data = build_mock_data(300 * 1024 * 1024);
         let mut server = mockito::Server::new_async().await;
         let client = Client::builder().no_proxy().build().unwrap();
-        let mock_body_clone = mock_data.clone();
-        let _mock = server
-            .mock("GET", "/concurrent")
-            .with_status(206)
-            .with_header("Accept-Ranges", "bytes")
-            .with_body_from_request(move |request| {
-                if !request.has_header("Range") {
-                    return mock_body_clone.clone();
-                }
-                let range = request.header("Range")[0];
-                println!("range: {range:?}");
-                range
-                    .to_str()
-                    .unwrap()
-                    .rsplit('=')
-                    .next()
-                    .unwrap()
-                    .split(',')
-                    .map(|p| p.trim().splitn(2, '-'))
-                    .map(|mut p| {
-                        let start = p.next().unwrap().parse::<usize>().unwrap();
-                        let end = p.next().unwrap().parse::<usize>().unwrap();
-                        start..=end
-                    })
-                    .flat_map(|p| mock_body_clone[p].to_vec())
-                    .collect()
-            })
-            .create_async()
-            .await;
+        let _mock = mount_range_endpoint(&mut server, "/concurrent", mock_data.clone()).await;
         let puller = HttpPuller::new(
             Arc::new(format!("{}/concurrent", server.url()).parse().unwrap()),
             client,
@@ -526,6 +498,199 @@ mod tests {
 
         result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    /// Mount an endpoint that serves `body` and honours `Range` requests, as a
+    /// server advertising `Accept-Ranges: bytes` would.
+    async fn mount_range_endpoint(
+        server: &mut mockito::ServerGuard,
+        path: &str,
+        body: Vec<u8>,
+    ) -> mockito::Mock {
+        server
+            .mock("GET", path)
+            .with_status(206)
+            .with_header("Accept-Ranges", "bytes")
+            .with_body_from_request(move |request| {
+                if !request.has_header("Range") {
+                    return body.clone();
+                }
+                request.header("Range")[0]
+                    .to_str()
+                    .unwrap()
+                    .rsplit('=')
+                    .next()
+                    .unwrap()
+                    .split(',')
+                    .map(|p| p.trim().splitn(2, '-'))
+                    .map(|mut p| {
+                        let start = p.next().unwrap().parse::<usize>().unwrap();
+                        let end = p.next().unwrap().parse::<usize>().unwrap();
+                        start..=end
+                    })
+                    .flat_map(|p| body[p].to_vec())
+                    .collect()
+            })
+            .create_async()
+            .await
+    }
+
+    /// Create an empty temp file of `size` bytes and map it for writing.
+    ///
+    /// The returned pusher owns the mapping, so the `File` handle is dropped
+    /// here: both `mmap` and Windows file mappings keep the underlying object
+    /// alive independently of the descriptor used to create them.
+    #[cfg(feature = "file")]
+    async fn temp_mmap_target(
+        tag: &str,
+        size: u64,
+    ) -> (fast_pull::file::MmapFilePusher, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("fast-down-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.bin");
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .await
+            .unwrap();
+        let pusher = fast_pull::file::MmapFilePusher::new(&file, size, false)
+            .await
+            .unwrap();
+        (pusher, path)
+    }
+
+    /// Deterministic xorshift64 so a failing resize sequence can be replayed.
+    #[cfg(feature = "file")]
+    fn next_rand(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// Repeatedly resize the worker pool while a real HTTP download streams
+    /// into a real memory-mapped file.
+    ///
+    /// The in-memory unit tests resize a pool fed by a mock puller and sink, so
+    /// they cannot observe how a resize interacts with live sockets, chunked
+    /// transfer and page-cache writes. This drives all three at once and checks
+    /// the bytes that actually reached the disk.
+    #[cfg(feature = "file")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_download_thread_churn_preserves_all_bytes() {
+        use std::collections::BTreeSet;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let mock_data = build_mock_data(16 * 1024 * 1024);
+        let mut server = mockito::Server::new_async().await;
+        let client = Client::builder().no_proxy().build().unwrap();
+        let _mock = mount_range_endpoint(&mut server, "/churn", mock_data.clone()).await;
+
+        let size = mock_data.len() as u64;
+        let (pusher, path) = temp_mmap_target("churn", size).await;
+
+        let puller = HttpPuller::new(
+            Arc::new(format!("{}/churn", server.url()).parse().unwrap()),
+            client,
+            None,
+            FileId::default(),
+        );
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = vec![0..size];
+        // Start with a single worker so growth has somewhere to go, and keep
+        // `min_chunk_size` at 1 so a resize can split whatever remains.
+        let result = download_multi(
+            puller,
+            pusher,
+            multi::DownloadOptions {
+                concurrent: 1,
+                retry_gap: Duration::from_secs(1),
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(30),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+
+        let written = Arc::new(AtomicU64::new(0));
+        let churner = result.clone();
+        let probe = written.clone();
+        let churn = tokio::spawn(async move {
+            let mut state = 0x2545_F491_4F6C_DD1D_u64;
+            let mut seen = BTreeSet::new();
+            let mut inflight = 0usize;
+            // Track the transfer instead of resizing a fixed number of times: a
+            // fixed count would drain long before the download does and only
+            // exercise the idle pool.
+            for _ in 0..3000 {
+                let done = probe.load(Ordering::Relaxed);
+                if done >= size {
+                    break;
+                }
+                if done > 0 {
+                    inflight += 1;
+                }
+                let threads = usize::try_from(next_rand(&mut state) % 8 + 1).unwrap();
+                seen.insert(threads);
+                churner.set_threads(threads, 1);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            // Leave a healthy pool behind so the remaining ranges drain.
+            churner.set_threads(8, 1);
+            (seen, inflight)
+        });
+
+        let mut pulling_total = 0usize;
+        let mut push_progress: Vec<ProgressEntry> = Vec::new();
+        while let Ok(e) = result.event_chain().recv().await {
+            match e {
+                Event::Pulling(_) => pulling_total += 1,
+                Event::PushProgress(p) => {
+                    written.fetch_add(p.end - p.start, Ordering::Relaxed);
+                    push_progress.merge_progress(p);
+                }
+                _ => {}
+            }
+        }
+        let (seen, inflight) = churn.await.unwrap();
+        result.join().await.unwrap();
+
+        // Without these the test silently degrades into a plain download the
+        // moment resizing stops taking effect.
+        assert!(
+            seen.len() > 2,
+            "churn never varied the pool size, so nothing was exercised: {seen:?}"
+        );
+        assert!(
+            inflight > 0,
+            "every resize landed outside the transfer, so churn was a no-op"
+        );
+        // Every effective resize reclaims and re-hands-out the remaining range,
+        // so a live pool emits far more `Pulling` events than the session had
+        // starting chunks. Equality with the chunk count means resizing was
+        // inert and one worker pulled everything.
+        assert!(
+            pulling_total >= 8,
+            "ranges were never redistributed across workers (pulling={pulling_total}, chunks={})",
+            download_chunks.len()
+        );
+        assert_eq!(
+            push_progress, download_chunks,
+            "repeated resizing lost or duplicated pushed ranges"
+        );
+
+        // The mapping is unmapped once the push driver drops the pusher, so the
+        // file now holds everything the session claimed to have written.
+        let on_disk = tokio::fs::read(&path).await.unwrap();
+        assert!(
+            on_disk == mock_data,
+            "repeated resizing corrupted the bytes written to disk"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[tokio::test]

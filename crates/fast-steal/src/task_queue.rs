@@ -36,7 +36,7 @@ impl<H: Handle> TaskQueue<H> {
     /// Creates a queue from an iterator of `start..end` ranges, each wrapped in its
     /// own [`Task`].
     pub fn new(tasks: impl Iterator<Item = Range<u64>>) -> Self {
-        let waiting: VecDeque<_> = tasks.map(Task::from).collect();
+        let waiting: VecDeque<_> = tasks.map(Task::new).collect();
         Self {
             inner: Arc::new(Mutex::new(TaskQueueInner {
                 running: VecDeque::with_capacity(waiting.len()),
@@ -56,7 +56,7 @@ impl<H: Handle> TaskQueue<H> {
     #[must_use]
     pub fn add(&self, task: Task) -> bool {
         let mut guard = self.inner.lock();
-        let live = guard.running.iter().any(|w| w.0.strong_count() > 0);
+        let live = guard.running.iter().any(|w| w.0.is_alive());
         guard.waiting.push_back(task);
         live
     }
@@ -97,8 +97,7 @@ impl<H: Handle> TaskQueue<H> {
             // `Err` and is skipped, never handed to a worker. This keeps steal's
             // policy toward corrupted tasks uniform with the speculative branch
             // below, which likewise discards `split_two`'s `Err`. Whether steal
-            // should instead surface such corruption is deliberately left open
-            // until the queue-level audit revisits it.
+            // should instead surface such corruption is deliberately left open.
             if let Ok(Some(range)) = new_task.take() {
                 *task = Task::new(range);
                 found = true;
@@ -210,7 +209,7 @@ impl<H: Handle> TaskQueue<H> {
     /// `waiting`: reclaiming would race with the caller's own still-live `task`
     /// over the same range and cause duplicate execution. Callers must therefore
     /// only invoke this after the shared range has finished (as the sole
-    /// production caller `fast-pull` does). See audit finding C-05.
+    /// production caller `fast-pull` does).
     pub fn cancel_task(&self, task: &Task, id: &H::Id) {
         let mut guard = self.inner.lock();
         // Abort every twin whose task matches but is not the caller's own, then
@@ -565,7 +564,7 @@ mod tests {
         assert_eq!(seen.len(), 1000, "reclaimed work was lost");
     }
 
-    /// Q-02 regression: the README work-stealing example is `no_run`, so its
+    /// The README work-stealing example is `no_run`, so its
     /// doctest only compiles and never actually executes a steal. This mirrors
     /// that example (one big task + crumb workers, a genuine `is_self`) and
     /// asserts that steals *did* happen -- not merely that the result is correct,
@@ -594,7 +593,7 @@ mod tests {
             assert_eq!(res, i);
         }
         assert_eq!(seen.len(), 1000, "not all numbers were computed");
-        // The discriminating Q-02 check: steals must have actually occurred.
+        // The discriminating check: steals must have actually occurred.
         assert!(
             *steals.lock().unwrap() > 0,
             "no steal ever happened -- the README example would be silently broken"
@@ -894,7 +893,7 @@ mod tests {
         let _: TaskQueue<SyncHandle> = TaskQueue::new(core::iter::once(bad));
     }
 
-    /// AUDIT FINDING (C-01): `add` only appends to `waiting`. It wakes nobody and
+    /// `add` used to only append to `waiting`. It woke nobody and
     /// returns `()`, so once every worker has exited (each one's `steal` returned
     /// `false` and it left its loop) an added task is stranded forever with no
     /// signal to the caller.
@@ -922,7 +921,7 @@ mod tests {
         drop(guard);
     }
 
-    /// The `true` branch of C-01's `add`: when at least one live worker exists,
+    /// The `true` branch of `add`: when at least one live worker exists,
     /// `add` reports `true` (a worker can pick the new task up via `steal`).
     #[test]
     fn add_returns_true_when_a_live_worker_exists() {
@@ -1066,7 +1065,7 @@ mod tests {
         assert_eq!(t1.get(), 1..2, "the refused worker keeps its own range");
     }
 
-    /// AUDIT FINDING (C-02, fixed): `min_chunk_size * 2` used to be an unchecked
+    /// `min_chunk_size * 2` used to be an unchecked
     /// multiplication on a caller-supplied `u64` — `fast-pull` forwards a
     /// user-configurable `options.min_chunk_size` straight into it, so a large
     /// value panicked in debug and silently wrapped (disabling split) in release.
@@ -1089,7 +1088,7 @@ mod tests {
     }
 
     /// The identical `min_chunk_size * 2` in `set_threads`'s split-to-grow loop is
-    /// now `saturating_mul` too (C-02, fixed): an overflowing value no longer
+    /// now `saturating_mul` too: an overflowing value no longer
     /// panics, the split-to-grow branch is just skipped.
     #[test]
     fn set_threads_skips_split_on_a_huge_min_chunk_size() {
@@ -1114,7 +1113,7 @@ mod tests {
         assert_eq!(q.inner.lock().running.len(), 1, "the dead slot is swept");
     }
 
-    /// AUDIT FINDING (C-03, fixed): the liveness sweep used to key off the *cursor*
+    /// The liveness sweep used to key off the *cursor*
     /// refcount, which speculative sharing defeats — a dead worker's slot stayed
     /// propped up by its surviving twin and `set_threads` never refilled the pool.
     /// `WeakTask` now points at the worker's own identity (`TaskInner`), so the
@@ -1149,7 +1148,7 @@ mod tests {
         assert_eq!(
             q.inner.lock().running.len(),
             1,
-            "dead worker reclaimed despite its speculative twin (C-03 fixed)"
+            "dead worker reclaimed despite its speculative twin"
         );
     }
 
@@ -1185,7 +1184,7 @@ mod tests {
         // Worker 1 finished the shared range and cancels its twins.
         q.cancel_task(&t0, &1);
         assert_eq!(ex.aborted(), [0], "only the peer sharer is aborted");
-        // C-05 fix: the aborted twin is now deregistered, leaving only the
+        // The aborted twin is now deregistered, leaving only the
         // caller's own entry. (Previously it lingered in `running`.)
         assert_eq!(
             q.inner.lock().running.len(),
@@ -1194,7 +1193,7 @@ mod tests {
         );
     }
 
-    /// AUDIT FINDING (C-05): `cancel_task` aborts and deregisters the twin, but
+    /// `cancel_task` aborts and deregisters the twin, but
     /// does **not** reclaim the remaining range into `waiting`. That is
     /// deliberate: reclaiming would race with the caller's own still-live `task`
     /// over the same range and cause duplicate execution. The soundness therefore

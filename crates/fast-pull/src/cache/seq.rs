@@ -6,9 +6,12 @@ use std::collections::BTreeMap;
 
 /// Pusher wrapper that reorders out-of-order chunks into sequential order.
 ///
-/// Buffers chunks in a `BTreeMap` and flushes them in sequential order once gaps
-/// are filled. When the cache exceeds `high_watermark`, a flush is triggered
-/// to bring it down to `low_watermark`.
+/// Buffers chunks in a `BTreeMap` keyed by offset. Eviction starts once the buffered
+/// size reaches `high_watermark` and hands chunks to the inner pusher in ascending
+/// offset order — across gaps if need be, so memory stays bounded while a gap is
+/// still unfilled — until the size falls back to `low_watermark`. It then keeps going
+/// for as long as the next chunk continues the one just written, so a contiguous run
+/// is never cut in half. `flush` drains the whole buffer.
 #[derive(Debug)]
 pub struct CacheSeqPusher<P> {
     inner: P,
@@ -23,6 +26,11 @@ impl<P: Pusher> CacheSeqPusher<P> {
     ///
     /// Eviction to the inner pusher triggers once the buffered size reaches
     /// `high_watermark`, and stops once it falls back to `low_watermark`.
+    ///
+    /// `low_watermark` must not exceed `high_watermark`. A larger `low_watermark`
+    /// makes `high_watermark` irrelevant, because eviction stops as soon as the
+    /// buffered size is at or below `low_watermark`, which then acts as the sole
+    /// watermark.
     pub const fn new(inner: P, high_watermark: usize, low_watermark: usize) -> Self {
         Self {
             inner,
@@ -45,9 +53,12 @@ impl<P: Pusher> CacheSeqPusher<P> {
             let next_pos = start + chunk_len as u64;
             self.cache_size -= chunk_len;
             if let Err((e, ret)) = self.inner.push(&(start..next_pos), chunk) {
+                let written = chunk_len.saturating_sub(ret.len());
                 if !ret.is_empty() {
                     self.cache_size += ret.len();
-                    self.cache.insert(next_pos - ret.len() as u64, ret);
+                    if let Some(old) = self.cache.insert(start + written as u64, ret) {
+                        self.cache_size -= old.len();
+                    }
                 }
                 return Err(e);
             }
@@ -130,6 +141,33 @@ mod tests {
             Ok(())
         }
         fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    /// Inner pusher that writes only the first 2 bytes of the chunk on its first call,
+    /// then fails returning the unwritten tail as `rem`. Exercises `evict_until`'s
+    /// partial-write re-buffering.
+    #[derive(Clone)]
+    struct PartialSink {
+        pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
+        partial: Arc<AtomicBool>,
+    }
+    impl Pusher for PartialSink {
+        type Error = std::io::Error;
+        fn push(
+            &mut self,
+            range: &ProgressEntry,
+            bytes: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            self.pushes
+                .lock()
+                .unwrap()
+                .push((range.clone(), bytes.clone()));
+            if !self.partial.swap(true, Ordering::SeqCst) {
+                let rem = bytes.slice(2..);
+                return Err((std::io::Error::other("partial"), rem));
+            }
             Ok(())
         }
     }
@@ -226,5 +264,46 @@ mod tests {
         assert_eq!(pushes.len(), 1);
         assert_eq!(pushes[0].0, 0..10);
         drop(pushes);
+    }
+
+    #[test]
+    fn evict_until_partial_write_rebuffers_tail_at_correct_offset() {
+        // A partial inner write (first 2 of 10 bytes persisted, then failure with the
+        // 8-byte tail as `rem`) must re-buffer the tail at offset 2 and flush only it on retry.
+        let sink = PartialSink {
+            pushes: Arc::new(Mutex::new(Vec::new())),
+            partial: Arc::new(AtomicBool::new(false)),
+        };
+        let mut p = CacheSeqPusher::new(sink.clone(), 10, 0);
+        // Reaches high watermark (10) and evicts: the partial failure re-buffers [2..10).
+        let res = p.push(&(0..10), bb(&"A".repeat(10)));
+        assert!(res.is_err());
+        // Retry flushes the retained tail, not the already-written prefix.
+        p.flush().unwrap();
+        let pushes = sink.pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 2);
+        assert_eq!(pushes[0].0, 0..10); // original chunk handed to inner
+        assert_eq!(pushes[1].0, 2..10); // tail re-buffered at correct offset
+        assert_eq!(&pushes[1].1[..], b"AAAAAAAA");
+    }
+
+    #[test]
+    fn failed_push_eviction_retains_callers_chunk_for_retry() {
+        // When a push-triggered eviction fails, the caller's chunk is held internally
+        // (empty remainder returned) and must still be written by a later flush.
+        let sink = RecordingSink::new();
+        sink.fail_next.store(true, Ordering::SeqCst);
+        let mut p = CacheSeqPusher::new(sink.clone(), 10, 0);
+        let res = p.push(&(0..10), bb(&"A".repeat(10)));
+        assert!(res.is_err());
+        assert_eq!(
+            res.unwrap_err().1.len(),
+            0,
+            "buffered data is held internally, not returned to the caller"
+        );
+        p.flush().unwrap();
+        let pushes = sink.pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(pushes[0].0, 0..10);
     }
 }

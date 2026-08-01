@@ -24,6 +24,14 @@ impl<P: Pusher> CacheMergePusher<P> {
     ///
     /// Eviction to the inner pusher triggers once the buffered size reaches
     /// `high_watermark`, and stops once it falls back to `low_watermark`.
+    ///
+    /// `low_watermark` must not exceed `high_watermark`. A larger `low_watermark`
+    /// makes `high_watermark` irrelevant, because eviction does nothing until the
+    /// buffered size passes `low_watermark`, which then acts as the sole watermark.
+    ///
+    /// With `high_watermark == low_watermark`, a push that lands the buffered size
+    /// exactly on the watermark evicts nothing; the next push takes it above and
+    /// eviction proceeds as usual.
     pub const fn new(inner: P, high_watermark: usize, low_watermark: usize) -> Self {
         Self {
             inner,
@@ -100,14 +108,16 @@ impl<P: Pusher> CacheMergePusher<P> {
                 self.cache_size -= total_len;
                 if let Err((e, ret_bytes)) = self.inner.push(&range, chunk) {
                     err = Some(e);
+                    let written = total_len.saturating_sub(ret_bytes.len());
                     if !ret_bytes.is_empty() {
                         self.cache_size += ret_bytes.len();
-                        let retry_start = start + (total_len - ret_bytes.len()) as u64;
-                        self.cache.insert(retry_start, ret_bytes);
+                        if let Some(old) = self.cache.insert(start + written as u64, ret_bytes) {
+                            self.cache_size -= old.len();
+                        }
                     }
                 }
-            } else {
-                self.cache.insert(start, chunk);
+            } else if let Some(old) = self.cache.insert(start, chunk) {
+                self.cache_size -= old.len();
             }
         }
         err.map_or(Ok(()), Err)
@@ -187,6 +197,33 @@ mod tests {
             Ok(())
         }
         fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    /// Inner pusher that writes only the first 2 bytes of the chunk on its first call,
+    /// then fails returning the unwritten tail as `rem`. Exercises `evict_until`'s
+    /// partial-write re-buffering for a *merged* run.
+    #[derive(Clone)]
+    struct PartialSinkMerge {
+        pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
+        partial: Arc<AtomicBool>,
+    }
+    impl Pusher for PartialSinkMerge {
+        type Error = std::io::Error;
+        fn push(
+            &mut self,
+            range: &ProgressEntry,
+            bytes: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            self.pushes
+                .lock()
+                .unwrap()
+                .push((range.clone(), bytes.clone()));
+            if !self.partial.swap(true, Ordering::SeqCst) {
+                let rem = bytes.slice(2..);
+                return Err((std::io::Error::other("partial"), rem));
+            }
             Ok(())
         }
     }
@@ -271,14 +308,20 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_merge_equal_watermarks_noop() {
-        // Line 39: when high == low and the cache reaches the watermark, evict_until
-        // returns immediately because `cache_size <= target_size` is already true.
+    fn test_cache_merge_equal_watermarks_skip_only_the_exact_hit() {
+        // With high == low, `evict_until` returns early only while `cache_size` is
+        // exactly on the watermark. It is not a permanent no-op: the next push takes
+        // the buffer above the watermark and eviction runs normally.
         let sink = SharedSink::new();
         let mut p = CacheMergePusher::new(sink.clone(), 10, 10);
         p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
-        // No eviction happens at the watermark.
         assert!(sink.pushes.lock().unwrap().is_empty());
+
+        p.push(&(10..11), bb("B")).unwrap();
+        let pushes = sink.pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(pushes[0].0, 0..11);
+        assert_eq!(&pushes[0].1[..], format!("{}B", "A".repeat(10)).as_bytes());
     }
 
     #[test]
@@ -325,5 +368,27 @@ mod tests {
         assert_eq!(pushes[0].0, 0..100);
         assert_eq!(pushes[1].0, 200..240);
         drop(pushes);
+    }
+
+    #[test]
+    fn merge_evict_partial_write_rebuffers_merged_tail_at_correct_offset() {
+        // A contiguous run of three chunks [0..30) is merged into one 30-byte chunk and
+        // evicted; a partial inner write (first 2 bytes persisted, tail returned) must
+        // re-buffer the 28-byte tail at offset 2 and retry it on flush.
+        let sink = PartialSinkMerge {
+            pushes: Arc::new(Mutex::new(Vec::new())),
+            partial: Arc::new(AtomicBool::new(false)),
+        };
+        let mut p = CacheMergePusher::new(sink.clone(), 30, 0);
+        p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
+        p.push(&(10..20), bb(&"B".repeat(10))).unwrap();
+        let res = p.push(&(20..30), bb(&"C".repeat(10)));
+        assert!(res.is_err());
+        p.flush().unwrap();
+        let pushes = sink.pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 2);
+        assert_eq!(pushes[0].0, 0..30); // merged run handed to inner
+        assert_eq!(pushes[1].0, 2..30); // tail re-buffered at correct offset
+        assert_eq!(pushes[1].1.len(), 28);
     }
 }

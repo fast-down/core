@@ -445,6 +445,7 @@ dependencies = [
  "parking_lot",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
