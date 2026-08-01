@@ -127,6 +127,8 @@ impl<H: Handle> TaskQueue<H> {
         }
         if found {
             guard.running[worker_idx].0 = task.downgrade();
+        } else {
+            guard.running.remove(worker_idx);
         }
         found
     }
@@ -169,6 +171,14 @@ impl<H: Handle> TaskQueue<H> {
                 guard.running.push_back((weak, handle));
             }
         } else if len > threads {
+            // If every worker we would keep has already removed itself from
+            // `running` (steal found no work), draining more workers would
+            // strand their remaining ranges in `waiting` — no live worker is
+            // left to steal them. `threads == 0` is excluded: collapsing the
+            // pool to zero is an explicit "push everything to waiting" request.
+            if threads > 0 && !guard.running.iter().take(threads).any(|w| w.0.is_alive()) {
+                return Some(());
+            }
             let mut temp = Vec::with_capacity(len - threads);
             let iter = guard.running.drain(threads..);
             for (task, mut handle) in iter {
@@ -1031,16 +1041,27 @@ mod tests {
 
     /// When the fattest peer is too small to halve (`remain < min_chunk_size * 2`)
     /// the queue falls back to *sharing* it -- but only with speculation enabled.
+    ///
+    /// The two cases are tested separately because a worker that exhausts its
+    /// task and finds no stealable work is deregistered from `running` (so a
+    /// concurrent shrink does not mistakenly wait for it). In production a
+    /// worker exits after its first `steal` returns `false`; retrying with
+    /// different parameters on a deregistered worker is a test-only scenario.
     #[test]
     fn steal_shares_speculatively_only_when_allowed() {
+        // Case 1: speculation disabled -> the crumb is left alone.
         let ex = SyncExecutor::new();
         let q = TaskQueue::new([0..1, 100..101].into_iter());
         q.set_threads(2, 1, Some(&ex)).unwrap();
         let mut t = ex.task_of(0);
-        // Speculation disabled -> the crumb is left alone and the caller starves.
         assert!(!q.steal(&0, &mut t, 1, 1));
         assert_eq!(t.get(), 0..1);
-        // Speculation enabled -> the caller now aliases the peer's state.
+
+        // Case 2: speculation enabled -> the caller aliases the peer's state.
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new([0..1, 100..101].into_iter());
+        q.set_threads(2, 1, Some(&ex)).unwrap();
+        let mut t = ex.task_of(0);
         assert!(q.steal(&0, &mut t, 1, 2));
         assert_eq!(t.get(), 100..101);
         assert_eq!(t, ex.task_of(1), "speculation must alias, not copy");
