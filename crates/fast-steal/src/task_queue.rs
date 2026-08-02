@@ -134,13 +134,14 @@ impl<H: Handle> TaskQueue<H> {
     }
     /// Returns `None` when threads need to be increased but the executor is `None`
     #[must_use]
+    #[allow(clippy::significant_drop_tightening)]
     pub fn set_threads<E: Executor<Handle = H>>(
         &self,
         threads: usize,
         min_chunk_size: u64,
         executor: Option<&E>,
     ) -> Option<()> {
-        #![allow(clippy::significant_drop_tightening)]
+        let threads = threads.max(1);
         let min_chunk_size = min_chunk_size.max(1);
         let mut guard = self.inner.lock();
         guard.running.retain(|t| t.0.is_alive());
@@ -171,12 +172,7 @@ impl<H: Handle> TaskQueue<H> {
                 guard.running.push_back((weak, handle));
             }
         } else if len > threads {
-            // If every worker we would keep has already removed itself from
-            // `running` (steal found no work), draining more workers would
-            // strand their remaining ranges in `waiting` — no live worker is
-            // left to steal them. `threads == 0` is excluded: collapsing the
-            // pool to zero is an explicit "push everything to waiting" request.
-            if threads > 0 && !guard.running.iter().take(threads).any(|w| w.0.is_alive()) {
+            if !guard.running.iter().take(threads).any(|w| w.0.is_alive()) {
                 return Some(());
             }
             let mut temp = Vec::with_capacity(len - threads);
@@ -213,6 +209,15 @@ impl<H: Handle> TaskQueue<H> {
     /// Aborts every running task equal to `task` that does not belong to the
     /// worker `id`.
     ///
+    /// The call is a no-op unless `id` identifies a currently registered worker.
+    /// An unregistered caller matches no entry in `running`, which makes the
+    /// `is_self` guard vacuous: *every* twin would be aborted, including the one
+    /// that should survive, leaving work in `waiting` with no worker to claim it.
+    /// A caller can legitimately reach this state after a
+    /// [`set_threads`](TaskQueue::set_threads) shrink deregisters it, because the
+    /// abort that follows is cooperative and the worker keeps running until it
+    /// observes the signal.
+    ///
     /// Aborted twins are *deregistered* (removed from `running`) so a later
     /// [`set_threads`](TaskQueue::set_threads) liveness sweep does not mistake
     /// them for live workers. Their remaining work is **not** reclaimed into
@@ -226,6 +231,9 @@ impl<H: Handle> TaskQueue<H> {
         // *deregister* it (drop it from `running`). We rebuild `running` from the
         // survivors because removing in place would require mutating through a
         // shared `&` handed to `retain`'s closure.
+        if !guard.running.iter().any(|(_, h)| h.is_self(id)) {
+            return;
+        }
         let mut kept: VecDeque<(WeakTask, H)> = VecDeque::with_capacity(guard.running.len());
         for (weak, mut handle) in guard.running.drain(..) {
             let is_twin = weak
@@ -746,11 +754,12 @@ mod tests {
             );
             drop(guard);
         }
-        // Collapse to zero: every running task must be reclaimed into `waiting`.
+        // `threads.max(1)` clamps zero to one; with `running == 1` after the
+        // oscillation pattern this is a no-op, leaving the single worker alive.
         q.set_threads(0, 1, Some(&ex)).unwrap();
         let guard = q.inner.lock();
-        assert_eq!(guard.running.len(), 0);
-        assert_eq!(guard.waiting.len(), total);
+        assert_eq!(guard.running.len(), 1);
+        assert_eq!(guard.waiting.len(), total - 1);
         drop(guard);
     }
 
@@ -1244,5 +1253,25 @@ mod tests {
             0,
             "100 units of unfinished work were intentionally NOT reclaimed (would double-execute)"
         );
+    }
+
+    /// An unregistered caller must not abort anyone via `cancel_task`.
+    ///
+    /// Without the registration guard a caller that was deregistered by a
+    /// shrink (but is still running cooperatively) makes `is_self` vacuous —
+    /// `false` for every entry — and aborts *all* twins, including the only
+    /// worker that was supposed to pick up work from `waiting`.
+    #[test]
+    fn cancel_task_unregistered_caller_is_a_noop() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new([0..1, 100..200].into_iter());
+        q.set_threads(2, 1, Some(&ex)).unwrap();
+        // id 999 is not in `running`, so the call must be a no-op.
+        q.cancel_task(&ex.task_of(1), &999);
+        assert!(
+            ex.aborted().is_empty(),
+            "unregistered caller must not abort anyone"
+        );
+        assert_eq!(q.inner.lock().running.len(), 2, "no worker deregistered");
     }
 }
