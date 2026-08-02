@@ -5,6 +5,7 @@
 //! [`steal`](TaskQueue::steal). The number of running workers can be adjusted at
 //! runtime with [`set_threads`](TaskQueue::set_threads).
 
+#![allow(clippy::significant_drop_tightening)]
 extern crate alloc;
 use crate::{Executor, Handle, Task, WeakTask};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};

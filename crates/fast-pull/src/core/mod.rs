@@ -114,9 +114,10 @@ where
 /// value. There is intentionally **no** `Deref` impl — `DownloadResultInner`
 /// is private, so callers reach session state only through these methods.
 ///
-/// Completion is observed by draining [`event_chain`]: once the last sender is
-/// dropped (the download finished or was aborted) the receiver disconnects, so
-/// `while result.event_chain().recv().await.is_ok() {}` awaits the session end.
+/// Completion is observed by draining [`event_chain`](Self::event_chain): once
+/// the last sender is dropped (the download finished or was aborted) the
+/// receiver disconnects, so `while result.event_chain().recv().await.is_ok() {}`
+/// awaits the session end.
 pub struct DownloadResult<E, PullError, PushError>
 where
     E: Executor + Send + Sync,
