@@ -496,7 +496,6 @@ mod tests {
         assert_eq!(pull_progress, download_chunks);
         assert_eq!(push_progress, download_chunks);
 
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -657,7 +656,6 @@ mod tests {
             }
         }
         let (seen, inflight) = churn.await.unwrap();
-        result.join().await.unwrap();
 
         // Without these the test silently degrades into a plain download the
         // moment resizing stops taking effect.
@@ -744,7 +742,6 @@ mod tests {
         assert_eq!(pull_progress, download_chunks);
         assert_eq!(push_progress, download_chunks);
 
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 

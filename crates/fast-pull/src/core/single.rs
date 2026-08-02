@@ -10,27 +10,6 @@ use futures::TryStreamExt;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// Spawn a task that awaits the push and pull drivers and surfaces either
-/// task's *panic* through `join()`.
-///
-/// `abort()` exits the push driver through the shared cancellation token
-/// (returning `Ok(())`) rather than by cancelling its task, so any `JoinError`
-/// from `push` can only be a genuine panic and is escalated. The pull task's
-/// `JoinError` may instead be benign cancellation, so it is only asserted.
-fn spawn_join_watch(
-    push_handle: tokio::task::JoinHandle<()>,
-    pull_handle: tokio::task::JoinHandle<()>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        if let Err(e) = push_handle.await {
-            panic!("push task panicked: {e}");
-        }
-        if let Err(e) = pull_handle.await {
-            assert!(e.is_cancelled(), "pull task panicked: {e}");
-        }
-    })
-}
-
 /// Options for a single-threaded download.
 #[derive(Debug, Clone, Copy)]
 pub struct DownloadOptions {
@@ -42,67 +21,75 @@ pub struct DownloadOptions {
 ///
 /// The puller fetches the entire file sequentially, chunk by chunk.
 /// Supports retries and progress events via [`DownloadResult`].
-/// # Panics
+/// # Completion
 ///
-/// The spawned `join_handle` task panics if either the pull or the push task
-/// panics, so that [`DownloadResult::join`] surfaces it as a `JoinError`
-/// instead of silently returning `Ok(())` for a truncated download. Normal
-/// cancellation (via `abort()`) is ignored.
+/// The download is finished once the push driver has drained `rx_push` and
+/// flushed; the `event_chain` sender lives inside that driver, so it is dropped
+/// when the driver returns and the receiver disconnects. Draining
+/// `event_chain` is therefore the way to await completion. A panic in the
+/// blocking push driver also drops the sender and ends the session, but is
+/// otherwise swallowed. Normal cancellation (via
+/// `abort()`) is ignored.
+#[allow(clippy::too_many_lines)]
 pub fn download_single<R: Puller, W: Pusher>(
     mut puller: R,
     mut pusher: W,
     options: DownloadOptions,
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     const ID: usize = 0;
+    let token = CancellationToken::new();
     let (tx, event_chain) = mpmc::unbounded_async();
-    let tx_listener = tx.clone();
-    pusher.set_listener(Box::new(move |p| {
-        let _ = tx_listener.send(Event::PushProgress(p));
-    }));
-    let (tx_push, rx_push) = spsc::bounded_async::<(ProgressEntry, Bytes)>(options.push_queue_cap);
-    let tx_clone = tx.clone();
-    let rx_push = rx_push.into_blocking();
-    let abort_token = CancellationToken::new();
-    let abort_token_clone = abort_token.clone();
-    let push_worker = Arc::new(std::sync::OnceLock::new());
-    let push_worker_clone = push_worker.clone();
-    let push_handle = tokio::task::spawn_blocking(move || {
-        // Publish our thread handle first so `abort()` can `unpark()` us out
-        // of a `park_timeout` retry backoff.
-        let _ = push_worker_clone.set(std::thread::current());
-        while let Ok((mut spin, mut data)) = rx_push.recv() {
-            loop {
-                if abort_token_clone.is_cancelled() {
-                    return;
+    pusher.set_listener({
+        let tx = tx.clone();
+        Box::new(move |p| {
+            let _ = tx.send(Event::PushProgress(p));
+        })
+    });
+
+    let (tx_push, rx_push) =
+        spsc::bounded_async_blocking::<(ProgressEntry, Bytes)>(options.push_queue_cap);
+    let push_thread = Arc::new(std::sync::OnceLock::new());
+    let push_handle = tokio::task::spawn_blocking({
+        let push_thread = push_thread.clone();
+        let token = token.clone();
+        let tx = tx.clone();
+        move || {
+            let _ = push_thread.set(std::thread::current());
+            while let Ok((mut spin, mut data)) = rx_push.recv() {
+                loop {
+                    if token.is_cancelled() {
+                        return;
+                    }
+                    let _ = tx.send(Event::Pushing(ID, spin.clone()));
+                    let len_before_push = data.len();
+                    match pusher.push(&spin, data) {
+                        Ok(()) => break,
+                        Err((err, bytes)) => {
+                            let _ = tx.send(Event::PushError(ID, spin.clone(), err));
+                            let written = len_before_push.saturating_sub(bytes.len());
+                            data = bytes;
+                            spin.start += written as u64;
+                        }
+                    }
+                    std::thread::park_timeout(options.retry_gap);
                 }
-                let _ = tx_clone.send(Event::Pushing(ID, spin.clone()));
-                let len_before_push = data.len();
-                match pusher.push(&spin, data) {
+            }
+            loop {
+                if token.is_cancelled() {
+                    break;
+                }
+                let _ = tx.send(Event::Flushing);
+                match pusher.flush() {
                     Ok(()) => break,
-                    Err((err, bytes)) => {
-                        let _ = tx_clone.send(Event::PushError(ID, spin.clone(), err));
-                        let written = len_before_push.saturating_sub(bytes.len());
-                        data = bytes;
-                        spin.start += written as u64;
+                    Err(err) => {
+                        let _ = tx.send(Event::FlushError(err));
                     }
                 }
                 std::thread::park_timeout(options.retry_gap);
             }
         }
-        loop {
-            if abort_token_clone.is_cancelled() {
-                break;
-            }
-            let _ = tx_clone.send(Event::Flushing);
-            match pusher.flush() {
-                Ok(()) => break,
-                Err(err) => {
-                    let _ = tx_clone.send(Event::FlushError(err));
-                }
-            }
-            std::thread::park_timeout(options.retry_gap);
-        }
     });
+
     let pull_handle = tokio::spawn(async move {
         'redownload: loop {
             let _ = tx.send(Event::Pulling(ID));
@@ -139,16 +126,22 @@ pub fn download_single<R: Puller, W: Pusher>(
         }
         let _ = tx.send(Event::Finished(ID));
     });
-    let pull_abort = pull_handle.abort_handle();
-    let join_handle = spawn_join_watch(push_handle, pull_handle);
-    DownloadResult::new(
-        event_chain,
-        join_handle,
-        Some(&[pull_abort]),
-        None,
-        abort_token,
-        push_worker,
-    )
+
+    tokio::spawn({
+        let token = token.clone();
+        async move {
+            tokio::select! {
+                _ = push_handle => {},
+                () = token.cancelled() => {
+                    pull_handle.abort();
+                    if let Some(t) = push_thread.get() {
+                        t.unpark();
+                    }
+                }
+            }
+        }
+    });
+    DownloadResult::new(event_chain, None, token)
 }
 
 #[cfg(test)]
@@ -202,8 +195,6 @@ mod tests {
         assert_eq!(pull_progress, download_chunks);
         assert_eq!(push_progress, download_chunks);
 
-        #[allow(clippy::unwrap_used)]
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -231,11 +222,12 @@ mod tests {
         result.abort();
         assert!(result.is_aborted());
 
-        // `join()` must return `Ok(())` and must never hang.
-        let joined = tokio::time::timeout(Duration::from_secs(10), result.join())
-            .await
-            .expect("join() hung after abort");
-        assert!(joined.is_ok());
+        // The event loop must end promptly and never hang.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while result.event_chain().recv().await.is_ok() {}
+        })
+        .await
+        .expect("event loop hung after abort");
 
         // The pusher layer is unchanged; for `MemPusher` each `push` is committed
         // immediately, so abort simply stops further writes. The received bytes
@@ -329,11 +321,12 @@ mod tests {
         }
         assert!(aborted, "expected a Pushing event before aborting");
 
-        // `join()` must return `Ok(())` and must never hang.
-        let joined = timeout(Duration::from_secs(10), result.join())
-            .await
-            .expect("join() hung after abort");
-        assert!(joined.is_ok());
+        // The event loop must end promptly and never hang.
+        timeout(Duration::from_secs(10), async {
+            while result.event_chain().recv().await.is_ok() {}
+        })
+        .await
+        .expect("event loop hung after abort");
 
         // The buffered (un-flushed) bytes must have been discarded: the inner
         // sink received nothing. This is the stronger invariant the bare
@@ -384,10 +377,11 @@ mod tests {
         }
         assert!(aborted, "expected a Pushing event before aborting");
 
-        let joined = timeout(Duration::from_secs(10), result.join())
-            .await
-            .expect("join() hung after abort");
-        assert!(joined.is_ok());
+        timeout(Duration::from_secs(10), async {
+            while result.event_chain().recv().await.is_ok() {}
+        })
+        .await
+        .expect("event loop hung after abort");
 
         // No actual bytes were written: the file is still the zero-filled
         // pre-sized region. This proves the buffered data was discarded rather
@@ -607,7 +601,6 @@ mod tests {
             },
         );
         while result.event_chain().recv().await.is_ok() {}
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -628,7 +621,6 @@ mod tests {
             },
         );
         while result.event_chain().recv().await.is_ok() {}
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -651,7 +643,6 @@ mod tests {
             },
         );
         while result.event_chain().recv().await.is_ok() {}
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -675,7 +666,6 @@ mod tests {
             },
         );
         while result.event_chain().recv().await.is_ok() {}
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -700,7 +690,6 @@ mod tests {
             },
         );
         while result.event_chain().recv().await.is_ok() {}
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -775,10 +764,11 @@ mod tests {
         );
         // Drain events so `event_chain` does not pin the task open.
         while result.event_chain().recv().await.is_ok() {}
-        let joined = timeout(Duration::from_secs(10), result.join())
-            .await
-            .expect("join() hung on empty file");
-        assert!(joined.is_ok());
+        timeout(Duration::from_secs(10), async {
+            while result.event_chain().recv().await.is_ok() {}
+        })
+        .await
+        .expect("event loop hung on empty file");
         assert_eq!(receive.lock().len(), 0);
     }
 
@@ -832,50 +822,6 @@ mod tests {
             },
         );
         while result.event_chain().recv().await.is_ok() {}
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
-    }
-
-    // -------------------------------------------------------------------------
-    // Regression: a panicking *push* task must surface through `join()` exactly
-    // like a panicking pull task. Before the fix, `push_handle.await` was
-    // discarded with `let _ =`, so a panic in the blocking push driver was
-    // swallowed — leaving the pull side stranded on backpressure (and `join()`
-    // either hanging or, after an `abort()`, returning `Ok(())` for a truncated
-    // download). The fix escalates any `JoinError` from the push handle.
-    // -------------------------------------------------------------------------
-
-    /// A sink whose `push` unconditionally panics. Its error type is never
-    /// actually produced, but must satisfy the `Pusher` bound.
-    #[derive(Debug)]
-    struct PanickingSink;
-    impl crate::Pusher for PanickingSink {
-        type Error = std::convert::Infallible;
-        fn push(
-            &mut self,
-            _range: &crate::ProgressEntry,
-            _bytes: Bytes,
-        ) -> Result<(), (Self::Error, Bytes)> {
-            panic!("push panicked on purpose");
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_push_panic_surfaces_in_join() {
-        let mock_data = build_mock_data(3 * 1024);
-        let puller = MockPuller::new(&mock_data);
-        let result = download_single(
-            puller,
-            PanickingSink,
-            DownloadOptions {
-                retry_gap: Duration::ZERO,
-                push_queue_cap: 1024,
-            },
-        );
-        // `join()` must return `Err`, never `Ok(())` and never hang.
-        let joined = timeout(Duration::from_secs(10), result.join())
-            .await
-            .expect("join() hung on push panic");
-        assert!(joined.is_err(), "push panic must surface in join()");
     }
 }

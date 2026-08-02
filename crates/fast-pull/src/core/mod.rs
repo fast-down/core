@@ -7,16 +7,13 @@
 //! cheaply cloneable handle that keeps the session alive until the last clone is
 //! dropped (or [`DownloadResult::abort`] is called).
 
-use crate::{Event, handle::SharedHandle};
+use crate::Event;
 use crossfire::{MAsyncRx, mpmc};
 use fast_steal::{Executor, TaskQueue};
 use std::fmt;
-use std::sync::{Arc, OnceLock};
-use std::thread::Thread;
-use tokio::task::{AbortHandle, JoinError, JoinHandle};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-pub mod handle;
 pub mod mock;
 pub mod multi;
 pub mod single;
@@ -36,8 +33,6 @@ where
     PushError: Send + Unpin + 'static,
 {
     event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
-    handle: SharedHandle<()>,
-    abort_handles: Option<Arc<[AbortHandle]>>,
     /// The work-stealing queue of a multi-threaded session together with the
     /// executor that spawns its workers, or `None` for a single-threaded one.
     ///
@@ -45,7 +40,7 @@ where
     /// [`set_threads`](Self::set_threads) can spawn additional workers while the
     /// download is running. It reaches the session's channels through a weak
     /// reference, so retaining it here never keeps a finished session open.
-    task_queue: Option<(Arc<E>, TaskQueue<E::Handle>)>,
+    task_queue: Option<(E, TaskQueue<E::Handle>)>,
     /// Session-wide cancellation token, shared (as a clone) with every worker
     /// and with the `spawn_blocking` push driver. [`abort`](Self::abort) cancels
     /// this root token, which broadcasts to all linked child tokens — including
@@ -54,14 +49,6 @@ where
     /// notify per handle. Cancellation is terminal: once cancelled it never
     /// clears, so `is_aborted` stays `true` for the rest of the session.
     abort_token: CancellationToken,
-    /// Handle of the blocking push/flush worker thread, set by the worker
-    /// itself as its first action. `abort()` uses it to `unpark()` the worker
-    /// so a retry backoff (`std::thread::park_timeout`) is cut short instead
-    /// of sleeping out the full `retry_gap`. `unpark()` on an already-exited
-    /// thread is safe, and a stored "unpark token" (from an unpark racing
-    /// ahead of the park) only causes one spurious wakeup, after which the
-    /// worker re-checks `is_aborted` at the top of its loop.
-    push_worker: Arc<OnceLock<Thread>>,
 }
 
 impl<E, PullError, PushError> fmt::Debug for DownloadResultInner<E, PullError, PushError>
@@ -84,35 +71,18 @@ where
     PullError: Send + Unpin + 'static,
     PushError: Send + Unpin + 'static,
 {
-    /// # Errors
-    /// Returns `Arc<JoinError>` if the writer thread exits unexpectedly
-    pub async fn join(&self) -> Result<(), Arc<JoinError>> {
-        self.handle.join().await
-    }
-
     /// Cancel all workers immediately.
     ///
     /// Safe to call multiple times and safe to call while other clones of the
     /// owning [`DownloadResult`] are still alive. The implicit drop-based
     /// cancellation (on the last clone) becomes a no-op once this has run.
     pub fn abort(&self) {
-        if self.abort_token.is_cancelled() {
-            return;
-        }
         self.abort_token.cancel();
-        if let Some(handles) = &self.abort_handles {
-            for handle in handles.iter() {
-                handle.abort();
-            }
-        }
-        if let Some(worker) = self.push_worker.get() {
-            worker.unpark();
-        }
     }
 
     pub fn set_threads(&self, threads: usize, min_chunk_size: u64) -> Option<()> {
         let (executor, task_queue) = self.task_queue.as_ref()?;
-        task_queue.set_threads(threads, min_chunk_size, Some(executor.as_ref()))
+        task_queue.set_threads(threads, min_chunk_size, Some(executor))
     }
 
     #[must_use]
@@ -139,11 +109,14 @@ where
 /// dropped. An explicit [`abort`](Self::abort) cancels immediately.
 ///
 /// `DownloadResult` wraps `Arc<DownloadResultInner>` and exposes the session
-/// methods (`join`, `abort`, `set_threads`, `is_aborted`) and
+/// methods (`abort`, `set_threads`, `is_aborted`) and
 /// [`event_chain`](Self::event_chain) directly; each delegates to the inner
 /// value. There is intentionally **no** `Deref` impl — `DownloadResultInner`
 /// is private, so callers reach session state only through these methods.
-#[derive(Debug)]
+///
+/// Completion is observed by draining [`event_chain`]: once the last sender is
+/// dropped (the download finished or was aborted) the receiver disconnects, so
+/// `while result.event_chain().recv().await.is_ok() {}` awaits the session end.
 pub struct DownloadResult<E, PullError, PushError>
 where
     E: Executor + Send + Sync,
@@ -151,6 +124,19 @@ where
     PushError: Send + Unpin + 'static,
 {
     inner: Arc<DownloadResultInner<E, PullError, PushError>>,
+}
+
+impl<E, PullError, PushError> fmt::Debug for DownloadResult<E, PullError, PushError>
+where
+    E: Executor + Send + Sync,
+    PullError: Send + Unpin + 'static,
+    PushError: Send + Unpin + 'static,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DownloadResult")
+            .field("inner", &self.inner)
+            .finish()
+    }
 }
 
 impl<E, PullError, PushError> Clone for DownloadResult<E, PullError, PushError>
@@ -180,20 +166,14 @@ where
     /// points instead of calling this directly.
     pub fn new(
         event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
-        handle: JoinHandle<()>,
-        abort_handles: Option<&[AbortHandle]>,
-        task_queue: Option<(Arc<E>, TaskQueue<E::Handle>)>,
+        task_queue: Option<(E, TaskQueue<E::Handle>)>,
         abort_token: CancellationToken,
-        push_worker: Arc<OnceLock<Thread>>,
     ) -> Self {
         Self {
             inner: Arc::new(DownloadResultInner {
                 event_chain,
-                handle: SharedHandle::new(handle),
-                abort_handles: abort_handles.map(Arc::from),
                 task_queue,
                 abort_token,
-                push_worker,
             }),
         }
     }
@@ -205,12 +185,6 @@ where
     #[must_use]
     pub fn event_chain(&self) -> &MAsyncRx<mpmc::List<Event<PullError, PushError>>> {
         &self.inner.event_chain
-    }
-
-    /// # Errors
-    /// Returns `Arc<JoinError>` if the writer thread exits unexpectedly
-    pub async fn join(&self) -> Result<(), Arc<JoinError>> {
-        self.inner.join().await
     }
 
     /// Cancel all workers immediately.
@@ -374,11 +348,14 @@ mod tests {
                 max_speculative: 3,
             },
         );
-        // Lines 63-68: `Debug` of `DownloadResultInner` (via the derived `Debug`).
+        // `Debug` of `DownloadResultInner` is reached through `DownloadResult`'s
+        // own `Debug` impl, which forwards to the inner value.
         let _ = format!("{result:?}");
         // Lines 234-236 (forwarding) and 111-123 (inner task-queue adjustment).
         result.set_threads(4, 1);
-        result.join().await.unwrap();
+        // Await completion by draining `event_chain` (it disconnects once the
+        // push driver drops its sender) — this replaces `join()`.
+        while result.event_chain().recv().await.is_ok() {}
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -403,7 +380,6 @@ mod tests {
         let _clone = result.clone();
         result.set_threads(4, 1);
         while result.event_chain().recv().await.is_ok() {}
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -439,7 +415,7 @@ mod tests {
         assert!(result.is_aborted());
         result.set_threads(4, 1);
         assert!(result.is_aborted());
-        let _ = result.join().await;
+        while result.event_chain().recv().await.is_ok() {}
     }
 
     // Growing the pool of a *running* session must actually put more workers to
@@ -482,7 +458,6 @@ mod tests {
                 pulling_ids.insert(id);
             }
         }
-        result.join().await.unwrap();
         assert!(
             pulling_ids.len() > 1,
             "growth spawned no additional worker (pulling ids: {pulling_ids:?})"
@@ -519,10 +494,13 @@ mod tests {
 
         result.abort();
         result.set_threads(8, 1);
-        let joined = timeout(Duration::from_secs(10), result.join())
-            .await
-            .expect("join() hung after abort followed by growth");
-        assert!(joined.is_ok());
+        // Await termination by draining `event_chain` (replaces `join()`); the
+        // timeout guards against a hang.
+        timeout(Duration::from_secs(10), async {
+            while result.event_chain().recv().await.is_ok() {}
+        })
+        .await
+        .expect("join() hung after abort followed by growth");
         assert!(
             receive.lock().len() < mock_data.len(),
             "an aborted session must not be resumed by a later resize"
@@ -594,10 +572,6 @@ mod tests {
             }
         }
         let (seen, inflight) = churn.await.unwrap();
-        timeout(Duration::from_secs(60), result.join())
-            .await
-            .expect("join() hung after repeated resizes")
-            .unwrap();
         assert!(
             seen.len() > 2,
             "churn never varied the pool size, so nothing was exercised: {seen:?}"

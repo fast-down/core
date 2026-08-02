@@ -2,7 +2,7 @@
 //! `fast_down_api`.
 //!
 //! These tests stand up a minimal ranged HTTP server (built on `hyper`) and drive
-//! the public `DownloadHandle::{download, resume}` API through real, resumable
+//! the public `download`/`resume` functions through real, resumable
 //! scenarios: a successful resume after a mid-download cancel, a remote file
 //! change (both the `download` silent-fallback and `resume` error-reporting
 //! branches), a missing `.fd` state file, a server that does not support range
@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fast_down_api::{
-    DownloadHandle, Event, PartialConfig, Rx, StateError, WriteMethod, create_cancellation_token,
-    create_channel,
+    Event, PartialConfig, Rx, StateError, WriteMethod, create_cancellation_token, create_channel,
+    download, resume,
 };
 use futures::StreamExt;
 use futures::stream::unfold;
@@ -296,8 +296,7 @@ async fn partial_download_via_cancel_with(
     cancel_after: u64,
 ) -> Vec<Event> {
     let (tx, rx) = create_channel();
-    let _handle =
-        DownloadHandle::download(Url::parse(url).expect("valid url"), cfg, tx, cancel.clone());
+    download(Url::parse(url).expect("valid url"), cfg, tx, cancel.clone());
 
     let mut events = Vec::new();
     let mut started = false;
@@ -366,7 +365,7 @@ async fn test_resume_success() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let resume_cancel = create_cancellation_token();
-    let _handle = DownloadHandle::resume(
+    resume(
         part.clone(),
         Url::parse(&url).expect("valid url"),
         cfg,
@@ -423,8 +422,7 @@ async fn test_file_changed_download_falls_back() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let dl_cancel = create_cancellation_token();
-    let _handle =
-        DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, dl_cancel);
+    download(Url::parse(&url).expect("valid url"), cfg, tx, dl_cancel);
     let events = drain(rx).await;
 
     assert!(
@@ -465,7 +463,7 @@ async fn test_file_changed_resume_reports_error() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let resume_cancel = create_cancellation_token();
-    let _handle = DownloadHandle::resume(
+    resume(
         part.clone(),
         Url::parse(&url).expect("valid url"),
         cfg,
@@ -515,7 +513,7 @@ async fn test_resume_no_state_file() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
-    let _handle = DownloadHandle::resume(
+    resume(
         part.clone(),
         Url::parse(&url).expect("valid url"),
         cfg,
@@ -557,7 +555,7 @@ async fn test_resume_not_resumable() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
-    let _handle = DownloadHandle::resume(
+    resume(
         part.clone(),
         Url::parse(&url).expect("valid url"),
         cfg,
@@ -613,7 +611,7 @@ async fn test_cancel_keeps_part_and_fd_then_resume() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let resume_cancel = create_cancellation_token();
-    let _handle = DownloadHandle::resume(
+    resume(
         part.clone(),
         Url::parse(&url).expect("valid url"),
         cfg,
@@ -695,7 +693,7 @@ async fn test_concurrent_resume_with_fragmented_progress() {
 
     let (tx, rx) = create_channel();
     let resume_cancel = create_cancellation_token();
-    let _handle = DownloadHandle::resume(
+    resume(
         part.clone(),
         Url::parse(&url).expect("valid url"),
         make_config_with(&dir, 8, 64 * 1024),
@@ -737,7 +735,7 @@ async fn test_resume_missing_tmp_path_falls_back_to_download() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
-    let _handle = DownloadHandle::resume(
+    resume(
         part.clone(),
         Url::parse(&url).expect("valid url"),
         cfg,
@@ -781,7 +779,7 @@ async fn test_fresh_download_writes_full_file() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
-    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = drain(rx).await;
 
     assert!(
@@ -833,7 +831,7 @@ async fn test_progress_event_emitted() {
 
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
-    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = drain(rx).await;
 
     // At least one Progress event, and it must fire on its own timer (not just
@@ -1013,7 +1011,7 @@ async fn test_progress_elapsed_persisted_across_resume() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let resume_cancel = create_cancellation_token();
-    let _handle = DownloadHandle::resume(
+    resume(
         part.clone(),
         Url::parse(&url).expect("valid url"),
         cfg,
@@ -1070,9 +1068,10 @@ async fn test_progress_elapsed_persisted_across_resume() {
     );
 }
 
-/// `DownloadHandle::join` resolves once the spawned task finishes, covering
-/// `download/mod.rs:54-56`. A fresh full download completes (Renamed) and
-/// `join` must return `Ok(())`, proving the detached task did not panic.
+/// `download` spawns a detached task that completes once the spawned task
+/// finishes: a fresh full download emits `Event::Renamed`, and draining the
+/// paired `rx` returns only after the task has fully ended (including the final
+/// `overwrite`), proving the detached task did not panic.
 #[tokio::test]
 async fn test_download_join_resolves() {
     let dir = temp_dir("join");
@@ -1080,16 +1079,12 @@ async fn test_download_join_resolves() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
-    let handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = drain(rx).await;
     assert!(
         events.iter().any(|e| matches!(e, Event::Renamed(_))),
         "fresh download must complete with Renamed"
     );
-    handle
-        .join()
-        .await
-        .expect("download task must not have panicked");
 }
 
 /// Like [`make_config`] but with `overwrite = false`, so downloads fall into the
@@ -1108,8 +1103,8 @@ fn make_config_no_overwrite(save_dir: &Path) -> PartialConfig {
     }
 }
 
-/// `DownloadHandle::join()` (mod.rs lines 54-56) completes cleanly for a
-/// successful download.
+/// `download` completes cleanly for a successful download: draining the paired
+/// `rx` returns once the task has finished (including `overwrite`).
 #[tokio::test]
 async fn test_handle_join_completes() {
     let dir = temp_dir("handle_join");
@@ -1118,7 +1113,7 @@ async fn test_handle_join_completes() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
-    let handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
 
     let events = timeout(Duration::from_secs(30), drain(rx))
         .await
@@ -1127,10 +1122,6 @@ async fn test_handle_join_completes() {
         events.iter().any(|e| matches!(e, Event::Renamed(_))),
         "download must complete"
     );
-    handle
-        .join()
-        .await
-        .expect("join must succeed for a clean download");
 }
 
 /// `download()` silently resumes (emitting `Event::Resumed`) when a valid
@@ -1154,7 +1145,7 @@ async fn test_download_silent_resume_overwrite() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let cancel2 = create_cancellation_token();
-    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel2);
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel2);
     let events = timeout(Duration::from_secs(30), drain(rx))
         .await
         .expect("drain timed out");
@@ -1197,7 +1188,7 @@ async fn test_download_resume_without_overwrite() {
     let cfg2 = make_config_no_overwrite(&dir);
     let (tx, rx) = create_channel();
     let cancel2 = create_cancellation_token();
-    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg2, tx, cancel2);
+    download(Url::parse(&url).expect("valid url"), cfg2, tx, cancel2);
     let events = timeout(Duration::from_secs(30), drain(rx))
         .await
         .expect("drain timed out");
@@ -1242,7 +1233,7 @@ async fn test_resume_with_directory_part_fails_pipeline() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let cancel2 = create_cancellation_token();
-    let _handle = DownloadHandle::resume(
+    resume(
         part.clone(),
         Url::parse(&url).expect("valid url"),
         cfg,
@@ -1309,7 +1300,7 @@ async fn test_prefetch_retries_then_gives_up() {
 
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
-    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = timeout(Duration::from_secs(20), drain(rx))
         .await
         .expect("drain timed out");
@@ -1343,7 +1334,7 @@ async fn test_progress_zero_total_file() {
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
-    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = timeout(Duration::from_secs(20), drain(rx))
         .await
         .expect("drain timed out");
@@ -1414,7 +1405,7 @@ async fn test_non_overwrite_create_new_fatal_error_reports_not_hangs() {
     };
     let (tx, rx) = create_channel();
     let cancel = create_cancellation_token();
-    let _handle = DownloadHandle::download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
 
     // Guard against the pre-fix infinite loop: a hung task never closes the
     // channel, so `drain` would block past this timeout and the test would fail

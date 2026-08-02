@@ -20,7 +20,7 @@ drain progress events, resume after interruption, and cancel cooperatively.
 ## Quick start
 
 ```rust,no_run
-use fast_down_api::{create_cancellation_token, create_channel, DownloadHandle, Event, PartialConfig};
+use fast_down_api::{create_cancellation_token, create_channel, download, Event, PartialConfig};
 use std::path::PathBuf;
 use url::Url;
 
@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 3. Start the download. This spawns a detached task and returns at once.
     let url = Url::parse("https://example.com/large-file.bin")?;
-    let handle = DownloadHandle::download(url, config, tx, token.clone());
+    download(url, config, tx, token.clone());
 
     // 4. Drain events until the task finishes or is cancelled.
     while let Ok(event) = rx.recv().await {
@@ -83,8 +83,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 5. Optionally await the spawned task (returns Err if it panicked).
-    handle.join().await?;
+    // 5. Draining `rx` above already waits for completion: the loop ends when the
+    //    task drops its last sender, so no separate join handle is needed.
     Ok(())
 }
 ```
@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
 which auto-resumes when it can and otherwise falls back to a fresh download.
 
 ```rust,ignore
-let handle = DownloadHandle::resume(
+resume(
     "./downloads/large-file.bin.part", // the .part file from a previous run
     url,
     config,
@@ -116,9 +116,8 @@ token.cancel(); // stops fetching, keeps .part / .fd so you can resume later
 
 | Item                                                                                                                        | Purpose                                                                        |
 | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| [`DownloadHandle::download`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadHandle.html#method.download) | Start a download; auto-resume when a valid `.fd` + `.part` exist, else fresh.  |
-| [`DownloadHandle::resume`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadHandle.html#method.resume)     | Resume a specific `.part` file; hard-error (`Event::ResumeError`) if it can't. |
-| [`DownloadHandle::join`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadHandle.html#method.join)         | Await the detached task; errors if the worker panicked.                        |
+| [`download`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.download.html) | Start a download; auto-resume when a valid `.fd` + `.part` exist, else fresh. Observe completion by draining the `Rx` from `create_channel` until it disconnects. |
+| [`resume`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.resume.html)     | Resume a specific `.part` file; hard-error (`Event::ResumeError`) if it can't. Completion is observed the same way, by draining `Rx`. |
 | [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html)                               | Create the `(Tx, Rx)` event channel.                                           |
 | [`create_cancellation_token`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_cancellation_token.html)         | Create a `CancellationToken` for cooperative cancellation.                     |
 | [`Event`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.Event.html)                                               | The event enum delivered over the channel.                                     |

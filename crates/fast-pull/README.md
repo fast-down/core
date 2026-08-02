@@ -87,7 +87,7 @@ async fn main() {
             push_queue_cap: 16,
         },
     );
-    result.join().await.unwrap();
+    while result.event_chain().recv().await.is_ok() {}
 
     assert_eq!(&*out.lock().unwrap(), &expected);
 }

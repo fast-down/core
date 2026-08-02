@@ -1,8 +1,8 @@
 //! Full-pipeline download driver: persists state, runs the engine, then renames
 //! the `.part` file into place.
 //!
-//! [`overwrite`] is the shared core of both [`crate::DownloadHandle::download`]
-//! and [`crate::DownloadHandle::resume`]. It takes a fully-prepared
+//! [`overwrite`] is the shared core of both [`crate::download`]
+//! and [`crate::resume`]. It takes a fully-prepared
 //! [`OverwriteOption`] (state + paths + prefetch result + channel + token),
 //! builds the pull/push pipeline, drives [`fast_down::multi::download_multi`] or
 //! [`fast_down::single::download_single`], forwards engine events to the public
@@ -45,8 +45,8 @@ pub struct OverwriteOption {
 
 /// Run a complete download: persist state, drive the engine, rename into place.
 ///
-/// This is the shared core of [`crate::DownloadHandle::download`] and
-/// [`crate::DownloadHandle::resume`]. It:
+/// This is the shared core of [`crate::download`] and
+/// [`crate::resume`]. It:
 /// 1. Saves the `.fd` state up front.
 /// 2. Builds the pull/push pipeline for the `.part` file.
 /// 3. Emits [`crate::Event::Start`] and runs `download_multi` (fast downloads)
@@ -178,10 +178,6 @@ pub async fn overwrite(option: OverwriteOption) {
     let _ = tx.send(Event::Progress(sample));
     persist_token.cancel();
     let _ = persist_task.await;
-
-    if let Err(e) = res.join().await {
-        let _ = tx.send(Event::JoinError(e));
-    }
 
     abort_handle.abort();
 

@@ -15,7 +15,7 @@ use std::{
 use tokio::fs;
 use url::Url;
 
-/// Errors that can occur when an explicit [`DownloadHandle::resume`](crate::DownloadHandle::resume)
+/// Errors that can occur when an explicit [`resume`](crate::resume)
 /// cannot continue an interrupted download.
 ///
 /// These are surfaced through [`crate::Event::ResumeError`] so the caller is notified
@@ -107,7 +107,7 @@ pub struct DownloadStateInner {
 /// whose fields may be absent if the `.fd` file predates them) with the path of
 /// the `.fd` file and a dirty flag. It is the bridge between a saved `.fd` file
 /// and a fresh [`crate::PartialConfig`] handed to
-/// [`crate::DownloadHandle::resume`]: [`DownloadState::merge_config`] folds the
+/// [`crate::resume`]: [`DownloadState::merge_config`] folds the
 /// loaded progress into the new request so a resumed download continues from the
 /// correct byte offset instead of restarting from zero.
 ///

@@ -29,8 +29,9 @@ and `Pusher` traits, and the file/memory pushers) and adds the following on top 
    `ETag` / `Last-Modified` headers, which powers incremental and resumable downloads.
 3. **Proxy support** — the `Proxy` enum selects no proxy, the system proxy, or a custom
    proxy URL for outgoing requests.
-4. **Task handles** — the re-exported `SharedHandle` task-handle type lets you await
-   and abort an in-flight download from multiple owners.
+4. **Result + event stream** — download functions return a `DownloadResult` whose
+   `event_chain` receiver disconnects once the pipeline has fully flushed; awaiting
+   that disconnect is the completion signal (no separate join handle).
 
 Supporting building blocks (behind feature flags) include the backend-agnostic
 `http` module (`HttpClient` traits, `HttpPuller`, `Prefetch`, `ContentDisposition`,
@@ -86,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    result.join().await?;
+    while result.event_chain().recv().await.is_ok() {}
     Ok(())
 }
 ```

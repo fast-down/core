@@ -6,10 +6,10 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
-use crossfire::{MAsyncTx, MTx, mpmc, mpsc};
+use crossfire::{MAsyncTx, MTx, WeakTx, mpmc, mpsc};
 use fast_steal::{Executor, Handle, Task, TaskQueue};
 use futures::TryStreamExt;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock};
 use tokio_util::sync::CancellationToken;
 
 /// Options for a multi-threaded concurrent download.
@@ -26,115 +26,92 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
     pub max_speculative: usize,
 }
 
-/// The outbound channels of one session, shared by every live worker.
-///
-/// The strong count of the enclosing `Arc` is exactly the number of live
-/// workers: [`Executor::execute`] upgrades the executor's [`Weak`] into the
-/// worker it spawns, and that worker releases the reference as its last action.
-/// The worker that leaves last therefore drops both senders, which closes the
-/// write queue (ending the push driver) and gives up the executor's share of the
-/// event channel.
-///
-/// Holding these behind a [`Weak`] in the executor is what decouples "the
-/// session has finished" from "the executor has been dropped". [`DownloadResult`]
-/// keeps the executor alive for the whole session so it can spawn more workers
-/// on demand, and that no longer keeps a finished session's channels open.
-#[derive(Debug)]
-struct SessionChannels<PullError, PushError>
-where
-    PullError: Send + Unpin + 'static,
-    PushError: Send + Unpin + 'static,
-{
-    tx: MTx<mpmc::List<Event<PullError, PushError>>>,
-    tx_push: MAsyncTx<mpsc::Array<(WorkerId, ProgressEntry, Bytes)>>,
-}
-
-/// # Panics
-/// Panics if the internal `TaskQueue::set_threads` returns `None`, which only
-/// happens when the executor passed to it is unexpectedly `None`.
 pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     puller: R,
     mut pusher: W,
     options: DownloadOptions<I>,
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
+    let token = CancellationToken::new();
     let (tx, event_chain) = mpmc::unbounded_async();
-    let tx_listener = tx.clone();
-    pusher.set_listener(Box::new(move |p| {
-        let _ = tx_listener.send(Event::PushProgress(p));
-    }));
-    let (tx_push, rx_push) =
-        mpsc::bounded_async::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
-    let tx_clone = tx.clone();
-    let rx_push = rx_push.into_blocking();
-    let abort_token = CancellationToken::new();
-    let abort_token_clone = abort_token.clone();
-    let push_worker = Arc::new(std::sync::OnceLock::new());
-    let push_worker_clone = push_worker.clone();
-    let channels = Arc::new(SessionChannels { tx, tx_push });
-    let executor: Arc<TokioExecutor<R, W::Error>> = Arc::new(TokioExecutor {
-        channels: Arc::downgrade(&channels),
-        abort_token: abort_token.clone(),
-        puller,
-        pull_timeout: options.pull_timeout,
-        retry_gap: options.retry_gap,
-        id: AtomicUsize::new(0),
-        min_chunk_size: options.min_chunk_size,
-        max_speculative: options.max_speculative,
+    pusher.set_listener({
+        let tx = tx.clone();
+        Box::new(move |p| {
+            let _ = tx.send(Event::PushProgress(p));
+        })
     });
-    let task_queue = TaskQueue::new(options.download_chunks);
-    task_queue
-        .set_threads(
-            options.concurrent,
-            options.min_chunk_size,
-            Some(executor.as_ref()),
-        )
-        .unwrap();
-    drop(channels);
-    let push_handle = tokio::task::spawn_blocking(move || {
-        // Publish our thread handle first so `abort()` can `unpark()` us out
-        // of a `park_timeout` retry backoff.
-        let _ = push_worker_clone.set(std::thread::current());
-        while let Ok((id, mut spin, mut data)) = rx_push.recv() {
+    let (tx_push, rx_push) =
+        mpsc::bounded_async_blocking::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
+
+    let push_thread = Arc::new(OnceLock::new());
+    let push_handle = tokio::task::spawn_blocking({
+        let push_thread = push_thread.clone();
+        let token = token.clone();
+        let tx = tx.clone();
+        move || {
+            let _ = push_thread.set(std::thread::current());
+            while let Ok((id, mut spin, mut data)) = rx_push.recv() {
+                loop {
+                    if token.is_cancelled() {
+                        return;
+                    }
+                    let _ = tx.send(Event::Pushing(id, spin.clone()));
+                    let len_before_push = data.len();
+                    match pusher.push(&spin, data) {
+                        Ok(()) => break,
+                        Err((err, bytes)) => {
+                            let _ = tx.send(Event::PushError(id, spin.clone(), err));
+                            let written = len_before_push.saturating_sub(bytes.len());
+                            data = bytes;
+                            spin.start += written as u64;
+                        }
+                    }
+                    std::thread::park_timeout(options.retry_gap);
+                }
+            }
             loop {
-                if abort_token_clone.is_cancelled() {
+                if token.is_cancelled() {
                     return;
                 }
-                let _ = tx_clone.send(Event::Pushing(id, spin.clone()));
-                let len_before_push = data.len();
-                match pusher.push(&spin, data) {
+                let _ = tx.send(Event::Flushing);
+                match pusher.flush() {
                     Ok(()) => break,
-                    Err((err, bytes)) => {
-                        let _ = tx_clone.send(Event::PushError(id, spin.clone(), err));
-                        let written = len_before_push.saturating_sub(bytes.len());
-                        data = bytes;
-                        spin.start += written as u64;
+                    Err(err) => {
+                        let _ = tx.send(Event::FlushError(err));
                     }
                 }
                 std::thread::park_timeout(options.retry_gap);
             }
         }
-        loop {
-            if abort_token_clone.is_cancelled() {
-                break;
-            }
-            let _ = tx_clone.send(Event::Flushing);
-            match pusher.flush() {
-                Ok(()) => break,
-                Err(err) => {
-                    let _ = tx_clone.send(Event::FlushError(err));
+    });
+    tokio::spawn({
+        let token = token.clone();
+        async move {
+            tokio::select! {
+                _ = push_handle => {},
+                () = token.cancelled() => {
+                    if let Some(t) = push_thread.get() {
+                        t.unpark();
+                    }
                 }
             }
-            std::thread::park_timeout(options.retry_gap);
         }
     });
-    DownloadResult::new(
-        event_chain,
-        push_handle,
-        None,
-        Some((executor, task_queue)),
-        abort_token,
-        push_worker,
-    )
+
+    let executor: TokioExecutor<R, W::Error> = TokioExecutor {
+        token: token.clone(),
+        tx: tx.downgrade(),
+        tx_push: tx_push.downgrade(),
+        puller,
+        id: AtomicUsize::new(0),
+        retry_gap: options.retry_gap,
+        pull_timeout: options.pull_timeout,
+        min_chunk_size: options.min_chunk_size,
+        max_speculative: options.max_speculative,
+    };
+    let task_queue = TaskQueue::new(options.download_chunks);
+    let _ = task_queue.set_threads(options.concurrent, options.min_chunk_size, Some(&executor));
+
+    DownloadResult::new(event_chain, Some((executor, task_queue)), token)
 }
 
 /// A [`Handle`] implementation whose cancellation is a worker-local
@@ -161,20 +138,20 @@ impl Handle for TokioHandle {
 /// The executor outlives the workers — [`DownloadResult::set_threads`] uses it
 /// to grow the pool mid-session — so it must not own anything that keeps a
 /// finished session alive. It therefore reaches the session's channels through
-/// a [`Weak`]: once every worker is gone the upgrade fails and no further worker
-/// can be spawned.
-#[derive(Debug)]
+/// a [`WeakTx`](crossfire::WeakTx): once every worker is gone the upgrade fails
+/// and no further worker can be spawned.
 pub struct TokioExecutor<R, WE>
 where
     R: Puller,
     WE: Send + Unpin + 'static,
 {
-    channels: Weak<SessionChannels<R::Error, WE>>,
+    tx: WeakTx<mpmc::List<Event<R::Error, WE>>>,
+    tx_push: WeakTx<mpsc::Array<(WorkerId, ProgressEntry, Bytes)>>,
     /// Session-wide cancellation token, shared with the push driver and with
     /// [`DownloadResult::abort`]. Cancelling it broadcasts to every linked
     /// worker token (including ones spawned after the cancel call), so a worker
     /// only has to observe the cancel once to know the session is over.
-    abort_token: CancellationToken,
+    token: CancellationToken,
     puller: R,
     retry_gap: Duration,
     pull_timeout: Duration,
@@ -191,10 +168,14 @@ where
     #[allow(clippy::too_many_lines)]
     fn execute(&self, mut task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
         let id = self.id.fetch_add(1, Ordering::SeqCst);
-        let token = self.abort_token.child_token();
-        let Some(channels) = self.channels.upgrade() else {
+        let token = self.token.child_token();
+
+        let tx: Option<MTx<_>> = self.tx.upgrade();
+        let tx_push: Option<MAsyncTx<_>> = self.tx_push.upgrade();
+        let (Some(tx), Some(tx_push)) = (tx, tx_push) else {
             return TokioHandle { id, token };
         };
+
         let mut puller = self.puller.clone();
         let min_chunk_size = self.min_chunk_size;
         let pull_timeout = self.pull_timeout;
@@ -213,7 +194,7 @@ where
                     }
                     break;
                 }
-                let _ = channels.tx.send(Event::Pulling(id));
+                let _ = tx.send(Event::Pulling(id));
                 let download_range = start..task.end();
                 let mut stream = loop {
                     let t = tokio::select! {
@@ -223,7 +204,7 @@ where
                     match t {
                         Ok(t) => break t,
                         Err((e, retry_gap)) => {
-                            let _ = channels.tx.send(Event::PullError(id, e));
+                            let _ = tx.send(Event::PullError(id, e));
                             tokio::select! {
                                 () = worker_token.cancelled() => break 'task,
                                 () = tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)) => {}
@@ -231,17 +212,11 @@ where
                         }
                     }
                 };
-                tokio::pin! {
-                    let sleep = tokio::time::sleep(pull_timeout);
-                }
                 loop {
-                    sleep
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + pull_timeout);
                     let t = tokio::select! {
                         () = worker_token.cancelled() => break 'task,
-                        () = &mut sleep => {
-                            let _ = channels.tx.send(Event::PullTimeout(id));
+                        () = tokio::time::sleep(pull_timeout) => {
+                            let _ = tx.send(Event::PullTimeout(id));
                             drop(stream);
                             puller = puller.clone();
                             continue 'task;
@@ -266,8 +241,8 @@ where
                                 (span.start - start) as usize..(span.end - start) as usize;
                             chunk = chunk.slice(slice_span);
                             start = span.end;
-                            let _ = channels.tx.send(Event::PullProgress(id, span.clone()));
-                            let _ = channels.tx_push.send((id, span, chunk)).await;
+                            let _ = tx.send(Event::PullProgress(id, span.clone()));
+                            let _ = tx_push.send((id, span, chunk)).await;
                             if start >= task.end() {
                                 continue 'task;
                             }
@@ -275,7 +250,7 @@ where
                         Ok(None) => continue 'task,
                         Err((e, retry_gap)) => {
                             let is_irrecoverable = e.is_irrecoverable();
-                            let _ = channels.tx.send(Event::PullError(id, e));
+                            let _ = tx.send(Event::PullError(id, e));
                             tokio::select! {
                                 () = worker_token.cancelled() => break 'task,
                                 () = tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)) => {}
@@ -287,7 +262,7 @@ where
                     }
                 }
             }
-            let _ = channels.tx.send(Event::Finished(id));
+            let _ = tx.send(Event::Finished(id));
         });
         TokioHandle { id, token }
     }
@@ -355,8 +330,6 @@ mod tests {
         assert_eq!(push_progress, download_chunks);
         assert!(pull_ids.iter().any(|x| *x));
 
-        #[allow(clippy::unwrap_used)]
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -382,15 +355,14 @@ mod tests {
             },
         );
 
-        // Abort immediately. The push driver must observe the shared flag, break
-        // out WITHOUT flushing, and let `join()` return promptly.
+        // Abort immediately. The push driver must observe the shared flag and break
+        // out WITHOUT flushing, letting the event loop end promptly.
         result.abort();
         assert!(result.is_aborted());
 
-        let joined = tokio::time::timeout(Duration::from_secs(10), result.join())
+        tokio::time::timeout(Duration::from_secs(10), drain(&result))
             .await
-            .expect("join() hung after abort");
-        assert!(joined.is_ok());
+            .expect("event loop hung after abort");
 
         let written = receive.lock().len();
         assert!(
@@ -494,10 +466,9 @@ mod tests {
         }
         assert!(aborted, "expected a Pushing event before aborting");
 
-        let joined = timeout(Duration::from_secs(10), result.join())
+        timeout(Duration::from_secs(10), drain(&result))
             .await
-            .expect("join() hung after abort");
-        assert!(joined.is_ok());
+            .expect("event loop hung after abort");
 
         // Abort stops the download well before completion, so the inner sink
         // must hold strictly less than the full source (some out-of-order runs
@@ -748,7 +719,6 @@ mod tests {
             },
         );
         drain(&result).await;
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -776,7 +746,6 @@ mod tests {
             },
         );
         drain(&result).await;
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -806,7 +775,6 @@ mod tests {
             },
         );
         drain(&result).await;
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -835,7 +803,6 @@ mod tests {
             },
         );
         drain(&result).await;
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -866,7 +833,6 @@ mod tests {
             },
         );
         drain(&result).await;
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -898,7 +864,6 @@ mod tests {
             },
         );
         drain(&result).await;
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
@@ -1032,15 +997,14 @@ mod tests {
             },
         );
         drain(&result).await;
-        result.join().await.unwrap();
         assert_eq!(&**receive.lock(), mock_data);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_concurrent_download_empty_chunks() {
         // Degenerate input: an empty `download_chunks` list must not hang or panic.
-        // With no work queued, `set_threads` spawns zero workers and `join()`
-        // returns once the push worker sees the closed channel.
+        // With no work queued, `set_threads` spawns zero workers and the event loop
+        // ends once the push worker sees the closed channel.
         let mock_data = build_mock_data(3 * 1024);
         let puller = MockPuller::new(&mock_data);
         let pusher = MemPusher::with_capacity(mock_data.len());
@@ -1058,10 +1022,9 @@ mod tests {
                 max_speculative: 3,
             },
         );
-        let joined = timeout(Duration::from_secs(10), result.join())
+        timeout(Duration::from_secs(10), drain(&result))
             .await
-            .expect("join() hung on empty chunks");
-        assert!(joined.is_ok());
+            .expect("event loop hung on empty chunks");
         assert_eq!(receive.lock().len(), 0);
     }
 }

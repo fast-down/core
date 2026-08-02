@@ -199,7 +199,7 @@ impl PartialConfig {
     /// it normalized and de-duplicated. This is the in-memory counterpart of
     /// [`DownloadState::merge_progress`](crate::DownloadState::merge_progress):
     /// callers use it to record progress before handing the config to
-    /// [`DownloadHandle::resume`](crate::DownloadHandle::resume).
+    /// [`resume`](crate::resume).
     pub fn merge_progress(&mut self, progress: ProgressEntry) {
         self.downloaded_chunk
             .get_or_insert_default()

@@ -1,6 +1,6 @@
 use crate::{PartialConfig, StateError};
 use fast_down::{ProgressEntry, UrlInfo, WorkerId, reqwest::ReqwestResponseError};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 /// Events emitted by a download run, consumed through the crossfire channel
 /// returned by [`crate::create_channel`].
@@ -38,11 +38,6 @@ pub enum Event {
     BuildClientError(reqwest::Error),
     /// Creating the output sink — opening the `.part` file — failed.
     BuildPusherError(std::io::Error),
-    /// A spawned download worker task panicked or was cancelled.
-    ///
-    /// The engine joins its worker tasks; if a join handle reports an error it is
-    /// surfaced here rather than silently dropping the panic.
-    JoinError(Arc<tokio::task::JoinError>),
     /// The final rename of the `.part` file to its destination failed.
     ///
     /// The success counterpart is [`Event::Renamed`]. The bytes are already on
