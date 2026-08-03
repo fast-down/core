@@ -37,7 +37,7 @@ impl HttpClient for Client {
         if let Some(range) = range {
             req = req.header(
                 header::RANGE,
-                format!("bytes={}-{}", range.start, range.end - 1),
+                format!("bytes={}-{}", range.start, range.end.saturating_sub(1)),
             );
         }
         req
@@ -219,7 +219,7 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
             if let Some(ref range) = self.range {
                 req = req.header(
                     header::RANGE,
-                    format!("bytes={}-{}", range.start, range.end - 1),
+                    format!("bytes={}-{}", range.start, range.end.saturating_sub(1)),
                 );
             }
             if let Some(ref referer) = self.next_referer {
@@ -1026,5 +1026,93 @@ mod tests {
             .await
             .expect("ranged request must succeed");
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Verifies the `Range` header survives a manual redirect: the request is
+    /// re-issued to the redirect target with the same byte range, so a ranged
+    /// download still works when the URL redirects.
+    #[tokio::test]
+    async fn test_smart_redirect_preserves_range_across_redirect() {
+        let mut server = mockito::Server::new_async().await;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let _mock_src = server
+            .mock("GET", "/src")
+            .with_status(302)
+            .with_header("Location", "/dst")
+            .create_async()
+            .await;
+        // The target only matches if the Range header survives the redirect hop.
+        let _mock_dst = server
+            .mock("GET", "/dst")
+            .match_header("Range", "bytes=0-2")
+            .with_status(206)
+            .with_header("Content-Length", "3")
+            .with_body("dat")
+            .create_async()
+            .await;
+        let redirect_client = SmartRedirectClient::new(client, None, None, None, None, None, 10);
+        let url = Url::parse(&format!("{}/src", server.url())).unwrap();
+        // Range 0..3 -> "bytes=0-2"; must be re-sent to /dst after the hop.
+        let resp = redirect_client
+            .get(url, Some(0..3))
+            .send()
+            .await
+            .expect("ranged request across redirect must succeed");
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    }
+}
+
+#[cfg(test)]
+mod range_underflow_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::http::HttpClient;
+
+    #[test]
+    fn client_get_empty_range_does_not_underflow() {
+        // Regression for hypothesis D: `range.end.saturating_sub(1)` must not
+        // underflow u64 when `range.end == 0`. Building the Range header for an
+        // empty range (`0..0`) must construct a request without panicking.
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let _ = HttpClient::get(
+            &client,
+            Url::parse("http://example.com/x").unwrap(),
+            Some(0..0u64),
+        );
+    }
+
+    #[tokio::test]
+    async fn smart_redirect_get_empty_range_does_not_underflow() {
+        // Same fix in the production path (`ManualRedirectRequestBuilder::send`).
+        // A local mock server avoids a real network call while still exercising
+        // the Range-header construction inside `send`.
+        let mut server = mockito::Server::new_async().await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let _mock = server
+            .mock("GET", "/x")
+            .with_status(200)
+            .with_header("Content-Length", "1")
+            .with_body("a")
+            .create_async()
+            .await;
+        let rc = SmartRedirectClient::new(client, None, None, None, None, None, 10);
+        let resp = rc
+            .get(
+                Url::parse(&format!("{}/x", server.url())).unwrap(),
+                Some(0..0u64),
+            )
+            .send()
+            .await;
+        // The mock server is no longer needed once the response is received.
+        drop(server);
+        assert!(resp.is_ok(), "empty-range request must not panic");
     }
 }
