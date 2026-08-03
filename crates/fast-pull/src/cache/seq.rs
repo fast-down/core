@@ -288,6 +288,25 @@ mod tests {
     }
 
     #[test]
+    fn evict_continues_across_gaps_while_above_target() {
+        // The "across gaps if need be" guarantee: while `cache_size` is still above
+        // `low_watermark`, eviction must not stop at a gap — it keeps draining so memory
+        // stays bounded even when an earlier offset is still missing. Here every chunk
+        // has a gap before it, yet all three are flushed because `cache_size` stays
+        // above `low_watermark` until the very last one.
+        let sink = RecordingSink::new();
+        let mut p = CacheSeqPusher::new(sink.clone(), 100, 30);
+        p.push(&(0..40), bb(&"A".repeat(40))).unwrap();
+        p.push(&(200..240), bb(&"B".repeat(40))).unwrap();
+        p.push(&(400..440), bb(&"C".repeat(40))).unwrap();
+        let pushes = sink.pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 3);
+        assert_eq!(pushes[0].0, 0..40);
+        assert_eq!(pushes[1].0, 200..240);
+        assert_eq!(pushes[2].0, 400..440);
+    }
+
+    #[test]
     fn failed_push_eviction_retains_callers_chunk_for_retry() {
         // When a push-triggered eviction fails, the caller's chunk is held internally
         // (empty remainder returned) and must still be written by a later flush.
