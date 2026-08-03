@@ -138,7 +138,8 @@ pub struct ProgressSample {
     /// Total bytes written so far (the sum of all `progress` range lengths).
     pub downloaded: u64,
     /// Download percentage as a `0.0..=100.0` value (`downloaded * 100 /
-    /// total`); `100.0` when `total == 0` (an empty file is already complete).
+    /// total`); `0.0` when `total == 0` (an empty file has nothing to
+    /// download).
     pub percent: f64,
     /// Remote file size in bytes, so the consumer can derive a percentage
     /// without tracking it separately.

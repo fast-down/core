@@ -91,15 +91,18 @@ async fn main() -> anyhow::Result<()> {
 
 ### Resuming an interrupted download
 
-`resume` targets the existing `.part` file. If the download cannot be continued
-(no `.fd` state, no range support, or the remote file changed) it emits
-`Event::ResumeError` and **does not** silently restart — unlike `download`,
-which auto-resumes when it can and otherwise falls back to a fresh download.
+`resume` targets the existing `.part` file. The `url` argument is optional: pass
+`None` to re-use the initial URL already recorded in the `.fd` state file, so you
+can resume purely from the `.part` path. If the download cannot be continued (no
+`.fd` state, no range support, or the remote file changed) it emits
+`Event::ResumeError` and **does not** silently restart — unlike `download`, which
+auto-resumes when it can and otherwise falls back to a fresh download. With
+`url = None` and no resolvable URL available it reports `StateError::NoUrl`.
 
 ```rust,ignore
 resume(
     "./downloads/large-file.bin.part", // the .part file from a previous run
-    url,
+    Some(url),                          // pass None to reuse the URL stored in the .fd
     config,
     tx,
     token,
@@ -114,15 +117,15 @@ token.cancel(); // stops fetching, keeps .part / .fd so you can resume later
 
 ## API overview
 
-| Item                                                                                                                        | Purpose                                                                        |
-| --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| [`download`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.download.html) | Start a download; auto-resume when a valid `.fd` + `.part` exist, else fresh. Observe completion by draining the `Rx` from `create_channel` until it disconnects. |
-| [`resume`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.resume.html)     | Resume a specific `.part` file; hard-error (`Event::ResumeError`) if it can't. Completion is observed the same way, by draining `Rx`. |
-| [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html)                               | Create the `(Tx, Rx)` event channel.                                           |
-| [`create_cancellation_token`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_cancellation_token.html)         | Create a `CancellationToken` for cooperative cancellation.                     |
-| [`Event`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.Event.html)                                               | The event enum delivered over the channel.                                     |
-| [`PartialConfig`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.PartialConfig.html)                             | Layered, optional configuration for a download.                                |
-| [`StateError`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StateError.html)                                     | Errors surfaced via `Event::ResumeError`.                                      |
+| Item                                                                                                                | Purpose                                                                                                                                                           |
+| ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`download`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.download.html)                                   | Start a download; auto-resume when a valid `.fd` + `.part` exist, else fresh. Observe completion by draining the `Rx` from `create_channel` until it disconnects. |
+| [`resume`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.resume.html)                                       | Resume a specific `.part` file; hard-error (`Event::ResumeError`) if it can't. Completion is observed the same way, by draining `Rx`.                             |
+| [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html)                       | Create the `(Tx, Rx)` event channel.                                                                                                                              |
+| [`create_cancellation_token`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_cancellation_token.html) | Create a `CancellationToken` for cooperative cancellation.                                                                                                        |
+| [`Event`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.Event.html)                                       | The event enum delivered over the channel.                                                                                                                        |
+| [`PartialConfig`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.PartialConfig.html)                     | Layered, optional configuration for a download.                                                                                                                   |
+| [`StateError`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StateError.html)                             | Errors surfaced via `Event::ResumeError`.                                                                                                                         |
 
 ## How resume works
 
