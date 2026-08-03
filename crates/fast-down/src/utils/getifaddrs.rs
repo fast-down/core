@@ -118,6 +118,52 @@ mod tests {
     }
 
     #[test]
+    fn is_link_local_v6_boundaries() {
+        // fe80::/10 spans fe80::..febf::; the mask is (seg0 & 0xffc0) == 0xfe80.
+        // Lower bound inclusive.
+        assert!(is_link_local(&IpAddr::V6(Ipv6Addr::new(
+            0xfe80, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        // Upper bound inclusive (febf is still inside /10).
+        assert!(is_link_local(&IpAddr::V6(Ipv6Addr::new(
+            0xfebf, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        // fec0 (old site-local) is just above the /10 -> not link-local.
+        assert!(!is_link_local(&IpAddr::V6(Ipv6Addr::new(
+            0xfec0, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        // fe7f is just below the /10 -> not link-local.
+        assert!(!is_link_local(&IpAddr::V6(Ipv6Addr::new(
+            0xfe7f, 0, 0, 0, 0, 0, 0, 1
+        ))));
+    }
+
+    #[test]
+    fn is_link_local_v4_boundaries() {
+        // 169.254.0.0/16 bounds.
+        assert!(is_link_local(&IpAddr::V4(Ipv4Addr::new(169, 254, 0, 0))));
+        assert!(is_link_local(&IpAddr::V4(Ipv4Addr::new(
+            169, 254, 255, 255
+        ))));
+        assert!(!is_link_local(&IpAddr::V4(Ipv4Addr::new(
+            169, 253, 255, 255
+        ))));
+        assert!(!is_link_local(&IpAddr::V4(Ipv4Addr::new(169, 255, 0, 0))));
+    }
+
+    #[test]
+    fn get_available_local_ips_excludes_loopback() {
+        let ips = get_available_local_ips().expect("get_available_local_ips must succeed");
+        for iface in &ips {
+            assert!(
+                !iface.ip.is_loopback(),
+                "returned ip {} must not be loopback (filtered by the LOOPBACK flag)",
+                iface.ip
+            );
+        }
+    }
+
+    #[test]
     fn get_available_local_ips_satisfies_invariants() {
         let ips = get_available_local_ips().expect("get_available_local_ips must succeed");
         let virtual_keywords = [

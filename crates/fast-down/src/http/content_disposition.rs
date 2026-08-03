@@ -272,4 +272,60 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn filename_star_raw_non_ascii_single_char_truncates_to_garbage() {
+        // `percent_decode` pushes `c as u8` for non-'%' chars. U+6D4B '测'
+        // truncates to 0x4B ('K'), which is valid ASCII, so the result is the
+        // garbage "K" rather than a decode failure. RFC 5987 requires
+        // percent-encoding, so this input is invalid; the current parser does
+        // not reject it gracefully.
+        let s = "attachment; filename*=UTF-8''测";
+        assert_eq!(ContentDisposition::parse(s).filename.as_deref(), Some("K"));
+    }
+
+    #[test]
+    fn filename_star_raw_non_ascii_invalid_utf8_is_dropped() {
+        // '测' -> 0x4B, '试' -> 0xD5; 0xD5 is not a valid UTF-8 leading byte for
+        // the bytes that follow, so `from_utf8` fails and `filename*` is dropped.
+        let s = "attachment; filename*=UTF-8''测试";
+        assert_eq!(ContentDisposition::parse(s).filename, None);
+    }
+
+    #[test]
+    fn filename_star_empty_value_overrides_filename_with_empty() {
+        // `filename*=UTF-8''` (empty encoded text) parses to Some(""), and
+        // `filename_star.or(filename)` prefers it over a valid `filename`,
+        // yielding an empty filename. (`prefetch::get_filename` filters empty
+        // names, so the higher layer is unaffected.)
+        let s = r#"attachment; filename="fallback.txt"; filename*=UTF-8''"#;
+        assert_eq!(ContentDisposition::parse(s).filename.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn test_filename_star_single_decode_is_correct() {
+        // The parser percent-decodes `filename*` exactly once: `%25100`
+        // (the server-intended literal "%100") decodes to "%100". The
+        // double-decode bug lives in `prefetch::get_filename`, not here.
+        let s = "attachment; filename*=UTF-8''%25100";
+        assert_eq!(
+            ContentDisposition::parse(s).filename,
+            Some("%100".to_string())
+        );
+    }
+
+    #[test]
+    fn test_filename_star_literal_multibyte_truncated() {
+        // Known limitation (hypothesis B): `percent_decode` pushes non-'%'
+        // chars with `c as u8`, truncating multibyte UTF-8. A malformed
+        // `filename*` mixing a percent-encoded byte with a literal multibyte
+        // char ("%41" + "é") yields invalid UTF-8 and the value is dropped
+        // (None), falling back to the URL path/host name. RFC 5987 requires
+        // `filename*` to be fully percent-encoded, so literal non-ASCII is
+        // malformed input; dropping it is the defensible behavior. Kept as a
+        // regression guard: a future fix that decodes correctly must update
+        // this assertion.
+        let s = "attachment; filename*=UTF-8''%41é";
+        assert_eq!(ContentDisposition::parse(s).filename, None);
+    }
 }

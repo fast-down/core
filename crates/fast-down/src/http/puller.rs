@@ -198,6 +198,7 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use std::borrow::Cow;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
     use futures::TryStreamExt;
@@ -519,5 +520,88 @@ mod tests {
             Ok(Ok(Some(bytes))) => assert_eq!(bytes, Bytes::from_static(b"success")),
             e => panic!("expected the reused response to yield data, got {e:?}"),
         }
+    }
+
+    // Resume-range test: verifies that after a mid-stream chunk error the retry
+    // request starts from the advanced offset, not the original range.start.
+    static RESUME_RANGE_START: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Clone, Debug)]
+    struct ResumeClient;
+    impl HttpClient for ResumeClient {
+        type RequestBuilder = ResumeRequestBuilder;
+        fn get(&self, _url: Url, range: Option<ProgressEntry>) -> Self::RequestBuilder {
+            if let Some(r) = range {
+                RESUME_RANGE_START.store(r.start, Ordering::SeqCst);
+            }
+            ResumeRequestBuilder
+        }
+    }
+    struct ResumeRequestBuilder;
+    impl HttpRequestBuilder for ResumeRequestBuilder {
+        type Response = ResumeResponse;
+        type RequestError = MockError;
+        fn send(
+            self,
+        ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send
+        {
+            std::future::ready(Ok(ResumeResponse::new()))
+        }
+    }
+    #[derive(Debug)]
+    struct ResumeResponse {
+        url: Url,
+        calls: u32,
+    }
+    impl ResumeResponse {
+        fn new() -> Self {
+            Self {
+                url: Url::parse("http://mock-url").unwrap(),
+                calls: 0,
+            }
+        }
+    }
+    impl HttpResponse for ResumeResponse {
+        type Headers = MockHeaders;
+        type ChunkError = MockError;
+        fn headers(&self) -> &Self::Headers {
+            &MockHeaders
+        }
+        fn url(&self) -> &Url {
+            &self.url
+        }
+        fn chunk(
+            &mut self,
+        ) -> impl Future<Output = Result<Option<Bytes>, Self::ChunkError>> + Send {
+            self.calls += 1;
+            let first = self.calls == 1;
+            let fut = async move {
+                if first {
+                    Ok(Some(Bytes::from_static(b"success")))
+                } else {
+                    Err(MockError)
+                }
+            };
+            Box::pin(fut) as Pin<Box<dyn Future<Output = Result<Option<Bytes>, MockError>> + Send>>
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resume_range_advances_after_chunk_error() {
+        let url = Url::parse("http://localhost").unwrap();
+        let file_id = FileId::new(None, None);
+        let mut puller = HttpPuller::new(Arc::new(url), ResumeClient, None, file_id);
+        let range = 0..100;
+        let mut stream = Puller::pull(&mut puller, Some(&range)).await.unwrap();
+        // First chunk succeeds ("success" = 7 bytes), advancing range.start to 7.
+        let first = stream.try_next().await;
+        assert!(matches!(first, Ok(Some(_))));
+        // Next poll: chunk error is returned, state resets to None.
+        let second = stream.try_next().await;
+        assert!(matches!(second, Err((HttpError::Chunk(_, _), None))));
+        // Third poll: state None -> retry request issued with advanced start == 7.
+        let third = stream.try_next().await;
+        assert!(matches!(third, Ok(Some(_))));
+        assert_eq!(RESUME_RANGE_START.load(Ordering::SeqCst), 7);
     }
 }

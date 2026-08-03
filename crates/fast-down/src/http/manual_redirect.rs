@@ -303,4 +303,62 @@ mod tests {
             Some("https://a.com/p".to_string())
         );
     }
+
+    #[test]
+    fn referer_preserves_query_strips_fragment() {
+        // `referer_url` keeps the query string but drops the fragment.
+        let prev = u("https://a.com/p?x=1&y=2#section");
+        let next = u("https://a.com/q");
+        assert_eq!(
+            compute_referer(Some(ReferrerPolicy::UnsafeUrl), &prev, &next),
+            Some("https://a.com/p?x=1&y=2".to_string())
+        );
+    }
+
+    #[test]
+    fn referer_normalizes_default_port() {
+        // The `url` crate omits scheme-default ports during serialization, so a
+        // referer built from an explicit :443 carries no port.
+        let prev = u("https://a.com:443/p");
+        let next = u("https://a.com/q");
+        assert_eq!(
+            compute_referer(Some(ReferrerPolicy::UnsafeUrl), &prev, &next),
+            Some("https://a.com/p".to_string())
+        );
+    }
+
+    #[test]
+    fn upgrade_is_not_downgrade() {
+        // http -> https is an upgrade, so the default policy keeps the referer.
+        let prev = u("http://a.com/p");
+        let next = u("https://b.com/q");
+        assert_eq!(
+            compute_referer(None, &prev, &next),
+            Some("http://a.com/p".to_string())
+        );
+    }
+
+    #[test]
+    fn different_ports_are_cross_origin() {
+        // Same host but a different (non-default) port is a different origin,
+        // so a same-origin policy yields no referer.
+        let prev = u("https://a.com:8443/p");
+        let next = u("https://a.com/q");
+        assert_eq!(
+            compute_referer(Some(ReferrerPolicy::SameOrigin), &prev, &next),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_trims_whitespace_around_tokens() {
+        assert_eq!(
+            ReferrerPolicy::parse("  no-referrer  "),
+            Some(ReferrerPolicy::NoReferrer)
+        );
+        assert_eq!(
+            ReferrerPolicy::parse("origin ,no-referrer"),
+            Some(ReferrerPolicy::NoReferrer)
+        );
+    }
 }

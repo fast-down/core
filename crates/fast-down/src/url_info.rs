@@ -119,4 +119,53 @@ mod tests {
             assert!(!name.contains(['/', ':', '*', '?']));
         }
     }
+
+    /// Verifies that truncating a long multi-byte (UTF-8) filename never splits
+    /// a character: `path_helper::sanitize_filename` truncates by UTF-16 units on
+    /// Windows and by bytes with a char-boundary fallback on Unix, so the result
+    /// stays valid UTF-8, keeps the extension, and contains no replacement char.
+    #[test]
+    #[cfg(feature = "sanitize-filename")]
+    fn filename_long_utf8_is_not_split() {
+        let info = UrlInfo {
+            size: 0,
+            raw_name: format!("{}.mp4", "中文文件名".repeat(100)),
+            supports_range: false,
+            fast_download: false,
+            final_url: Url::parse("http://example.com/x").unwrap(),
+            file_id: FileId::default(),
+            content_type: None,
+        };
+        let name = info.filename();
+        assert!(
+            std::path::Path::new(&name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4")),
+            "extension lost: {name}"
+        );
+        assert!(!name.is_empty());
+        assert!(
+            !name.contains('\u{fffd}'),
+            "replacement char indicates a split code point: {name}"
+        );
+    }
+
+    /// Documents the current behavior for an empty `raw_name`: `filename()`
+    /// returns an empty string. In practice `prefetch::get_filename` always falls
+    /// back to the URL host/string so `raw_name` is non-empty, but `filename()`
+    /// itself performs no non-empty guarantee.
+    #[test]
+    #[cfg(feature = "sanitize-filename")]
+    fn filename_empty_raw_name_yields_empty() {
+        let info = UrlInfo {
+            size: 0,
+            raw_name: String::new(),
+            supports_range: false,
+            fast_download: false,
+            final_url: Url::parse("http://example.com/x").unwrap(),
+            file_id: FileId::default(),
+            content_type: None,
+        };
+        assert_eq!(info.filename(), "");
+    }
 }

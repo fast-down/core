@@ -316,4 +316,49 @@ mod tests {
         let stream = FastDownPuller::pull(&mut puller, None).await;
         assert!(stream.is_ok());
     }
+
+    #[test]
+    fn clone_swallows_build_client_error() {
+        // Hypothesis C: `FastDownPuller::clone` rebuilds the client via
+        // `build_client`, but on failure it silently falls back to
+        // `self.inner.clone()` (the `map_or_else` Err branch). Because
+        // `Clone::clone` cannot return a `Result`, the build error is swallowed
+        // and the clone keeps the stale client instead of surfacing the failure.
+        let mut puller = FastDownPuller::new(make_options(
+            Url::parse("http://example.com/a.bin").unwrap(),
+        ))
+        .expect("new must succeed");
+        // Inject an invalid custom proxy that makes `build_client` fail on clone.
+        puller.proxy = Proxy::Custom(Arc::from("not a valid proxy url"));
+        // Clone must still succeed (the error is swallowed via `map_or_else`,
+        // not propagated) and reproduce the proxy config.
+        let cloned = puller.clone();
+        assert_eq!(
+            cloned.proxy, puller.proxy,
+            "clone must reproduce the proxy and not panic on a bad one"
+        );
+    }
+
+    #[test]
+    fn turn_counter_starts_at_one_offsetting_first_ip_index() {
+        // `turn` is initialized to 1, so the first `fetch_add` in `new` returns 1
+        // and the first instance picks IP index `1 % len` rather than `0`. The
+        // rotation is still complete (every IP is eventually reached); only the
+        // starting point is offset by one. This locks in the counter behavior.
+        let ips: Vec<std::net::IpAddr> = vec![
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.2".parse().unwrap(),
+            "127.0.0.3".parse().unwrap(),
+        ];
+        let mut opts = make_options(Url::parse("http://example.com/a.bin").unwrap());
+        opts.available_ips = Arc::from(ips);
+        let puller = FastDownPuller::new(opts).expect("new with ips must succeed");
+        // new() consumed the initial value 1 and advanced the counter to 2.
+        assert_eq!(puller.turn.load(std::sync::atomic::Ordering::Acquire), 2);
+        let cloned = puller.clone();
+        // clone() consumed 2 and advanced the counter to 3. The counter is a
+        // shared `Arc`, so both handles observe the same advanced value.
+        assert_eq!(cloned.turn.load(std::sync::atomic::Ordering::Acquire), 3);
+        assert_eq!(puller.turn.load(std::sync::atomic::Ordering::Acquire), 3);
+    }
 }
