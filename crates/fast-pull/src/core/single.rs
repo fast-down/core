@@ -109,6 +109,9 @@ pub fn download_single<R: Puller, W: Pusher>(
             loop {
                 match stream.try_next().await {
                     Ok(Some(chunk)) => {
+                        if chunk.is_empty() {
+                            continue;
+                        }
                         let len = chunk.len() as u64;
                         let span = downloaded..(downloaded + len);
                         let _ = tx.send(Event::PullProgress(ID, span.clone()));
