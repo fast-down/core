@@ -208,9 +208,10 @@ where
     ///
     /// A session ends when its last worker exits, and it cannot be restarted:
     /// growing afterwards spawns nothing, because the workers' shared channels
-    /// are closed at that point. Shrinking to `0` is therefore terminal — it
-    /// removes the last worker and finalizes the session with its remaining
-    /// ranges unfinished.
+    /// are closed at that point. Shrinking is clamped to a minimum of one worker
+    /// by the scheduler, so `set_threads(0)` keeps a single worker alive rather
+    /// than ending the session. The session terminates only when that last
+    /// (clamped) worker exits on its own.
     ///
     /// This never touches the [`abort`](Self::abort) token: abort is terminal and
     /// cannot be undone by resizing, so [`is_aborted`](Self::is_aborted) stays

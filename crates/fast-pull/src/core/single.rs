@@ -29,7 +29,10 @@ pub struct DownloadOptions {
 /// `event_chain` is therefore the way to await completion. A panic in the
 /// blocking push driver also drops the sender and ends the session, but is
 /// otherwise swallowed. Normal cancellation (via
-/// `abort()`) is ignored.
+/// `abort()`) is observed: the pull task is force-aborted and the push driver
+/// returns without flushing, so any buffered bytes are discarded and the file
+/// is left incomplete. Completion is still detected by draining `event_chain`,
+/// because the senders are dropped when both sides exit.
 #[allow(clippy::too_many_lines)]
 pub fn download_single<R: Puller, W: Pusher>(
     mut puller: R,
