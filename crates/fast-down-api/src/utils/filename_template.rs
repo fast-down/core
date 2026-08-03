@@ -92,4 +92,23 @@ mod tests {
         let out = parse_filename_template("{file_stem}|{file_ext}".to_string(), &url, "README");
         assert_eq!(out, "README|");
     }
+
+    #[test]
+    fn parent_path_is_dot_for_cannot_be_a_base_url() {
+        // `mailto:` URLs are cannot-be-a-base, so `path_segments()` is `None` and
+        // the parent path collapses to "." (filename_template.rs lines 10-25).
+        let url = Url::parse("mailto:foo@x").unwrap();
+        let out = parse_filename_template("{parent_path}/{file_name}".to_string(), &url, "foo.txt");
+        assert_eq!(out, "./foo.txt");
+    }
+
+    #[test]
+    fn chrono_format_expands_into_template() {
+        // A leading `%Y` is a chrono format spec expanded by `Local::now().format`
+        // before the `{...}` placeholders are substituted (filename_template.rs line 7).
+        let url = Url::parse("https://example.com/file.txt").unwrap();
+        let out = parse_filename_template("%Y/file.txt".to_string(), &url, "file.txt");
+        let year = chrono::Local::now().format("%Y").to_string();
+        assert_eq!(out, format!("{year}/file.txt"));
+    }
 }

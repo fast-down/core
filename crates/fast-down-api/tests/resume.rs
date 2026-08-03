@@ -28,9 +28,11 @@ use fast_down_api::{
 use futures::StreamExt;
 use futures::stream::unfold;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, StreamBody};
+use http_body_util::{BodyExt, Empty, StreamBody};
 use hyper::body::{Frame, Incoming};
-use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LAST_MODIFIED, RANGE};
+use hyper::header::{
+    ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LAST_MODIFIED, LOCATION, RANGE,
+};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
@@ -106,6 +108,17 @@ async fn handle(
     server: TestServer,
     req: Request<Incoming>,
 ) -> Result<Response<RespBody>, Infallible> {
+    // A redirect endpoint modelling the signed/CDN pattern: the caller's URL
+    // 302-redirects to a transient final URL. Used by the rotated-URL resume test
+    // to prove the `.fd` stores the initial URL and the download targets the final
+    // one.
+    if req.uri().path() == "/redirect" {
+        return Ok(Response::builder()
+            .status(StatusCode::FOUND)
+            .header(LOCATION, "/real")
+            .body(BoxBody::new(Empty::<Bytes>::new()))
+            .expect("build 302 response"));
+    }
     let data = server.data.read().await;
     let total = data.body.len();
     let supports_range = data.supports_range;
@@ -367,7 +380,7 @@ async fn test_resume_success() {
     let resume_cancel = create_cancellation_token();
     resume(
         part.clone(),
-        Url::parse(&url).expect("valid url"),
+        Some(Url::parse(&url).expect("valid url")),
         cfg,
         tx,
         resume_cancel,
@@ -465,7 +478,7 @@ async fn test_file_changed_resume_reports_error() {
     let resume_cancel = create_cancellation_token();
     resume(
         part.clone(),
-        Url::parse(&url).expect("valid url"),
+        Some(Url::parse(&url).expect("valid url")),
         cfg,
         tx,
         resume_cancel,
@@ -515,7 +528,7 @@ async fn test_resume_no_state_file() {
     let cancel = create_cancellation_token();
     resume(
         part.clone(),
-        Url::parse(&url).expect("valid url"),
+        Some(Url::parse(&url).expect("valid url")),
         cfg,
         tx,
         cancel,
@@ -557,7 +570,7 @@ async fn test_resume_not_resumable() {
     let cancel = create_cancellation_token();
     resume(
         part.clone(),
-        Url::parse(&url).expect("valid url"),
+        Some(Url::parse(&url).expect("valid url")),
         cfg,
         tx,
         cancel,
@@ -613,7 +626,7 @@ async fn test_cancel_keeps_part_and_fd_then_resume() {
     let resume_cancel = create_cancellation_token();
     resume(
         part.clone(),
-        Url::parse(&url).expect("valid url"),
+        Some(Url::parse(&url).expect("valid url")),
         cfg,
         tx,
         resume_cancel,
@@ -695,7 +708,7 @@ async fn test_concurrent_resume_with_fragmented_progress() {
     let resume_cancel = create_cancellation_token();
     resume(
         part.clone(),
-        Url::parse(&url).expect("valid url"),
+        Some(Url::parse(&url).expect("valid url")),
         make_config_with(&dir, 8, 64 * 1024),
         tx,
         resume_cancel,
@@ -713,6 +726,145 @@ async fn test_concurrent_resume_with_fragmented_progress() {
         got,
         original_bytes(),
         "resuming fragmented progress must reassemble the file exactly"
+    );
+}
+
+/// F1' (rotated/expired URL): the `.fd` must persist the **initial** URL, while
+/// the download part targets the freshly-resolved `info.final_url`. We drive the
+/// whole flow through a URL that 302-redirects (the initial URL) to the real file
+/// (the final URL) — the realistic signed/CDN pattern where the redirect target
+/// is a transient link that expires. After a mid-resume cancel we assert the
+/// persisted `.fd` still records the *initial* URL, not the final URL; a second
+/// resume then completes the file, proving the range requests were issued against
+/// `info.final_url` (not the stored initial URL, which would need a redirect per
+/// range request).
+#[tokio::test]
+async fn test_resume_with_rotated_url_succeeds() {
+    let dir = temp_dir("resume_rotated_url");
+    let (_server, base) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    // Initial URL 302-redirects to the real (final) URL.
+    let initial_url = format!("{base}/redirect");
+    let final_url = format!("{base}/real");
+
+    // Seed a real, interrupted concurrent download against the *initial* URL.
+    // `DownloadState::new` records `state.url = initial_url`, so the `.fd` holds
+    // the durable initial URL, never the resolved final URL.
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel_with(
+        &initial_url,
+        make_config(&dir),
+        cancel,
+        (THROTTLE_CHUNK * 6) as u64,
+    )
+    .await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(
+        part.exists() && fd.exists(),
+        "cancel must leave .part and .fd"
+    );
+
+    // Precondition: the seed `.fd` records the INITIAL url, not the final url.
+    let fd_text = std::fs::read_to_string(&fd).expect("read .fd");
+    let seed_url_line = fd_text
+        .lines()
+        .find(|l| l.trim_start().starts_with("url = "))
+        .expect("precondition: .fd must record a url");
+    assert!(
+        seed_url_line.contains("/redirect"),
+        "seed .fd must store the initial URL, got: {seed_url_line}"
+    );
+    assert!(
+        !seed_url_line.contains(final_url.as_str()),
+        "seed .fd must NOT contain the final URL, got: {seed_url_line}"
+    );
+
+    // Resume, but cancel right after it starts so the `.fd` remains on disk. The
+    // initial `state.store()` inside `overwrite` already persisted `url =
+    // initial_url` (refresh_identity does not touch the URL), so the file reflects
+    // the design invariant.
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let resume_cancel = create_cancellation_token();
+    resume(
+        part.clone(),
+        Some(Url::parse(&initial_url).expect("valid url")),
+        cfg,
+        tx,
+        resume_cancel.clone(),
+    );
+    let mut started = false;
+    while let Ok(e) = rx.recv().await {
+        if matches!(e, Event::Start { .. }) {
+            started = true;
+            resume_cancel.cancel();
+        }
+        if matches!(e, Event::Renamed(_) | Event::ResumeError(_)) {
+            break;
+        }
+    }
+    assert!(started, "resume must emit Event::Start");
+    assert!(
+        part.exists() && fd.exists(),
+        ".part/.fd must survive a mid-resume cancel"
+    );
+
+    // The persisted `.fd` must still carry the INITIAL URL — proving the download
+    // part uses `info.final_url` and the `.fd` stores the durable initial URL.
+    let fd_text = std::fs::read_to_string(&fd).expect("read .fd after cancel");
+    let resume_url_line = fd_text
+        .lines()
+        .find(|l| l.trim_start().starts_with("url = "))
+        .expect("post-resume .fd must record a url");
+    assert!(
+        resume_url_line.contains("/redirect"),
+        "after resume the .fd must STILL record the initial URL, got: {resume_url_line}"
+    );
+    assert!(
+        !resume_url_line.contains(final_url.as_str()),
+        "after resume the .fd must NOT have been rewritten to the final URL, got: {resume_url_line}"
+    );
+
+    // A second resume completes the file using `info.final_url` for the remaining
+    // ranges — proving the download part targeted the final URL (the initial URL
+    // only redirects and would otherwise cost a redirect round-trip per range).
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let resume_cancel = create_cancellation_token();
+    resume(
+        part.clone(),
+        Some(Url::parse(&initial_url).expect("valid url")),
+        cfg,
+        tx,
+        resume_cancel,
+    );
+    let events = drain(rx).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "resume() must complete with Renamed against a rotated URL"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::ResumeError(_))),
+        "a rotated URL must NOT be a resume error (content identity still matches)"
+    );
+    let renamed = events
+        .iter()
+        .find_map(|e| match e {
+            Event::Renamed(p) => Some(p.clone()),
+            _ => None,
+        })
+        .expect("resume() must complete with Renamed");
+    let got = tokio::fs::read(&renamed)
+        .await
+        .expect("final file should exist after resume");
+    assert_eq!(
+        got,
+        original_bytes(),
+        "resuming against a rotated URL must reassemble the file exactly"
     );
 }
 
@@ -737,7 +889,7 @@ async fn test_resume_missing_tmp_path_falls_back_to_download() {
     let cancel = create_cancellation_token();
     resume(
         part.clone(),
-        Url::parse(&url).expect("valid url"),
+        Some(Url::parse(&url).expect("valid url")),
         cfg,
         tx,
         cancel,
@@ -1013,7 +1165,7 @@ async fn test_progress_elapsed_persisted_across_resume() {
     let resume_cancel = create_cancellation_token();
     resume(
         part.clone(),
-        Url::parse(&url).expect("valid url"),
+        Some(Url::parse(&url).expect("valid url")),
         cfg,
         tx,
         resume_cancel,
@@ -1235,7 +1387,7 @@ async fn test_resume_with_directory_part_fails_pipeline() {
     let cancel2 = create_cancellation_token();
     resume(
         part.clone(),
-        Url::parse(&url).expect("valid url"),
+        Some(Url::parse(&url).expect("valid url")),
         cfg,
         tx,
         cancel2,
@@ -1363,6 +1515,426 @@ async fn test_progress_zero_total_file() {
     assert!(got.is_empty(), "0-byte file must produce a 0-byte file");
 }
 
+/// A corrupt (non-TOML) `.fd` cannot block `download()`: with `overwrite = true`
+/// a failed `DownloadState::load` breaks the silent-resume conjunction, so the
+/// task falls back to a fresh download — no `Resumed`, no `ResumeError`, and a
+/// correct final file.
+#[tokio::test]
+async fn test_corrupt_fd_silently_redownloads() {
+    let dir = temp_dir("corrupt_fd");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let final_path = dir.join("out.bin");
+    let fd = final_path.with_added_extension("fd");
+    tokio::fs::write(&fd, "not valid toml {{{")
+        .await
+        .expect("write corrupt .fd");
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "a corrupt .fd must not be resumed"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::ResumeError(_))),
+        "download() must silently fall back, not report a ResumeError"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download() must complete via the silent fallback"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(got, original_bytes(), "fallback content mismatch");
+}
+
+/// A valid `.fd` alone is not enough for silent resume: the `.part` file must
+/// exist too (`fs::try_exists` conjunct). Deleting the `.part` makes
+/// `download()` silently start over — fresh state, no `Resumed`, full content.
+#[tokio::test]
+async fn test_missing_part_with_valid_fd_silently_redownloads() {
+    let dir = temp_dir("missing_part");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(fd.exists(), "precondition: .fd must exist");
+    tokio::fs::remove_file(&part).await.expect("delete .part");
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel2 = create_cancellation_token();
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel2);
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "without the .part, silent resume must not kick in"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download() must complete via a fresh download"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(got, original_bytes(), "fresh download content mismatch");
+}
+
+/// `resume = false` disables the silent-resume conjunct (`can_resume`) even when
+/// a perfectly valid `.fd`/`.part` pair exists: `download()` starts over from
+/// zero without emitting `Resumed`, and never reports a `ResumeError`.
+#[tokio::test]
+async fn test_resume_disabled_ignores_valid_state() {
+    let dir = temp_dir("resume_disabled");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let final_path = dir.join("out.bin");
+    let fd = final_path.with_added_extension("fd");
+    assert!(fd.exists(), "precondition: valid .fd must exist");
+
+    let mut cfg = make_config(&dir);
+    cfg.resume = Some(false);
+    let (tx, rx) = create_channel();
+    let cancel2 = create_cancellation_token();
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel2);
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "resume=false must never emit Resumed"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::ResumeError(_))),
+        "resume=false must not report a ResumeError"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download() must complete"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(got, original_bytes(), "content mismatch");
+}
+
+/// In the non-overwrite branch, a stray `.part` without a matching `.fd` makes
+/// `open_create_new` fail with `AlreadyExists`, so `iter_stem` advances to the
+/// next stem variant and the download completes there — the stray file is left
+/// untouched and the final content is still correct.
+#[tokio::test]
+async fn test_non_overwrite_stray_part_advances_iter_stem() {
+    let dir = temp_dir("stray_part");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let final_path = dir.join("out.bin");
+    let stray = final_path.with_added_extension("part");
+    tokio::fs::write(&stray, b"stray")
+        .await
+        .expect("create stray .part");
+
+    let cfg = make_config_no_overwrite(&dir);
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::BuildPusherError(_))),
+        "AlreadyExists must advance iter_stem, not error out"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "a stray .part without .fd cannot be resumed"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download() must complete on the next stem variant"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(got, original_bytes(), "content mismatch");
+    let stray_bytes = tokio::fs::read(&stray).await.expect("read stray .part");
+    assert_eq!(
+        stray_bytes, b"stray",
+        "the stray .part must be left untouched"
+    );
+}
+
+/// A corrupt (non-TOML) `.fd` makes `resume()` report
+/// `StateError::Decode` (the `.part` exists, so there is no fallback) and keep
+/// both partial files untouched — no rename, no silent re-download.
+#[tokio::test]
+async fn test_resume_corrupt_fd_reports_decode_error() {
+    let dir = temp_dir("resume_corrupt_fd");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    tokio::fs::write(&part, b"partial")
+        .await
+        .expect("create .part");
+    tokio::fs::write(&fd, "not valid toml {{{")
+        .await
+        .expect("write corrupt .fd");
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    resume(
+        part.clone(),
+        Some(Url::parse(&url).expect("valid url")),
+        cfg,
+        tx,
+        cancel,
+    );
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    let err = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ResumeError(r) => Some(r),
+            _ => None,
+        })
+        .expect("expected Event::ResumeError");
+    assert!(
+        matches!(err, StateError::Decode(_)),
+        "expected Event::ResumeError(StateError::Decode) for a corrupt .fd, got {err:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "resume() must NOT rename on a decode error"
+    );
+    assert!(part.exists() && fd.exists(), "partial files must be kept");
+}
+
+/// `resume()` forces `overwrite = false`, so an already-existing final file is
+/// never clobbered: the finished download is renamed into a *unique* variant
+/// while the pre-existing file keeps its exact content.
+#[tokio::test]
+async fn test_resume_never_overwrites_existing_final_file() {
+    let dir = temp_dir("resume_no_clobber");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    assert!(part.exists(), "cancel must leave the .part");
+    // A pre-existing final file the resume must not touch.
+    tokio::fs::write(&final_path, b"sentinel")
+        .await
+        .expect("create pre-existing final file");
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let resume_cancel = create_cancellation_token();
+    resume(
+        part.clone(),
+        Some(Url::parse(&url).expect("valid url")),
+        cfg,
+        tx,
+        resume_cancel,
+    );
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    let renamed = events
+        .iter()
+        .find_map(|e| match e {
+            Event::Renamed(p) => Some(p.clone()),
+            _ => None,
+        })
+        .expect("resume must complete with Renamed");
+    assert_ne!(
+        renamed, final_path,
+        "resume must NOT overwrite the existing final file"
+    );
+    let sentinel = tokio::fs::read(&final_path)
+        .await
+        .expect("pre-existing file must remain readable");
+    assert_eq!(
+        sentinel, b"sentinel",
+        "the pre-existing final file content must be untouched"
+    );
+    let got = tokio::fs::read(&renamed).await.expect("read renamed file");
+    assert_eq!(got, original_bytes(), "renamed content mismatch");
+}
+
+/// `resume()` forces `partial_config.resume = true`, so a user-supplied
+/// `resume = false` is overridden: with a valid `.fd`/`.part` pair the task
+/// still resumes (emits `Resumed`) instead of refusing.
+#[tokio::test]
+async fn test_resume_overrides_user_resume_false() {
+    let dir = temp_dir("resume_forces_true");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    assert!(part.exists(), "cancel must leave the .part");
+
+    let mut cfg = make_config(&dir);
+    cfg.resume = Some(false);
+    let (tx, rx) = create_channel();
+    let resume_cancel = create_cancellation_token();
+    resume(
+        part.clone(),
+        Some(Url::parse(&url).expect("valid url")),
+        cfg,
+        tx,
+        resume_cancel,
+    );
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "resume() must override resume=false and resume anyway"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::ResumeError(_))),
+        "no ResumeError when the state is valid"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(got, original_bytes(), "resumed content mismatch");
+}
+
+/// When the final destination is a DIRECTORY and `overwrite = true`, the engine
+/// still completes but `fs::rename` fails: `overwrite()` must emit
+/// `Event::RenameFailed` (not panic, not `Renamed`) and leave both the `.part`
+/// and the `.fd` in place so the download is not lost.
+#[tokio::test]
+async fn test_rename_failed_when_final_path_is_directory() {
+    let dir = temp_dir("rename_dir_dest");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let final_path = dir.join("out.bin");
+    std::fs::create_dir(&final_path).expect("final path must be a directory");
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = timeout(Duration::from_secs(60), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::RenameFailed(_))),
+        "renaming onto a directory must emit Event::RenameFailed, got: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "must NOT emit Renamed when the rename failed"
+    );
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(
+        part.exists() && fd.exists(),
+        ".part/.fd must be kept after a failed rename"
+    );
+    let _ = std::fs::remove_dir_all(&final_path);
+}
+
+/// With `overwrite = true` a re-download must replace an already-existing final
+/// file (rename-replace semantics): the pre-existing content is overwritten by
+/// the fresh download and no unique variant is created.
+#[tokio::test]
+async fn test_overwrite_true_replaces_existing_final_file() {
+    let dir = temp_dir("overwrite_replace");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let final_path = dir.join("out.bin");
+    tokio::fs::write(&final_path, b"stale content")
+        .await
+        .expect("create pre-existing final file");
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = timeout(Duration::from_secs(60), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    let renamed = events
+        .iter()
+        .find_map(|e| match e {
+            Event::Renamed(p) => Some(p.clone()),
+            _ => None,
+        })
+        .expect("expected Event::Renamed");
+    // Compare by file name only: on Windows the rename can return a
+    // `\\?\`-prefixed verbatim path, so an exact PathBuf match is fragile.
+    assert_eq!(
+        renamed.file_name(),
+        final_path.file_name(),
+        "overwrite=true must rename onto the original file name, not a unique variant"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(
+        got,
+        original_bytes(),
+        "the pre-existing file must be replaced by the fresh download"
+    );
+}
+
+/// An invalid custom proxy URL makes `FastDownPuller::new` fail inside
+/// `build_pipeline`, so the task must end with `Event::BuildClientError` —
+/// never `Renamed`, and no hang.
+#[tokio::test]
+async fn test_invalid_proxy_reports_build_client_error() {
+    let dir = temp_dir("bad_proxy");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let mut cfg = make_config(&dir);
+    cfg.proxy = Some(fast_down_api::fast_down::Proxy::Custom(
+        "not a valid url".to_string(),
+    ));
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::BuildClientError(_))),
+        "an invalid proxy must emit Event::BuildClientError, got: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download must not complete when the client cannot be built"
+    );
+}
+
 /// Regression test for F-A01: in the **non-overwrite** path, a fatal I/O error
 /// while creating the `.part` file must surface as `Event::BuildPusherError` and
 /// end the task — NOT spin forever on the unbounded `iter_stem` iterator. The
@@ -1432,4 +2004,245 @@ async fn test_non_overwrite_create_new_fatal_error_reports_not_hangs() {
         .permissions();
     restore.set_mode(0o755);
     let _ = std::fs::set_permissions(&dir, restore);
+}
+
+/// `resume()` with `url = None` must re-use the durable initial URL persisted in
+/// the `.fd` state file (recorded by the original `download`) to re-resolve and
+/// resume — so a caller can resume purely from the `.part` path. The resumed
+/// download still completes correctly.
+#[tokio::test]
+async fn test_resume_without_url_uses_fd_url() {
+    let dir = temp_dir("resume_no_url_fd");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(
+        part.exists() && fd.exists(),
+        "precondition: partial .part/.fd must exist"
+    );
+
+    // Resume with NO url: must auto-use the `.fd`'s stored initial URL.
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let resume_cancel = create_cancellation_token();
+    resume(part.clone(), None, cfg, tx, resume_cancel);
+    let events = drain(rx).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "resume() with no url must still resume (using the .fd's initial URL)"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "resume() with no url must complete (Renamed)"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::ResumeError(_))),
+        "resume() with no url must NOT report a ResumeError when the .fd has a URL"
+    );
+    let got = tokio::fs::read(&final_path)
+        .await
+        .expect("final file should exist after resume");
+    assert_eq!(got, original_bytes(), "resumed content mismatch");
+}
+
+/// `resume()` with `url = None` and no `.part` to fall back from must report
+/// `StateError::NoUrl`: there is no URL to fetch and no `.fd` to read one from,
+/// so a silent fallback to a fresh download is impossible.
+#[tokio::test]
+async fn test_resume_without_url_missing_tmp_path_errors() {
+    let dir = temp_dir("resume_no_url_no_tmp");
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    assert!(!part.exists(), "precondition: tmp_path must not exist");
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    resume(part.clone(), None, cfg, tx, cancel);
+    let events = drain(rx).await;
+
+    let err = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ResumeError(r) => Some(r),
+            _ => None,
+        })
+        .expect("expected Event::ResumeError when no url and no .part");
+    assert!(
+        matches!(err, StateError::NoUrl(_)),
+        "expected StateError::NoUrl, got {err:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "resume() must NOT rename when it cannot resolve a URL"
+    );
+}
+
+/// `resume()` with `url = None` against a `.fd` that carries no resolvable URL
+/// (written by an older build, or hand-trimmed) must report `StateError::NoUrl`
+/// rather than silently failing at prefetch with a default/blank URL.
+#[tokio::test]
+async fn test_resume_without_url_and_fd_has_no_url_errors() {
+    let dir = temp_dir("resume_no_url_fd_blank");
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    // A `.fd` with content identity but NO url field, plus a present `.part`.
+    tokio::fs::write(&fd, "size = 1024\n")
+        .await
+        .expect("write .fd without a url");
+    tokio::fs::write(&part, b"partial")
+        .await
+        .expect("create .part");
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    resume(part.clone(), None, cfg, tx, cancel);
+    let events = drain(rx).await;
+
+    let err = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ResumeError(r) => Some(r),
+            _ => None,
+        })
+        .expect("expected Event::ResumeError when .fd has no url and none supplied");
+    assert!(
+        matches!(err, StateError::NoUrl(_)),
+        "expected StateError::NoUrl for a url-less .fd with no url arg, got {err:?}"
+    );
+    assert!(
+        part.exists() && fd.exists(),
+        "partial files must be kept on NoUrl"
+    );
+}
+
+/// P1 regression test: `resume()` must check that the `.part` file size is consistent with
+/// the recorded progress. If the `.part` file is smaller than the recorded progress,
+/// it should fall back to a fresh download to avoid data corruption.
+#[tokio::test]
+async fn test_resume_truncated_part_falls_back_to_fresh_download() {
+    let dir = temp_dir("resume_truncated_part");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    // Start a partial download
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+
+    assert!(
+        part.exists() && fd.exists(),
+        "precondition: .part and .fd must exist"
+    );
+
+    // Verify that some progress was recorded
+    let fd_content = tokio::fs::read_to_string(&fd).await.expect("read .fd");
+    assert!(
+        fd_content.contains("downloaded_chunk"),
+        "precondition: .fd must contain progress"
+    );
+
+    // Truncate the .part file to simulate corruption (smaller than recorded progress)
+    {
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&part)
+            .await
+            .expect("open .part for truncation");
+        file.set_len(100).await.expect("truncate .part file"); // Much smaller than recorded progress
+    }
+
+    // Now try to resume - this should fall back to a fresh download since the .part file
+    // is smaller than the recorded progress
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let resume_cancel = create_cancellation_token();
+    resume(
+        part.clone(),
+        Some(Url::parse(&url).expect("valid url")),
+        cfg,
+        tx,
+        resume_cancel,
+    );
+    let events = drain(rx).await;
+
+    // Should complete successfully with a fresh download (not a corrupted resume)
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "resume with truncated .part should complete with fresh download"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "should not emit Resumed event when .part is truncated"
+    );
+
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(
+        got,
+        original_bytes(),
+        "content should match original after fresh download"
+    );
+}
+
+/// P2 regression test: `resume()` should reject `tmp_path` that doesn't end with `.part` extension.
+#[tokio::test]
+async fn test_resume_rejects_non_part_extension() {
+    let dir = temp_dir("resume_wrong_ext");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let final_path = dir.join("out.bin");
+    let wrong_ext_path = final_path.with_extension("tmp"); // Wrong extension
+
+    // Create a dummy file with wrong extension
+    tokio::fs::write(&wrong_ext_path, b"dummy")
+        .await
+        .expect("create dummy file");
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+
+    // This should return an error because tmp_path doesn't end with .part
+    resume(
+        wrong_ext_path.clone(),
+        Some(Url::parse(&url).expect("valid url")),
+        cfg,
+        tx,
+        cancel,
+    );
+    let events = drain(rx).await;
+
+    let err = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ResumeError(r) => Some(r),
+            _ => None,
+        })
+        .expect("expected Event::ResumeError for non-.part extension");
+
+    // Check that it's specifically an Open error with the right message
+    if let StateError::Open(e) = err {
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            e.to_string()
+                .contains("tmp_path must end with .part extension")
+        );
+    } else {
+        panic!("expected StateError::Open, got {err:?}");
+    }
+
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "should not rename when tmp_path has wrong extension"
+    );
 }

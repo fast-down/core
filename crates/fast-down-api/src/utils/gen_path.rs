@@ -109,4 +109,35 @@ mod tests {
         // The synthesized parent directory must have been created by gen_path.
         assert!(p.parent().is_some_and(std::path::Path::exists));
     }
+
+    #[tokio::test]
+    async fn traversal_in_template_cannot_escape_save_dir() {
+        // A template that tries to climb out of `save_dir` with `..` must never
+        // resolve outside it. `sanitize_path` strips the `..` components, and the
+        // `starts_with(save_dir)` guard rejects any join that would escape, so the
+        // resolved path always stays inside the configured directory (it may
+        // create an `etc/pwned` subdir *within* save_dir, but it can never reach
+        // an ancestor of save_dir). `soft_canonicalize` returns a verbatim
+        // (`\\?\`) path on Windows, so normalize that prefix before comparing.
+        let dir = tempdir("traversal");
+        let url = Url::parse("https://example.com/a/b/data.bin").unwrap();
+        let info = make_info("data.bin", None);
+        let cfg = make_config(&dir, "../../etc/pwned/{file_name}", true);
+        let p = gen_path(&url, &info, &cfg).await.unwrap();
+
+        let norm = |p: &std::path::Path| -> String {
+            let s = p.to_string_lossy();
+            s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+        };
+        let p_norm = norm(&p);
+        let dir_norm = norm(&dir);
+        assert!(
+            p_norm.starts_with(dir_norm.as_str()),
+            "a traversal template must never resolve outside save_dir, got {p_norm}"
+        );
+        assert!(
+            p.ends_with("data.bin"),
+            "the file name must be the template's leaf, not the traversal target, got {p:?}"
+        );
+    }
 }

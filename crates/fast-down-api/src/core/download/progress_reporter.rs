@@ -198,7 +198,7 @@ impl ProgressReporter {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::too_many_lines)]
-    use super::ProgressReporter;
+    use super::{ProgressReporter, RateEstimator};
     use crate::PartialConfig;
     use crate::core::state::DownloadState;
     use fast_down::UrlInfo;
@@ -236,5 +236,172 @@ mod tests {
         );
         assert_eq!(sample.downloaded, 0);
         assert!(sample.eta.is_none());
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn compute_reports_half_progress_fields() {
+        // compute (progress_reporter.rs lines 113-171) must derive percent/eta
+        // from the recorded on-disk progress. 500/1000 bytes => 50%, and with a
+        // non-zero loaded_elapsed the ETA is computable.
+        let url = Url::parse("https://example.com/x").unwrap();
+        let info = UrlInfo {
+            size: 1000,
+            raw_name: "x".to_string(),
+            supports_range: true,
+            fast_download: true,
+            final_url: url.clone(),
+            file_id: fast_down::FileId::new(None, None),
+            content_type: None,
+        };
+        let state = DownloadState::new(
+            &url,
+            &info,
+            &PartialConfig::default(),
+            Path::new("/tmp/_pr_fields.fd"),
+        );
+        state.update(|inner| {
+            inner.config.get_or_insert_default().downloaded_chunk = Some(vec![0u64..500]);
+        });
+
+        let reporter = ProgressReporter::new(Duration::from_secs(1), 1000, state.share_inner());
+        let sample = reporter.compute(Instant::now(), None);
+
+        assert_eq!(sample.total, 1000);
+        assert_eq!(sample.downloaded, 500);
+        assert!(
+            (sample.percent - 50.0).abs() < f64::EPSILON,
+            "percent must be 50.0 for half-downloaded file, got {}",
+            sample.percent
+        );
+        assert_eq!(sample.bps, 0, "no rate estimator => bps forced to 0");
+        assert!(
+            sample.avg_bps > 0,
+            "avg_bps must be positive with non-zero elapsed"
+        );
+        assert!(
+            sample.eta.is_some(),
+            "eta must be computable once bytes are downloaded"
+        );
+    }
+
+    #[test]
+    fn rate_estimator_smooths_and_lags() {
+        // RateEstimator::observe (progress_reporter.rs lines 45-60): the first
+        // observation has no interval and returns 0; subsequent steady 100 bps
+        // input is tracked by an EMA that lags (stays below 100) but rises toward it.
+        let mut est = RateEstimator::default();
+        let t0 = Instant::now();
+        assert_eq!(
+            est.observe(t0, 0),
+            0,
+            "first observation has no interval => 0"
+        );
+
+        let e1 = est.observe(t0 + Duration::from_secs(1), 100);
+        assert!(
+            e1 > 0 && e1 < 100,
+            "EMA must lag the 100 bps raw rate, got {e1}"
+        );
+
+        let e2 = est.observe(t0 + Duration::from_secs(2), 200);
+        assert!(
+            e2 > e1,
+            "EMA must increase toward the steady rate, got {e2}"
+        );
+        assert!(
+            e2 <= 100,
+            "EMA must stay at/below the steady 100 bps, got {e2}"
+        );
+    }
+
+    #[test]
+    fn rate_estimator_zero_dt_skips_update_and_advances_last() {
+        // observe with a zero interval must not touch the EMA (returns the
+        // unchanged smoothed value), but still advances `last` — so bytes
+        // written within the same instant are dropped from rate accounting
+        // and the next interval measures from the new baseline.
+        let mut est = RateEstimator::default();
+        let t0 = Instant::now();
+        assert_eq!(est.observe(t0, 0), 0);
+        assert_eq!(
+            est.observe(t0, 500),
+            0,
+            "zero dt must leave the EMA (still 0) untouched"
+        );
+        // `last` advanced to (t0, 500): the 500 bytes are dropped; the next
+        // interval only sees the 100 bytes written after t0.
+        let r = est.observe(t0 + Duration::from_secs(1), 600);
+        assert!(
+            r > 0 && r < 100,
+            "next interval must measure from the advanced baseline, got {r}"
+        );
+    }
+
+    #[test]
+    fn rate_estimator_converges_toward_steady_rate() {
+        // A steady 100 bps feed must pull the EMA (started at 0) close to the
+        // true rate within a few time constants.
+        let mut est = RateEstimator::default();
+        let t0 = Instant::now();
+        est.observe(t0, 0);
+        let mut last = 0u64;
+        for i in 1u64..=10 {
+            last = est.observe(t0 + Duration::from_secs(i), i * 100);
+        }
+        assert!(
+            (90..=100).contains(&last),
+            "EMA must converge to the steady 100 bps, got {last}"
+        );
+    }
+
+    #[test]
+    fn rate_estimator_decays_when_download_stalls() {
+        // A stalled transfer (no new bytes) yields a raw rate of 0, so the EMA
+        // must decay toward 0 instead of holding the previous speed.
+        let mut est = RateEstimator::default();
+        let t0 = Instant::now();
+        est.observe(t0, 0);
+        let warm = est.observe(t0 + Duration::from_secs(1), 100);
+        assert!(warm > 0, "first interval must heat the EMA up");
+        let decayed = est.observe(t0 + Duration::from_secs(2), 100);
+        assert!(
+            decayed < warm,
+            "a stalled download must decay the EMA: {decayed} >= {warm}"
+        );
+    }
+
+    #[test]
+    fn elapsed_now_includes_loaded_elapsed() {
+        // elapsed_now (progress_reporter.rs lines 102-105) sums the prior runs'
+        // loaded_elapsed with this run's wall-clock.
+        let url = Url::parse("https://example.com/x").unwrap();
+        let info = UrlInfo {
+            size: 1,
+            raw_name: "x".to_string(),
+            supports_range: false,
+            fast_download: false,
+            final_url: url.clone(),
+            file_id: fast_down::FileId::new(None, None),
+            content_type: None,
+        };
+        let state = DownloadState::new(
+            &url,
+            &info,
+            &PartialConfig::default(),
+            Path::new("/tmp/_pr_elapsed.fd"),
+        );
+        let loaded = Duration::from_secs(5);
+        let reporter = ProgressReporter::new(loaded, 1, state.share_inner());
+        let now = Instant::now();
+        let elapsed = reporter.elapsed_now(now);
+        assert!(
+            elapsed >= loaded,
+            "elapsed_now must include loaded_elapsed, got {elapsed:?}"
+        );
+        assert!(
+            elapsed < loaded + Duration::from_secs(1),
+            "elapsed must be ~loaded + tiny run time, got {elapsed:?}"
+        );
     }
 }
