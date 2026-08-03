@@ -76,10 +76,10 @@ pub async fn overwrite(option: OverwriteOption) {
     let parsed_config = inner_state.config.clone().unwrap_or_default();
     let inner_state = inner_state.build();
     let tmp_path = state.tmp_path();
-    let url = &inner_state.url;
     let config = &inner_state.config;
 
-    let pipeline = build_pipeline(url, config, &info, resp, &tmp_path, &tx, &token).await;
+    let pipeline =
+        build_pipeline(&info.final_url, config, &info, resp, &tmp_path, &tx, &token).await;
     let Some((puller, pusher)) = pipeline else {
         return;
     };
