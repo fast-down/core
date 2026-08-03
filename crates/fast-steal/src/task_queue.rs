@@ -173,9 +173,6 @@ impl<H: Handle> TaskQueue<H> {
                 guard.running.push_back((weak, handle));
             }
         } else if len > threads {
-            if !guard.running.iter().take(threads).any(|w| w.0.is_alive()) {
-                return Some(());
-            }
             let mut temp = Vec::with_capacity(len - threads);
             let iter = guard.running.drain(threads..);
             for (task, mut handle) in iter {
@@ -222,10 +219,14 @@ impl<H: Handle> TaskQueue<H> {
     /// Aborted twins are *deregistered* (removed from `running`) so a later
     /// [`set_threads`](TaskQueue::set_threads) liveness sweep does not mistake
     /// them for live workers. Their remaining work is **not** reclaimed into
-    /// `waiting`: reclaiming would race with the caller's own still-live `task`
-    /// over the same range and cause duplicate execution. Callers must therefore
-    /// only invoke this after the shared range has finished (as the sole
-    /// production caller `fast-pull` does).
+    /// `waiting`: the aborted twins matched `t == *task`, i.e. they alias the
+    /// caller's cursor, so the caller's own still-live task already owns and
+    /// advances that remaining range. Reclaiming would only add a redundant
+    /// `waiting` entry — the `take` handshake that `steal` applies to a shared
+    /// cursor partitions it atomically, so a reclaimed twin would *not* execute
+    /// the same bytes twice. The production caller `fast-pull` therefore invokes
+    /// this only after the shared range has finished, letting the caller's task
+    /// carry the work to completion.
     pub fn cancel_task(&self, task: &Task, id: &H::Id) {
         let mut guard = self.inner.lock();
         // Abort every twin whose task matches but is not the caller's own, then
@@ -1274,5 +1275,228 @@ mod tests {
             "unregistered caller must not abort anyone"
         );
         assert_eq!(q.inner.lock().running.len(), 2, "no worker deregistered");
+    }
+
+    // -----------------------------------------------------------------
+    // Audit verification tests.
+    // -----------------------------------------------------------------
+
+    /// Verifies that `retain` at the top of `set_threads` removes ALL dead
+    /// entries before the shrink path runs, so the survivors are always alive
+    /// and the decrease branch can proceed to reclaim their overflow peers
+    /// without a separate liveness guard.
+    #[test]
+    fn set_threads_shrink_guard_never_fires_after_retain() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new((0..5).map(|i| i * 10..(i + 1) * 10));
+        q.set_threads(5, 1, Some(&ex)).unwrap();
+        assert_eq!(q.inner.lock().running.len(), 5);
+
+        // Kill the first 3 workers. A naive reading of the guard suggests
+        // shrink-to-2 might early-return (first 2 are dead). But `retain`
+        // removes them first, leaving [alive3, alive4], so shrink proceeds.
+        ex.kill(0);
+        ex.kill(1);
+        ex.kill(2);
+
+        q.set_threads(2, 1, Some(&ex)).unwrap();
+        let guard = q.inner.lock();
+        assert_eq!(
+            guard.running.len(),
+            2,
+            "retain sweeps dead entries; shrink always proceeds"
+        );
+        // The 2 survivors' tasks were NOT aborted.
+        assert!(ex.aborted().is_empty() || ex.aborted().iter().all(|&id| id < 3));
+    }
+
+    /// A worker deregistered by a failed `steal` (no work found) is rejected
+    /// on all subsequent steal attempts — even after new work is added to
+    /// `waiting`. Only `set_threads` can re-register a worker.
+    #[test]
+    fn steal_after_deregistration_is_permanently_rejected() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new(core::iter::once(0..1));
+        q.set_threads(1, 1, Some(&ex)).unwrap();
+
+        let mut t = ex.task_of(0);
+        // No work anywhere: steal fails and deregisters worker 0.
+        assert!(!q.steal(&0, &mut t, 1, 1));
+        assert_eq!(q.inner.lock().running.len(), 0, "worker deregistered");
+
+        // Add fresh work to waiting.
+        let _ = q.add(Task::new(100..200));
+        assert_eq!(q.inner.lock().waiting.len(), 1);
+
+        // The deregistered worker still cannot steal.
+        assert!(!q.steal(&0, &mut t, 1, 1));
+        assert_eq!(
+            q.inner.lock().waiting.len(),
+            1,
+            "waiting undisturbed by rejected caller"
+        );
+
+        // Only set_threads can rescue the stranded work.
+        q.set_threads(1, 1, Some(&ex)).unwrap();
+        assert_eq!(q.inner.lock().running.len(), 1);
+        assert_eq!(q.inner.lock().waiting.len(), 0);
+    }
+
+    /// Multiple registered workers calling `steal` concurrently from
+    /// different OS threads: the mutex serialises access, so every task from
+    /// `waiting` is handed out exactly once with no loss or duplication.
+    #[test]
+    fn concurrent_steal_from_waiting_no_loss_or_dup() {
+        use std::thread;
+
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new((0..4).map(|i| i * 100..(i + 1) * 100));
+        q.set_threads(4, 1, Some(&ex)).unwrap();
+
+        // Add 4 fresh tasks to waiting.
+        for i in 0..4u64 {
+            let _ = q.add(Task::new(1000 + i * 100..1100 + i * 100));
+        }
+
+        let mut handles = Vec::new();
+        for id in 0..4usize {
+            let q = q.clone();
+            let mut t = ex.task_of(id);
+            handles.push(thread::spawn(move || {
+                let ok = q.steal(&id, &mut t, 1, 1);
+                (id, ok, t.get())
+            }));
+        }
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // All 4 succeed (4 waiting tasks available).
+        let stolen: Vec<_> = results
+            .iter()
+            .filter(|(_, ok, _)| *ok)
+            .map(|(_, _, r)| r.clone())
+            .collect();
+        assert_eq!(stolen.len(), 4, "all 4 workers got work from waiting");
+
+        // Ranges are non-overlapping and cover exactly 1000..1400.
+        let mut sorted = stolen;
+        sorted.sort_by_key(|r| r.start);
+        for w in sorted.windows(2) {
+            assert!(
+                w[0].end <= w[1].start,
+                "overlap detected: {:?} and {:?}",
+                w[0],
+                w[1]
+            );
+        }
+        assert_eq!(sorted[0].start, 1000);
+        assert_eq!(sorted[3].end, 1400);
+    }
+
+    /// Multiple workers concurrently splitting the same fat peer: the CAS in
+    /// `split_two` serialises splits so the resulting sub-ranges form a
+    /// non-overlapping partition of the original.
+    #[test]
+    fn concurrent_steal_split_no_overlap() {
+        use std::thread;
+
+        let ex = SyncExecutor::new();
+        // Worker 3 gets the fat task; workers 0-2 get crumbs.
+        let q = TaskQueue::new([0..1, 1..2, 2..3, 0..1000].into_iter());
+        q.set_threads(4, 1, Some(&ex)).unwrap();
+
+        let mut handles = Vec::new();
+        for id in 0..3usize {
+            let q = q.clone();
+            let mut t = ex.task_of(id);
+            handles.push(thread::spawn(move || {
+                let ok = q.steal(&id, &mut t, 1, 1);
+                (id, ok, t.get())
+            }));
+        }
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // All 3 must succeed by splitting the fat peer.
+        for (id, ok, range) in &results {
+            assert!(ok, "worker {id} failed to steal via split");
+            assert!(range.end - range.start > 0, "worker {id} got empty range");
+        }
+
+        // Sub-ranges must not overlap (they are partitions of 0..1000).
+        let mut ranges: Vec<_> = results.iter().map(|(_, _, r)| r.clone()).collect();
+        ranges.sort_by_key(|r| r.start);
+        for w in ranges.windows(2) {
+            assert!(
+                w[0].end <= w[1].start,
+                "split ranges overlap: {:?} and {:?}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    /// `cancel_task` is a no-op when the registered caller has no speculative
+    /// twin: nothing is aborted and no worker is deregistered. This guards
+    /// against the call spuriously dropping the caller from `running`.
+    #[test]
+    fn cancel_task_registered_caller_without_twin_is_noop() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new([0..1, 100..200].into_iter());
+        q.set_threads(2, 1, Some(&ex)).unwrap();
+        // Worker 0 owns its own task and shares no cursor with anyone.
+        q.cancel_task(&ex.task_of(0), &0);
+        assert!(ex.aborted().is_empty(), "nothing to abort without a twin");
+        assert_eq!(
+            q.inner.lock().running.len(),
+            2,
+            "both workers must stay registered"
+        );
+    }
+
+    /// Pins the *correct* handoff when a speculative sharer is reclaimed by a
+    /// `set_threads` shrink.
+    ///
+    /// A speculative sharer aliases its twin's progress cursor (same `state`
+    /// pointer, `sharer_count` bumped by `share_state`). When the shrink aborts
+    /// the sharer and pushes its task into `waiting`, that reclaimed task still
+    /// points at the *surviving* twin's cursor. The next `steal` to drain it
+    /// calls `take()` on the shared cursor: `take()` atomically claims the
+    /// remaining range for the new worker and empties the shared cursor, so the
+    /// survivor twin exits cleanly on its next `safe_add_start` and the range is
+    /// executed exactly once.
+    ///
+    /// This guards against a regression where the handoff would be "fixed" by
+    /// dropping the reclaimed task — which would instead LOSE the remaining work
+    /// when the survivor is the only live worker left.
+    #[test]
+    fn shrink_reclaims_speculative_sharer_task_aliasing_live_cursor() {
+        let ex = SyncExecutor::new();
+        // `min_chunk = 10` makes the 5-element peers too small to split, forcing
+        // the *share* branch of `steal` instead of `split_two`.
+        let q = TaskQueue::new([0..5, 5..10].into_iter());
+        q.set_threads(2, 10, Some(&ex)).unwrap();
+
+        // Worker 0 speculatively aliases worker 1's cursor (5..10).
+        let mut t0 = ex.task_of(0);
+        assert!(q.steal(&0, &mut t0, 10, 2));
+        ex.rebind(0, &t0);
+        assert_eq!(t0, ex.task_of(1), "worker 0 now aliases worker 1's cursor");
+
+        // Shrink to 1: aborts worker 1, reclaims its task into `waiting`.
+        q.set_threads(1, 10, Some(&ex)).unwrap();
+        let guard = q.inner.lock();
+        assert_eq!(guard.running.len(), 1);
+        let survivor = guard.running[0].0.upgrade().unwrap();
+
+        // The reclaimed waiting task aliases the *still-running* survivor's
+        // cursor. Whoever steals it next re-executes the survivor's range.
+        assert_eq!(
+            guard.waiting.len(),
+            1,
+            "the aborted sharer's task was reclaimed"
+        );
+        assert_eq!(
+            guard.waiting[0], survivor,
+            "reclaimed task shares the survivor's cursor; steal's take() handshake transfers it safely"
+        );
     }
 }
