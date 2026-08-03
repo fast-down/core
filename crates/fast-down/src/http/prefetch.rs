@@ -43,10 +43,6 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
         .get("content-disposition")
         .ok()
         .and_then(|s| ContentDisposition::parse(s.as_ref()).filename)
-        .map(|s| {
-            let s = urlencoding::decode_binary(s.as_bytes());
-            String::from_utf8_lossy(&s).into_owned()
-        })
         .filter(|s| !s.trim().is_empty())
         .or_else(|| {
             url.path_segments()
@@ -120,4 +116,112 @@ async fn is_support_range<Client: HttpClient>(
         .get("content-range")
         .is_ok_and(|v| v.trim_start().to_lowercase().starts_with("bytes 0-0/"));
     Ok(supports_range)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use std::borrow::Cow;
+    use std::collections::HashMap;
+
+    struct MapHeaders(HashMap<String, String>);
+    impl HttpHeaders for MapHeaders {
+        type GetHeaderError = std::convert::Infallible;
+        fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
+            Ok(Cow::Borrowed(self.0.get(header).map_or("", String::as_str)))
+        }
+    }
+
+    #[test]
+    fn get_filename_filename_star_not_double_decoded() {
+        // Hypothesis A: `ContentDisposition::parse` already percent-decodes
+        // `filename*` ("%25100" -> "%100"). `get_filename` then calls
+        // `urlencoding::decode_binary` on the decoded string, double-decoding
+        // it. A server that intends the literal filename "%100" (sent as
+        // `filename*=UTF-8''%25100`) must survive unchanged.
+        let mut h = HashMap::new();
+        h.insert(
+            "content-disposition".to_string(),
+            "attachment; filename*=UTF-8''%25100".to_string(),
+        );
+        let headers = MapHeaders(h);
+        let url = Url::parse("http://example.com/").unwrap();
+        assert_eq!(get_filename(&headers, &url), "%100");
+    }
+
+    #[test]
+    fn get_filename_filename_star_no_percent_passthrough() {
+        // Control: when the decoded `filename*` contains no literal '%' byte,
+        // `decode_binary` leaves it untouched, so a normal UTF-8 name is correct.
+        let mut h = HashMap::new();
+        h.insert(
+            "content-disposition".to_string(),
+            "attachment; filename*=UTF-8''%E6%B5%8B%E8%AF%95.txt".to_string(),
+        );
+        let headers = MapHeaders(h);
+        let url = Url::parse("http://example.com/").unwrap();
+        assert_eq!(get_filename(&headers, &url), "测试.txt");
+    }
+
+    #[test]
+    fn get_filename_plain_filename_percent_stays_literal() {
+        // Plain `filename` is no longer percent-decoded (RFC 6266: quoted-string
+        // is literal). "%E6%B5%8B.txt" stays as-is, unlike the old behavior.
+        let mut h = HashMap::new();
+        h.insert(
+            "content-disposition".to_string(),
+            "attachment; filename=\"%E6%B5%8B.txt\"".to_string(),
+        );
+        let headers = MapHeaders(h);
+        let url = Url::parse("http://example.com/").unwrap();
+        assert_eq!(get_filename(&headers, &url), "%E6%B5%8B.txt");
+    }
+
+    #[test]
+    fn get_filename_url_path_fallback_decodes_percent() {
+        // No content-disposition → falls back to the last URL path segment,
+        // which IS percent-decoded (URL paths are always encoded).
+        let headers = MapHeaders(HashMap::new());
+        let url = Url::parse("http://example.com/dir/%E6%B5%8B%E8%AF%95.txt").unwrap();
+        assert_eq!(get_filename(&headers, &url), "测试.txt");
+    }
+
+    #[test]
+    fn get_filename_url_path_invalid_utf8_uses_replacement() {
+        // %FF is not valid UTF-8; from_utf8_lossy produces U+FFFD.
+        let headers = MapHeaders(HashMap::new());
+        let url = Url::parse("http://example.com/%FF.txt").unwrap();
+        assert_eq!(get_filename(&headers, &url), "\u{FFFD}.txt");
+    }
+
+    #[test]
+    fn get_filename_whitespace_cd_falls_through_to_url() {
+        // Whitespace-only filename from CD is filtered out → URL path is used.
+        let mut h = HashMap::new();
+        h.insert(
+            "content-disposition".to_string(),
+            "attachment; filename=\"   \"".to_string(),
+        );
+        let headers = MapHeaders(h);
+        let url = Url::parse("http://example.com/report.pdf").unwrap();
+        assert_eq!(get_filename(&headers, &url), "report.pdf");
+    }
+
+    #[test]
+    fn get_filename_empty_path_falls_back_to_host() {
+        // Root URL (empty path segment) → host with dots replaced by underscores.
+        let headers = MapHeaders(HashMap::new());
+        let url = Url::parse("http://cdn.example.com/").unwrap();
+        assert_eq!(get_filename(&headers, &url), "cdn_example_com");
+    }
+
+    #[test]
+    fn get_filename_path_segment_spaces_fall_back_to_host() {
+        // A path segment that is only spaces decodes to whitespace → filtered →
+        // host fallback.
+        let headers = MapHeaders(HashMap::new());
+        let url = Url::parse("http://cdn.example.com/%20%20").unwrap();
+        assert_eq!(get_filename(&headers, &url), "cdn_example_com");
+    }
 }
