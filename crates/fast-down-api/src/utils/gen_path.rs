@@ -130,7 +130,10 @@ mod tests {
             s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
         };
         let p_norm = norm(&p);
-        let dir_norm = norm(&dir);
+        // `gen_path` canonicalizes `save_dir` via `soft_canonicalize`, which
+        // follows symlinks (e.g. macOS `/var` -> `/private/var`). Canonicalize
+        // `dir` the same way so the prefix check matches on every platform.
+        let dir_norm = norm(&soft_canonicalize(&dir).unwrap());
         assert!(
             p_norm.starts_with(dir_norm.as_str()),
             "a traversal template must never resolve outside save_dir, got {p_norm}"
