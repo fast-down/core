@@ -63,6 +63,17 @@ pub enum StateError {
         .0, .1.url(), .1.status(), .1.headers()
     )]
     NotResumable(UrlInfo, Response),
+    /// No URL is available to resume the download.
+    ///
+    /// `resume` was called with `url = None` and the persisted `.fd` state file
+    /// carries no resolvable initial URL (it was missing, or written by an older
+    /// build that did not store one). A URL is required to re-resolve the
+    /// resource, so the call reports this error instead of silently falling back
+    /// to a full re-download.
+    #[error(
+        "cannot resume without a URL: none was supplied and the .fd state has none (tmp_path = {0})"
+    )]
+    NoUrl(PathBuf),
 }
 
 /// Full (resolved) download state that is serialized into the `.fd` file.
@@ -322,6 +333,34 @@ impl DownloadState {
         });
     }
 
+    /// Refresh the recorded state for a new download session.
+    ///
+    /// Two fields are refreshed on every (re)start of a download:
+    ///
+    /// 1. **The durable initial URL.** The URL stored in the `.fd` is the
+    ///    caller's *initial* URL — the one passed to `download`/`resume`. When the
+    ///    caller supplies a new URL (the `Some` case) it takes priority and
+    ///    replaces any previously recorded URL, so a later `resume(None)` still
+    ///    re-resolves the resource the caller actually wants. When the URL is
+    ///    itself read back from the `.fd` (a `resume(None)`), this assignment is a
+    ///    no-op.
+    /// 2. **The content identity headers** (etag/last-modified/size), refreshed to
+    ///    the fresh server values from the current prefetch.
+    ///
+    /// The redirect target (`info.final_url`) is deliberately **never** persisted:
+    /// such links are usually temporary signed/CDN URLs that expire, so writing one
+    /// into the `.fd` would poison the next resume. The download part targets
+    /// `info.final_url` directly for range requests, which also avoids a redirect
+    /// round-trip on every range request.
+    pub fn refresh_identity(&self, url: &Url, info: &UrlInfo) {
+        self.update(|inner| {
+            inner.url = Some(url.clone());
+            inner.etag = Some(info.file_id.etag.clone());
+            inner.last_modified = Some(info.file_id.last_modified.clone());
+            inner.size = Some(info.size);
+        });
+    }
+
     /// Reconstruct the identity of the file this state was saved for.
     ///
     /// Returns a [`FileId`] from the stored `etag` / `last_modified`. Missing
@@ -347,7 +386,7 @@ impl DownloadState {
 
 #[cfg(test)]
 mod tests {
-    use super::{DownloadState, PartialConfig};
+    use super::{DownloadState, PartialConfig, StateError};
     use fast_down::{FileId, UrlInfo};
     use std::path::Path;
     use std::time::Duration;
@@ -511,5 +550,113 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn info_with(etag: Option<&str>, size: u64) -> UrlInfo {
+        UrlInfo {
+            size,
+            raw_name: "file.bin".to_string(),
+            supports_range: true,
+            fast_download: true,
+            final_url: Url::parse("https://example.com/file.bin").unwrap(),
+            file_id: FileId::new(etag, None),
+            content_type: Some("application/octet-stream".to_string()),
+        }
+    }
+
+    fn fd_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "fd_validate_{name}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn validate_ok_when_size_and_file_id_match() {
+        // validate (state.rs lines 247-261): identical size + etag must pass.
+        let state = make_state(&fd_path("ok"));
+        assert!(
+            state.validate(&info_with(Some("etag-1"), 1024)).is_ok(),
+            "matching size + etag must validate"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_size_mismatch() {
+        // Same etag, different size => the remote file changed => FileChanged.
+        let state = make_state(&fd_path("size"));
+        assert!(matches!(
+            state.validate(&info_with(Some("etag-1"), 2048)),
+            Err(StateError::FileChanged { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_etag_mismatch() {
+        // Same size, different etag => identity mismatch => FileChanged.
+        let state = make_state(&fd_path("etag"));
+        assert!(matches!(
+            state.validate(&info_with(Some("etag-2"), 1024)),
+            Err(StateError::FileChanged { .. })
+        ));
+    }
+
+    #[test]
+    fn refresh_identity_updates_url_to_caller_initial_url_not_final_url() {
+        // refresh_identity (state.rs): when a resumed download is called with a
+        // URL, that URL must be persisted as the `.fd`'s durable initial URL so a
+        // later `resume(None)` re-resolves the caller's resource. It must NOT
+        // persist the transient `info.final_url` (signed/CDN links expire). The
+        // content identity (etag/last-modified/size) is refreshed to the fresh
+        // prefetch values.
+        let path = fd_path("refresh_identity");
+        let state = make_state(&path); // url = https://example.com/file.bin, etag-1, size 1024
+        assert_eq!(
+            state.lock_inner().url.as_ref().unwrap().as_str(),
+            "https://example.com/file.bin",
+            "precondition: fresh state records the initial caller URL"
+        );
+
+        // A new caller URL (e.g. a rotated signed URL) and a fresh prefetch whose
+        // final_url is a different, transient redirect target.
+        let new_initial_url =
+            Url::parse("https://example.com/v2/signed-token-xyz/file.bin").unwrap();
+        let new_info = UrlInfo {
+            size: 2048,
+            raw_name: "file.bin".to_string(),
+            supports_range: true,
+            fast_download: true,
+            final_url: Url::parse("https://cdn.example.com/signed/token-abc/file.bin").unwrap(),
+            file_id: FileId::new(Some("etag-2"), Some("Mon, 02 Aug 2026 00:00:00 GMT")),
+            content_type: Some("application/octet-stream".to_string()),
+        };
+
+        // Caller passes the new initial URL: it must take priority over the stored one.
+        state.refresh_identity(&new_initial_url, &new_info);
+        let inner = state.lock_inner();
+        assert_eq!(
+            inner.url.as_ref().unwrap().as_str(),
+            "https://example.com/v2/signed-token-xyz/file.bin",
+            "refresh must update the .fd URL to the caller-supplied initial URL (priority)"
+        );
+        assert_ne!(
+            inner.url.as_ref().unwrap().as_str(),
+            "https://cdn.example.com/signed/token-abc/file.bin",
+            "refresh must NEVER store the transient final_url in the .fd"
+        );
+        assert_eq!(
+            inner.etag.as_ref().unwrap().as_deref(),
+            Some("etag-2"),
+            "refresh must update the etag"
+        );
+        assert_eq!(
+            inner.last_modified.as_ref().unwrap().as_deref(),
+            Some("Mon, 02 Aug 2026 00:00:00 GMT"),
+            "refresh must update last-modified"
+        );
+        assert_eq!(inner.size, Some(2048), "refresh must update size");
     }
 }
