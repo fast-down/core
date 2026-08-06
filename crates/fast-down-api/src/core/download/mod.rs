@@ -61,8 +61,12 @@ async fn try_load_resume_state(
     // Validate the state against current server info
     state.validate(info)?;
 
-    // Check that the .part file size is consistent with the recorded progress
-    if let Ok(metadata) = fs::metadata(tmp_path).await {
+    // Check that the .part file size is consistent with the recorded progress.
+    // Only applies to regular files — directories or other special files are not a
+    // valid .part and will fail later when build_pipeline tries to open them.
+    if let Ok(metadata) = fs::metadata(tmp_path).await
+        && metadata.is_file()
+    {
         let actual_size = metadata.len();
         let recorded_progress = state.get_progress();
         let max_recorded_end = recorded_progress.iter().map(|r| r.end).max().unwrap_or(0);
