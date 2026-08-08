@@ -276,8 +276,7 @@ mod tests {
     use super::*;
     use crate::{BufWriterPusher, CacheSeqPusher};
     use crate::{
-        Merge, ProgressEntry,
-        mem::MemPusher,
+        MemPusher, Merge, ProgressEntry,
         mock::{MockPuller, build_mock_data},
     };
     use futures::{StreamExt, stream};

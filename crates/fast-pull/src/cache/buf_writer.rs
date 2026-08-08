@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn random_access_write_is_correct_with_mem_pusher() {
-        let mem = crate::mem::MemPusher::with_capacity(16);
+        let mem = crate::MemPusher::with_capacity(16);
         let mut bp = BufWriterPusher::new(mem, 8 * 1024);
         bp.push(&(2..5), Bytes::from_static(b"234")).unwrap();
         bp.flush().unwrap();

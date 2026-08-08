@@ -156,8 +156,7 @@ mod tests {
     use super::*;
     use crate::BufWriterPusher;
     use crate::{
-        Merge, ProgressEntry,
-        mem::MemPusher,
+        MemPusher, Merge, ProgressEntry,
         mock::{MockPuller, build_mock_data},
     };
     use futures::stream;
@@ -358,7 +357,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
         let file = tokio::fs::File::from(tmp.reopen().unwrap());
-        let inner = crate::file::StdFilePusher::new(file, mock_data.len() as u64, false)
+        let inner = crate::StdFilePusher::new(file, mock_data.len() as u64, false)
             .await
             .unwrap();
         let pusher = BufWriterPusher::new(inner, mock_data.len() + 1);

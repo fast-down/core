@@ -1,7 +1,7 @@
 //! High-level file pusher combining caching, buffering, and standard file I/O.
 
 use crate::{
-    BufWriterPusher, CacheSeqPusher, ProgressEntry, ProgressListener, Pusher, file::StdFilePusher,
+    BufWriterPusher, CacheSeqPusher, ProgressEntry, ProgressListener, Pusher, StdFilePusher,
 };
 use bytes::Bytes;
 

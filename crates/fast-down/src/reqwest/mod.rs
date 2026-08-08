@@ -541,7 +541,7 @@ mod tests {
     async fn temp_mmap_target(
         tag: &str,
         size: u64,
-    ) -> (fast_pull::file::MmapFilePusher, std::path::PathBuf) {
+    ) -> (fast_pull::MmapFilePusher, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("fast-down-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("out.bin");
@@ -553,7 +553,7 @@ mod tests {
             .open(&path)
             .await
             .unwrap();
-        let pusher = fast_pull::file::MmapFilePusher::new(&file, size, false)
+        let pusher = fast_pull::MmapFilePusher::new(&file, size, false)
             .await
             .unwrap();
         (pusher, path)

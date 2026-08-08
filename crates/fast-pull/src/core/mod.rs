@@ -232,7 +232,7 @@ where
 mod tests {
     #![allow(clippy::unwrap_used)]
     #![allow(clippy::cast_possible_truncation)]
-    use crate::mem::MemPusher;
+    use crate::MemPusher;
     use crate::mock::{MockPuller, build_mock_data};
     use crate::multi::{DownloadOptions, download_multi};
     use crate::{Event, ProgressEntry, PullResult, PullStream, Puller};

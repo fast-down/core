@@ -6,9 +6,8 @@
 //! and `Mmap` writing is configured, and the buffered/cache writer otherwise.
 use crate::{Config, Event, Tx, WriteMethod, core::download::open_existing, utils::build_header};
 use fast_down::{
-    BoxPusher, UrlInfo,
+    BoxPusher, CacheFilePusher, MmapFilePusher, UrlInfo,
     fast_puller::{FastDownPuller, FastDownPullerOptions},
-    file::{CacheFilePusher, MmapFilePusher},
 };
 use parking_lot::Mutex;
 use reqwest::Response;
