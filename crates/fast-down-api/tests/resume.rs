@@ -288,6 +288,18 @@ async fn drain(rx: Rx) -> Vec<Event> {
 /// is still far from finishing when the cancel fires.
 const CANCEL_AFTER_BYTES: u64 = (THROTTLE_CHUNK * 2) as u64;
 
+/// Offset a `PushProgress` range must reach before a concurrent run is
+/// cancelled. With the test's worker layout a worker starts at `2.5 MiB`, so a
+/// range beginning here sits well past the leading block; the only way the merge
+/// step could coalesce it back into the leading range is if every task between
+/// them had already flushed a contiguous span, which cannot happen before this
+/// far worker's own push is observed. Requiring such a push guarantees the
+/// cancelled run leaves *fragmented* (multi-range) progress instead of depending
+/// on the cancellation landing while only the leading worker's writes had been
+/// flushed — the race that made `test_concurrent_resume_with_fragmented_progress`
+/// flaky.
+const MULTI_RANGE_GAP: u64 = 2 * 1024 * 1024;
+
 /// Start a normal `download()` and cancel it once at least [`CANCEL_AFTER_BYTES`]
 /// have been written, leaving a real partial `.part`/`.fd` on disk with non-empty
 /// resume progress. Returns the collected events.
@@ -300,8 +312,14 @@ async fn partial_download_via_cancel(
 }
 
 /// [`partial_download_via_cancel`] with an explicit config and cancel threshold,
-/// so a test can interrupt a concurrent run after enough workers have written to
-/// leave fragmented (multi-range) progress behind.
+/// so a test can interrupt a concurrent run after a *far* worker — one whose
+/// `PushProgress` starts at or beyond [`MULTI_RANGE_GAP`] — has already flushed a
+/// range. Only then is the persisted `downloaded_chunk` guaranteed to be
+/// fragmented (multi-range) rather than the single contiguous leading block: the
+/// push thread serialises every worker's writes FIFO, so cancelling before any
+/// worker past the leading one has flushed can leave only the leading block on
+/// disk, which is the race that made
+/// `test_concurrent_resume_with_fragmented_progress` flaky.
 async fn partial_download_via_cancel_with(
     url: &str,
     cfg: PartialConfig,
@@ -315,13 +333,20 @@ async fn partial_download_via_cancel_with(
     let mut started = false;
     let mut written = 0u64;
     let mut cancelled_at = None;
+    // A `PushProgress` whose `start` reaches past `MULTI_RANGE_GAP` can only come
+    // from a worker other than the leading one; once it has flushed, the merged
+    // progress holds at least two non-adjacent ranges.
+    let mut seen_far = false;
     while let Ok(e) = rx.recv().await {
         if matches!(e, Event::Start { .. }) {
             started = true;
         }
         if let Event::PushProgress(ref p) = e {
             written += p.end - p.start;
-            if cancelled_at.is_none() && written >= cancel_after {
+            if p.start >= MULTI_RANGE_GAP {
+                seen_far = true;
+            }
+            if cancelled_at.is_none() && written >= cancel_after && seen_far {
                 cancelled_at = Some(written);
                 cancel.cancel();
             }
