@@ -198,20 +198,31 @@ impl Task {
         let range = self.get();
         range.end.saturating_sub(range.start)
     }
+    /// Splits the work range in half, handing `mid..end` back to the caller as a
+    /// new task and keeping `start..mid` in `self`.
+    ///
+    /// The split only proceeds when both halves are at least `min_chunk_size`,
+    /// i.e. `remain >= min_chunk_size * 2`. That test runs *inside* the
+    /// compare-and-swap loop against the same atomic snapshot the commit
+    /// observes, so a concurrent cursor-sharer (`share_state`) advancing `start`
+    /// between the call and the commit cannot leak a half smaller than
+    /// `min_chunk_size`. When the range is too small to split under
+    /// `min_chunk_size`, returns `Ok(None)` without modifying `self`.
+    ///
     /// # Errors
     /// 1. Returns [`RangeError`] when `start > end`
-    /// 2. Returns `None` when `remain < 2` without modifying itself
-    pub fn split_two(&self) -> Result<Option<Range<u64>>, RangeError> {
+    /// 2. Returns `None` when `remain < min_chunk_size * 2` without modifying itself
+    pub fn split_two(&self, min_chunk_size: u64) -> Result<Option<Range<u64>>, RangeError> {
         let mut old_state = self.0.state.load(Ordering::Acquire);
         loop {
             let range = Self::unpack(old_state);
             if range.start > range.end {
                 return Err(RangeError);
             }
-            let mid = range.start.midpoint(range.end);
-            if mid == range.start {
+            if range.end - range.start < min_chunk_size.saturating_mul(2) {
                 return Ok(None);
             }
+            let mid = range.start.midpoint(range.end);
             let new_state = Self::pack(range.start..mid);
             match self.0.state.compare_exchange_weak(
                 old_state,
@@ -357,7 +368,7 @@ mod tests {
     #[test]
     fn test_split_two() {
         let task = Task::new(1..6); // 1, 2, 3, 4, 5
-        let range = task.split_two().unwrap().unwrap();
+        let range = task.split_two(1).unwrap().unwrap();
         assert_eq!(task.start(), 1);
         assert_eq!(task.end(), 3);
         assert_eq!(range.start, 3);
@@ -367,7 +378,7 @@ mod tests {
     #[test]
     fn test_split_empty() {
         let task = Task::new(1..1);
-        let range = task.split_two().unwrap();
+        let range = task.split_two(1).unwrap();
         assert_eq!(task.start(), 1);
         assert_eq!(task.end(), 1);
         assert_eq!(range, None);
@@ -376,7 +387,7 @@ mod tests {
     #[test]
     fn test_split_one() {
         let task = Task::new(1..2);
-        let range = task.split_two().unwrap();
+        let range = task.split_two(1).unwrap();
         assert_eq!(task.start(), 1);
         assert_eq!(task.end(), 2);
         assert_eq!(range, None);
@@ -438,9 +449,27 @@ mod tests {
     #[test]
     fn test_split_two_halves() {
         let task = Task::new(0..100);
-        let range = task.split_two().unwrap().unwrap();
+        let range = task.split_two(1).unwrap().unwrap();
         assert_eq!(range, 50..100);
         assert_eq!(task.get(), 0..50);
+    }
+
+    #[test]
+    fn split_two_respects_min_chunk_size() {
+        // `remain == 2 * min - 1` cannot yield two halves each >= min.
+        let task = Task::new(0..(2 * 8 - 1)); // remain = 15, min = 8
+        assert_eq!(task.split_two(8), Ok(None));
+        assert_eq!(task.get(), 0..15); // unchanged on refusal
+
+        // `remain == 2 * min` splits into exactly two `min`-sized halves.
+        let task = Task::new(0..16);
+        let range = task.split_two(8).unwrap().unwrap();
+        assert_eq!(range, 8..16);
+        assert_eq!(task.get(), 0..8);
+
+        // A chunk smaller than `min` is never handed out.
+        let task = Task::new(0..10);
+        assert_eq!(task.split_two(8), Ok(None));
     }
 
     #[test]
@@ -507,7 +536,7 @@ mod tests {
             let t = task.clone();
             handles.push(thread::spawn(
                 move || {
-                    while t.split_two().unwrap().is_some() {}
+                    while t.split_two(1).unwrap().is_some() {}
                 },
             ));
         }
@@ -545,7 +574,7 @@ mod tests {
         let bad = Task::from_raw_state(std::sync::Arc::new(portable_atomic::AtomicU128::new(
             (20u128 << 64) | 0xA,
         )));
-        assert_eq!(bad.split_two(), Err(RangeError));
+        assert_eq!(bad.split_two(1), Err(RangeError));
     }
 
     /// `RangeError`'s rendered text is part of the public API (it surfaces in
@@ -692,7 +721,7 @@ mod tests {
         // The corrupted state is preserved, not normalised away, so it stays
         // diagnosable -- and `take` agrees with `split_two` on the same input.
         assert_eq!(bad.get(), inverted);
-        assert_eq!(bad.split_two(), Err(RangeError));
+        assert_eq!(bad.split_two(1), Err(RangeError));
     }
 
     /// `remain` uses `saturating_sub`, so an inverted range reports 0 instead
@@ -833,12 +862,12 @@ mod tests {
     #[test]
     fn split_two_handles_u64_extremes_without_overflow() {
         let task = Task::new(0..u64::MAX);
-        let hi = task.split_two().unwrap().unwrap();
+        let hi = task.split_two(1).unwrap().unwrap();
         assert_eq!(hi, (u64::MAX / 2)..u64::MAX);
         assert_eq!(task.get(), 0..(u64::MAX / 2));
 
         let task = Task::new((u64::MAX - 3)..u64::MAX);
-        let hi = task.split_two().unwrap().unwrap();
+        let hi = task.split_two(1).unwrap().unwrap();
         assert_eq!(hi, (u64::MAX - 2)..u64::MAX);
         assert_eq!(task.get(), (u64::MAX - 3)..(u64::MAX - 2));
     }

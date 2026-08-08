@@ -113,14 +113,12 @@ impl<H: Handle> TaskQueue<H> {
                 .filter(|w| w != task)
                 .max_by_key(Task::remain)
         {
-            if steal_task.remain() >= min_chunk_size.saturating_mul(2)
-                && let Ok(Some(range)) = steal_task.split_two()
-            {
+            if let Ok(Some(range)) = steal_task.split_two(min_chunk_size) {
                 *task = Task::new(range);
                 found = true;
             } else if max_speculative > 1
-                && steal_task.remain() > 0
                 && steal_task.sharer_count() < max_speculative
+                && steal_task.remain() > 0
             {
                 task.share_state(&steal_task);
                 found = true;
@@ -149,7 +147,7 @@ impl<H: Handle> TaskQueue<H> {
         let len = guard.running.len();
         if len < threads {
             let executor = executor?;
-            let need = (threads - len).min(guard.waiting.len());
+            let need = guard.waiting.len().min(threads - len);
             let mut temp = Vec::with_capacity(need);
             let iter = guard.waiting.drain(..need);
             for task in iter {
@@ -164,8 +162,7 @@ impl<H: Handle> TaskQueue<H> {
                     .iter()
                     .filter_map(|w| w.0.upgrade())
                     .max_by_key(Task::remain)
-                && steal_task.remain() >= min_chunk_size.saturating_mul(2)
-                && let Ok(Some(range)) = steal_task.split_two()
+                && let Ok(Some(range)) = steal_task.split_two(min_chunk_size)
             {
                 let task = Task::new(range);
                 let weak = task.downgrade();
