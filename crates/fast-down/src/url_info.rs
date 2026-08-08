@@ -115,7 +115,7 @@ mod tests {
         #[cfg(feature = "sanitize-filename")]
         {
             let name = info.filename();
-            assert!(!name.is_empty());
+            assert_ne!(name, "");
             assert!(!name.contains(['/', ':', '*', '?']));
         }
     }
@@ -143,7 +143,7 @@ mod tests {
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4")),
             "extension lost: {name}"
         );
-        assert!(!name.is_empty());
+        assert_ne!(name, "");
         assert!(
             !name.contains('\u{fffd}'),
             "replacement char indicates a split code point: {name}"
