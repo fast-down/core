@@ -192,7 +192,7 @@ where
                     if task_queue.steal(&id, &mut task, min_chunk_size, max_speculative) {
                         continue 'task;
                     }
-                    break;
+                    break 'task;
                 }
                 let _ = tx.send(Event::Pulling(id));
                 let download_range = start..task.end();

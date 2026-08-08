@@ -39,7 +39,8 @@ pub trait Pusher: Send + 'static {
     /// the callback; every wrapper **must** override this to forward it to its
     /// inner pusher, otherwise progress events are silently dropped.
     #[allow(clippy::needless_pass_by_value)]
-    fn set_listener(&mut self, _cb: ProgressListener) {}
+    #[allow(unused_variables)]
+    fn set_listener(&mut self, cb: ProgressListener) {}
 }
 
 /// Marker trait for type-erased error types.
