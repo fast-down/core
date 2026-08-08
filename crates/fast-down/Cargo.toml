@@ -48,7 +48,6 @@ cookie-store = ["reqwest/cookies"]
 
 # Features from fast-pull
 file = ["fast-pull/file"]
-mem = ["fast-pull/mem"]
 
 [lints]
 workspace = true

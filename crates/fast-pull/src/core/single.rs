@@ -151,7 +151,6 @@ pub fn download_single<R: Puller, W: Pusher>(
 }
 
 #[cfg(test)]
-#[cfg(feature = "mem")]
 mod tests {
     #![allow(clippy::cast_possible_truncation)]
     use super::*;
@@ -344,7 +343,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "mem", feature = "file"))]
+    #[cfg(feature = "file")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_sequential_download_abort_discards_file() {
         use std::io::Read;

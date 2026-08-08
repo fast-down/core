@@ -5,8 +5,8 @@ mod cache;
 mod core;
 #[cfg(feature = "file")]
 pub mod file;
-#[cfg(feature = "mem")]
-pub mod mem;
+mod mem;
 pub use base::*;
 pub use cache::*;
 pub use core::*;
+pub use mem::*;

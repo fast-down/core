@@ -269,7 +269,6 @@ where
 }
 
 #[cfg(test)]
-#[cfg(feature = "mem")]
 mod tests {
     #![allow(clippy::cast_possible_truncation)]
     use vec::Vec;

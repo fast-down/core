@@ -312,7 +312,6 @@ fn is_redirection(status: StatusCode) -> bool {
 }
 
 #[cfg(test)]
-#[cfg(feature = "mem")]
 mod tests {
     #![allow(
         clippy::unwrap_used,
@@ -326,8 +325,7 @@ mod tests {
         url_info::FileId,
     };
     use fast_pull::{
-        Event, Merge,
-        mem::MemPusher,
+        Event, MemPusher, Merge,
         mock::build_mock_data,
         multi::{self, download_multi},
         single::{self, download_single},

@@ -28,7 +28,6 @@ tokio = { workspace = true, features = ["io-util", "rt-multi-thread"] }
 
 [features]
 file = ["dep:memmap2", "tokio/fs"]
-mem = []
 
 [lints]
 workspace = true

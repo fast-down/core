@@ -291,7 +291,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "mem")]
     fn random_access_write_is_correct_with_mem_pusher() {
         let mem = crate::mem::MemPusher::with_capacity(16);
         let mut bp = BufWriterPusher::new(mem, 8 * 1024);
