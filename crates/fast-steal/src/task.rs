@@ -84,13 +84,14 @@ impl WeakTask {
     }
 }
 
-/// Error returned when a task range invariant is violated (`start > end` or overflow).
+/// Error returned when a task range invariant is violated (`start > end`), or
+/// when [`safe_add_start`](Task::safe_add_start) cannot make forward progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RangeError;
 
 impl fmt::Display for RangeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Range invariant violated: start > end or overflow")
+        write!(f, "Range invariant violated: start > end")
     }
 }
 
@@ -149,10 +150,10 @@ impl Task {
     ///
     /// # Errors
     /// Returns [`RangeError`] when `start + bias` would not exceed the current
-    /// `start` (no progress, a non-positive bias, or `u64` overflow), or when
+    /// `start` (no progress, a non-positive bias), or when
     /// `start` runs ahead of the task's cursor.
     pub fn safe_add_start(&self, start: u64, bias: u64) -> Result<Range<u64>, RangeError> {
-        let new_start = start.checked_add(bias).ok_or(RangeError)?;
+        let new_start = start.saturating_add(bias);
         let mut old_state = self.0.state.load(Ordering::Acquire);
         loop {
             let mut range = Self::unpack(old_state);
@@ -554,14 +555,8 @@ mod tests {
     fn range_error_display_and_error_impl() {
         use std::{error::Error, format, string::ToString};
         let e = RangeError;
-        assert_eq!(
-            e.to_string(),
-            "Range invariant violated: start > end or overflow"
-        );
-        assert_eq!(
-            format!("{e}"),
-            "Range invariant violated: start > end or overflow"
-        );
+        assert_eq!(e.to_string(), "Range invariant violated: start > end");
+        assert_eq!(format!("{e}"), "Range invariant violated: start > end");
         let as_dyn: &dyn Error = &e;
         assert!(as_dyn.source().is_none());
     }
@@ -613,15 +608,22 @@ mod tests {
         assert_eq!(Task::new(0..u64::MAX).remain(), u64::MAX);
     }
 
-    /// The `checked_add` overflow guard (`task.rs` line 117) had no coverage:
-    /// existing tests only hit the "no forward progress" rejection.
+    /// `start + bias` overflow no longer errors: it saturates to `u64::MAX` and
+    /// the claim is clamped by `min(end)`, so an overflowing bias claims the
+    /// entire remaining range instead of failing.
     #[test]
-    fn safe_add_start_rejects_u64_overflow() {
+    fn safe_add_start_saturates_on_u64_overflow() {
         let task = Task::new(0..u64::MAX);
-        assert_eq!(task.safe_add_start(u64::MAX, 1), Err(RangeError));
-        assert_eq!(task.safe_add_start(1, u64::MAX), Err(RangeError));
-        // A rejected call must leave the task untouched.
-        assert_eq!(task.get(), 0..u64::MAX);
+        let span = task.safe_add_start(0, u64::MAX).unwrap();
+        assert_eq!(span, 0..u64::MAX);
+        assert_eq!(task.get(), u64::MAX..u64::MAX);
+        assert_eq!(task.remain(), 0);
+
+        // Saturation at a non-zero cursor still clamps at `end`, never beyond.
+        let task = Task::new((u64::MAX - 5)..u64::MAX);
+        let span = task.safe_add_start(u64::MAX - 5, u64::MAX).unwrap();
+        assert_eq!(span, (u64::MAX - 5)..u64::MAX);
+        assert_eq!(task.remain(), 0);
     }
 
     /// `safe_add_start` never verifies that the caller-supplied `start` matches
