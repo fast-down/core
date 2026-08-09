@@ -260,22 +260,25 @@ mod tests {
     }
 
     #[test]
-    fn filename_star_raw_non_ascii_single_char_truncates_to_garbage() {
-        // `percent_decode` pushes `c as u8` for non-'%' chars. U+6D4B '测'
-        // truncates to 0x4B ('K'), which is valid ASCII, so the result is the
-        // garbage "K" rather than a decode failure. RFC 5987 requires
-        // percent-encoding, so this input is invalid; the current parser does
-        // not reject it gracefully.
+    fn filename_star_raw_non_ascii_single_char_is_preserved() {
+        // A single literal CJK char is valid UTF-8; `urlencoding::decode`
+        // passes it through unchanged (the parser no longer truncates
+        // non-ASCII bytes to their low byte).
         let s = "attachment; filename*=UTF-8''测";
-        assert_eq!(ContentDisposition::parse(s).filename.as_deref(), Some("K"));
+        assert_eq!(ContentDisposition::parse(s).filename.as_deref(), Some("测"));
     }
 
     #[test]
-    fn filename_star_raw_non_ascii_invalid_utf8_is_dropped() {
-        // '测' -> 0x4B, '试' -> 0xD5; 0xD5 is not a valid UTF-8 leading byte for
-        // the bytes that follow, so `from_utf8` fails and `filename*` is dropped.
+    fn filename_star_literal_cjk_is_preserved() {
+        // `filename*` is not fully percent-encoded (literal CJK instead of
+        // `%XX`), which is non-standard per RFC 5987. The parser preserves the
+        // literal UTF-8 text via `urlencoding::decode` (compatibility fix for
+        // non-standard servers), so the value is kept rather than dropped.
         let s = "attachment; filename*=UTF-8''测试";
-        assert_eq!(ContentDisposition::parse(s).filename, None);
+        assert_eq!(
+            ContentDisposition::parse(s).filename,
+            Some("测试".to_string())
+        );
     }
 
     #[test]
@@ -301,17 +304,12 @@ mod tests {
     }
 
     #[test]
-    fn test_filename_star_literal_multibyte_truncated() {
-        // Known limitation (hypothesis B): `percent_decode` pushes non-'%'
-        // chars with `c as u8`, truncating multibyte UTF-8. A malformed
-        // `filename*` mixing a percent-encoded byte with a literal multibyte
-        // char ("%41" + "é") yields invalid UTF-8 and the value is dropped
-        // (None), falling back to the URL path/host name. RFC 5987 requires
-        // `filename*` to be fully percent-encoded, so literal non-ASCII is
-        // malformed input; dropping it is the defensible behavior. Kept as a
-        // regression guard: a future fix that decodes correctly must update
-        // this assertion.
+    fn test_filename_star_mixed_percent_and_literal_preserved() {
+        // Mixing a percent-encoded byte with a literal non-ASCII char: `%41`
+        // decodes to "A" and the literal "é" is preserved by
+        // `urlencoding::decode`. The parser keeps the whole value (compatibility
+        // fix for non-standard input).
         let s = "attachment; filename*=UTF-8''%41é";
-        assert_eq!(ContentDisposition::parse(s).filename, None);
+        assert_eq!(ContentDisposition::parse(s).filename.as_deref(), Some("Aé"));
     }
 }
