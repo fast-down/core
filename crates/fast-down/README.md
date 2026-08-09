@@ -50,7 +50,7 @@ use std::time::Duration;
 use url::Url;
 
 use fast_down::{FastDownPuller, FastDownPullerOptions, FileId, Proxy};
-use fast_pull::file::StdFilePusher;
+use fast_pull::StdFilePusher;
 use fast_pull::multi::DownloadOptions;
 
 #[tokio::main]

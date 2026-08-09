@@ -22,11 +22,11 @@ byte ranges from any source to any sink.
    A download is just a `Puller` (source) feeding a `Pusher` (sink). Bring your
    own, or use the built-ins. `Puller` must be `Clone` so work can be stolen and
    retried; `Pusher` reports partial failures so the engine can retry them.
-3. **💾 Multiple write paths** (feature-gated)
+3. **💾 Multiple write paths** (`file` is feature-gated; `mem` is always available)
    - `file` — `StdFilePusher` (raw `std::fs::File` random-access writes) and
      `MmapFilePusher` (memory-mapped zero-copy writes), plus the ready-made
      `CacheFilePusher` stack.
-   - `mem` — `MemPusher`, an in-memory sink backed by a shared `Vec<u8>`.
+   - `mem` — `MemPusher`, an in-memory sink backed by a shared `Vec<u8>` (always available, no feature gate).
 4. **🧩 Out-of-order & buffered writes**
    Cache decorators `CacheDirectPusher`, `CacheMergePusher`, and
    `CacheSeqPusher` absorb out-of-order chunks (keyed by `range.start`) and
@@ -53,7 +53,7 @@ use fast_pull::{
 };
 
 /// A minimal in-memory [`Pusher`] so this example compiles with **no** optional
-/// features. In real code, prefer `fast_pull::mem::MemPusher` (feature `mem`) or
+/// features. In real code, prefer `fast_pull::MemPusher` (always available) or
 /// a file pusher (feature `file`).
 #[derive(Clone, Default)]
 struct VecPusher {

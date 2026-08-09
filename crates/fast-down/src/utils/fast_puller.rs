@@ -6,7 +6,7 @@
 //! one from [`FastDownPullerOptions`] (typically via [`build_client`] to wire up
 //! the underlying reqwest client), then pass it to `fast_pull::download_multi`
 //! or `fast_pull::download_single` alongside a `Pusher` such as
-//! `fast_pull::file::StdFilePusher` (requires the `file` feature of `fast-pull`).
+//! `fast_pull::StdFilePusher` (requires the `file` feature of `fast-pull`).
 
 use crate::Proxy;
 use crate::{

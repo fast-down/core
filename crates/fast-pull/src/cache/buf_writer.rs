@@ -14,7 +14,7 @@ use bytes::{Bytes, BytesMut};
 /// not contiguous with the buffered run.
 ///
 /// This keeps the whole write chain in the `Pusher` abstraction: any `Pusher` (for
-/// example a raw file sink such as `crate::file::StdFilePusher`) can be
+/// example a raw file sink such as `crate::StdFilePusher`) can be
 /// wrapped to gain syscall / inner-call batching without depending on
 /// `std::io::BufWriter`.
 ///
