@@ -50,7 +50,7 @@ impl StdFilePusher {
 
     /// # Errors
     /// Returns an error if `Seek`, `Write`, or `WriteZero` occurs.
-    pub fn write_at(&mut self, start: u64, mut bytes: &[u8]) -> std::io::Result<()> {
+    fn write_at(&mut self, start: u64, mut bytes: &[u8]) -> std::io::Result<()> {
         if self.p != start {
             if let Err(e) = self.file.seek(SeekFrom::Start(start)) {
                 self.p = u64::MAX;
@@ -75,10 +75,7 @@ impl StdFilePusher {
                     bytes = &bytes[n..];
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => {
-                    self.p = u64::MAX;
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             }
         }
         Ok(())
@@ -99,11 +96,15 @@ impl Pusher for StdFilePusher {
         let start = range.start;
         if let Err(e) = self.write_at(start, &bytes) {
             #[allow(clippy::cast_possible_truncation)]
-            let written_len = if self.p >= start && self.p <= start + bytes.len() as u64 {
-                (self.p - start) as usize
+            let written_len = if self.p >= start
+                && let offset = (self.p - start) as usize
+                && offset <= bytes.len()
+            {
+                offset
             } else {
                 0
             };
+            self.p = u64::MAX;
             let remaining_bytes = if written_len < bytes.len() {
                 bytes.slice(written_len..)
             } else {

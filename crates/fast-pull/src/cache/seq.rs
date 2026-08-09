@@ -53,8 +53,8 @@ impl<P: Pusher> CacheSeqPusher<P> {
             let next_pos = start + chunk_len as u64;
             self.cache_size -= chunk_len;
             if let Err((e, ret)) = self.inner.push(&(start..next_pos), chunk) {
-                let written = chunk_len.saturating_sub(ret.len());
                 if !ret.is_empty() {
+                    let written = chunk_len.saturating_sub(ret.len());
                     self.cache_size += ret.len();
                     if let Some(old) = self.cache.insert(start + written as u64, ret) {
                         self.cache_size -= old.len();

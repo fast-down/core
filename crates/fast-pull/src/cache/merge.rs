@@ -108,8 +108,8 @@ impl<P: Pusher> CacheMergePusher<P> {
                 self.cache_size -= total_len;
                 if let Err((e, ret_bytes)) = self.inner.push(&range, chunk) {
                     err = Some(e);
-                    let written = total_len.saturating_sub(ret_bytes.len());
                     if !ret_bytes.is_empty() {
+                        let written = total_len.saturating_sub(ret_bytes.len());
                         self.cache_size += ret_bytes.len();
                         if let Some(old) = self.cache.insert(start + written as u64, ret_bytes) {
                             self.cache_size -= old.len();
