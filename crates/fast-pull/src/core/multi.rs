@@ -946,21 +946,19 @@ mod tests {
                     // worker re-pulls the remaining range.
                     let head = data.get(..2).unwrap_or(&data);
                     let items = vec![Ok(Bytes::copy_from_slice(head))];
-                    let pending = stream::pending::<
-                        crate::PullResult<Bytes, std::convert::Infallible>,
-                    >();
+                    let pending =
+                        stream::pending::<crate::PullResult<Bytes, std::convert::Infallible>>();
                     Ok(stream::iter(items).chain(pending))
                 } else {
                     // Subsequent pulls return the full remaining range; the trailing
                     // `pending` is never polled because the worker exits the read
                     // loop on `start >= end` before reaching it.
-                    let items: Vec<crate::PullResult<Bytes, std::convert::Infallible>> =
-                        data.chunks(2)
-                            .map(|c| Ok(Bytes::copy_from_slice(c)))
-                            .collect();
-                    let pending = stream::pending::<
-                        crate::PullResult<Bytes, std::convert::Infallible>,
-                    >();
+                    let items: Vec<crate::PullResult<Bytes, std::convert::Infallible>> = data
+                        .chunks(2)
+                        .map(|c| Ok(Bytes::copy_from_slice(c)))
+                        .collect();
+                    let pending =
+                        stream::pending::<crate::PullResult<Bytes, std::convert::Infallible>>();
                     Ok(stream::iter(items).chain(pending))
                 }
             }

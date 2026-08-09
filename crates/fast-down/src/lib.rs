@@ -9,6 +9,7 @@ mod url_info;
 pub use url_info::*;
 
 mod utils;
+#[allow(unused_imports)]
 pub use utils::*;
 
 #[cfg(feature = "http")]
