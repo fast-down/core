@@ -21,7 +21,6 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::Duration,
 };
 use url::Url;
 
@@ -80,13 +79,8 @@ impl<Client: HttpClient> Debug for HttpPuller<Client> {
     }
 }
 
-type ResponseFut<Client> = Pin<
-    Box<
-        dyn Future<
-                Output = Result<GetResponse<Client>, (GetRequestError<Client>, Option<Duration>)>,
-            > + Send,
-    >,
->;
+type ResponseFut<Client> =
+    Pin<Box<dyn Future<Output = PullResult<GetResponse<Client>, GetRequestError<Client>>> + Send>>;
 
 type ChunkStream<Client> = Pin<Box<dyn Stream<Item = Result<Bytes, HttpError<Client>>> + Send>>;
 
@@ -140,7 +134,7 @@ struct RandRequestStream<Client: HttpClient> {
     file_id: FileId,
 }
 impl<Client: HttpClient> Stream for RandRequestStream<Client> {
-    type Item = Result<Bytes, (HttpError<Client>, Option<Duration>)>;
+    type Item = PullResult<Bytes, HttpError<Client>>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             break match &mut self.state {
@@ -199,6 +193,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use std::borrow::Cow;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     use super::*;
     use futures::TryStreamExt;
@@ -215,10 +210,7 @@ mod tests {
     impl HttpRequestBuilder for MockRequestBuilder {
         type Response = MockResponse;
         type RequestError = MockError;
-        fn send(
-            self,
-        ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>>
-        {
+        fn send(self) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> {
             std::future::ready(Ok(MockResponse::new()))
         }
     }
@@ -336,8 +328,7 @@ mod tests {
         type RequestError = MockError;
         fn send(
             self,
-        ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send
-        {
+        ) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> + Send {
             std::future::ready(Ok(MismatchResponse::new()))
         }
     }
@@ -382,8 +373,7 @@ mod tests {
         type RequestError = MockError;
         fn send(
             self,
-        ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send
-        {
+        ) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> + Send {
             std::future::ready(Err((MockError, None)))
         }
     }
@@ -402,8 +392,7 @@ mod tests {
         type RequestError = MockError;
         fn send(
             self,
-        ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send
-        {
+        ) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> + Send {
             std::future::ready(Ok(ChunkErrResponse::new()))
         }
     }
@@ -543,8 +532,7 @@ mod tests {
         type RequestError = MockError;
         fn send(
             self,
-        ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send
-        {
+        ) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> + Send {
             std::future::ready(Ok(ResumeResponse::new()))
         }
     }

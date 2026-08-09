@@ -27,8 +27,8 @@ pub use puller::*;
 
 use crate::url_info::FileId;
 use bytes::Bytes;
-use fast_pull::{ProgressEntry, PullerError};
-use std::{borrow::Cow, fmt::Debug, future::Future, time::Duration};
+use fast_pull::{ProgressEntry, PullResult, PullerError};
+use std::{borrow::Cow, fmt::Debug, future::Future};
 use url::Url;
 
 /// Abstraction over an HTTP client that can send GET requests with optional byte-range headers.
@@ -40,9 +40,7 @@ pub trait HttpClient: Clone + Send + Sync + Unpin + 'static {
 pub trait HttpRequestBuilder {
     type Response: HttpResponse;
     type RequestError: std::error::Error + Send + Sync + Unpin;
-    fn send(
-        self,
-    ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send;
+    fn send(self) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> + Send;
 }
 /// Abstraction over an HTTP response that provides headers, final URL, and chunked body reading.
 pub trait HttpResponse: Send + Sync + Debug + Unpin {
@@ -114,8 +112,8 @@ mod tests {
     use super::{HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse};
     use crate::url_info::FileId;
     use bytes::Bytes;
-    use fast_pull::PullerError;
-    use std::{borrow::Cow, future::Future, time::Duration};
+    use fast_pull::{PullResult, PullerError};
+    use std::{borrow::Cow, future::Future};
     use url::Url;
 
     #[derive(Clone, Debug)]
@@ -132,8 +130,7 @@ mod tests {
         type RequestError = MockErr;
         fn send(
             self,
-        ) -> impl Future<Output = Result<Self::Response, (Self::RequestError, Option<Duration>)>> + Send
-        {
+        ) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> + Send {
             std::future::ready(Ok(MockResponse::new()))
         }
     }

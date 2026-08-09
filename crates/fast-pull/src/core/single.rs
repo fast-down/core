@@ -271,7 +271,7 @@ mod tests {
         ) -> impl Future<
             Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
         > + Send {
-            type PullItem = Result<Bytes, (std::convert::Infallible, Option<Duration>)>;
+            type PullItem = crate::PullResult<Bytes, std::convert::Infallible>;
             let owned: Vec<u8> = match range {
                 Some(r) => self.data[r.start as usize..r.end as usize].to_vec(),
                 None => self.data.to_vec(),
@@ -513,7 +513,7 @@ mod tests {
                 Some(r) => &self.data[r.start as usize..r.end as usize],
                 None => &self.data,
             };
-            let items: Vec<Result<Bytes, (RecoverableErr, Option<Duration>)>> = data
+            let items: Vec<crate::PullResult<Bytes, RecoverableErr>> = data
                 .chunks(2)
                 .map(|c| Ok(Bytes::copy_from_slice(c)))
                 .collect();
@@ -535,7 +535,7 @@ mod tests {
             Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
         > + Send {
             if !self.failed.swap(true, Ordering::SeqCst) {
-                let items: Vec<Result<Bytes, (FatalErr, Option<Duration>)>> =
+                let items: Vec<crate::PullResult<Bytes, FatalErr>> =
                     vec![Err((FatalErr, Some(Duration::ZERO)))];
                 return std::future::ready(Ok(stream::iter(items)));
             }
@@ -543,7 +543,7 @@ mod tests {
                 Some(r) => &self.data[r.start as usize..r.end as usize],
                 None => &self.data,
             };
-            let items: Vec<Result<Bytes, (FatalErr, Option<Duration>)>> = data
+            let items: Vec<crate::PullResult<Bytes, FatalErr>> = data
                 .chunks(2)
                 .map(|c| Ok(Bytes::copy_from_slice(c)))
                 .collect();
@@ -575,7 +575,7 @@ mod tests {
                 Some(r) => &self.data[r.start as usize..r.end as usize],
                 None => &self.data,
             };
-            let mut items: Vec<Result<Bytes, (RecoverableErr, Option<Duration>)>> = data
+            let mut items: Vec<crate::PullResult<Bytes, RecoverableErr>> = data
                 .chunks(2)
                 .map(|c| Ok(Bytes::copy_from_slice(c)))
                 .collect();
@@ -798,7 +798,7 @@ mod tests {
                 Some(r) => &self.data[r.start as usize..r.end as usize],
                 None => &self.data,
             };
-            let items: Vec<Result<Bytes, (RecoverableErr, Option<Duration>)>> = data
+            let items: Vec<crate::PullResult<Bytes, RecoverableErr>> = data
                 .chunks(2)
                 .map(|c| Ok(Bytes::copy_from_slice(c)))
                 .collect();

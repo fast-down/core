@@ -13,12 +13,13 @@ use crate::{
     },
     url_info::FileId,
 };
-use std::{borrow::Borrow, future::Future, time::Duration};
+use fast_pull::PullResult;
+use std::{borrow::Borrow, future::Future};
 use url::Url;
 
 /// Result of a prefetch operation: the metadata ([`UrlInfo`]) and the initial HTTP response.
 pub type PrefetchResult<Client> =
-    Result<(UrlInfo, GetResponse<Client>), (GetRequestError<Client>, Option<Duration>)>;
+    PullResult<(UrlInfo, GetResponse<Client>), GetRequestError<Client>>;
 
 /// Trait for fetching resource metadata (size, filename, range support) from a URL.
 ///
@@ -105,7 +106,7 @@ async fn prefetch_no_range<Client: HttpClient>(
 async fn is_support_range<Client: HttpClient>(
     client: &Client,
     url: Url,
-) -> Result<bool, (HttpError<Client>, Option<Duration>)> {
+) -> PullResult<bool, HttpError<Client>> {
     let resp = client
         .get(url, Some(0..1))
         .send()

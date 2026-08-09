@@ -256,7 +256,7 @@ mod tests {
             range: Option<&ProgressEntry>,
         ) -> impl Future<Output = PullResult<impl PullStream<Self::Error>, Self::Error>> + Send
         {
-            type PullItem = Result<Bytes, (std::convert::Infallible, Option<Duration>)>;
+            type PullItem = PullResult<Bytes, std::convert::Infallible>;
             let owned: Vec<u8> = match range {
                 Some(r) => self.data[r.start as usize..r.end as usize].to_vec(),
                 None => self.data.to_vec(),

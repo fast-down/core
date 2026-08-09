@@ -18,7 +18,7 @@ use crate::http::{
     HttpClient, HttpHeaders, HttpRequestBuilder, HttpResponse,
     manual_redirect::{ReferrerPolicy, compute_referer},
 };
-use fast_pull::ProgressEntry;
+use fast_pull::{ProgressEntry, PullResult};
 use httpdate::parse_http_date;
 use reqwest::{
     Client, RequestBuilder, Response, StatusCode,
@@ -47,7 +47,7 @@ impl HttpClient for Client {
 impl HttpRequestBuilder for RequestBuilder {
     type Response = Response;
     type RequestError = ReqwestResponseError;
-    async fn send(self) -> Result<Self::Response, (Self::RequestError, Option<Duration>)> {
+    async fn send(self) -> PullResult<Self::Response, Self::RequestError> {
         let res = self
             .send()
             .await
@@ -213,7 +213,7 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
     type Response = Response;
     type RequestError = ReqwestResponseError;
 
-    async fn send(mut self) -> Result<Response, (Self::RequestError, Option<Duration>)> {
+    async fn send(mut self) -> PullResult<Response, Self::RequestError> {
         loop {
             let mut req = self.client.get(self.url.clone());
             if let Some(ref range) = self.range {

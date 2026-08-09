@@ -75,6 +75,10 @@ pub fn compute_referer(
     prev_url: &Url,
     next_url: &Url,
 ) -> Option<String> {
+    if !matches!(prev_url.scheme(), "http" | "https") {
+        return None;
+    }
+
     let downgrade = is_downgrade(prev_url, next_url);
     let same = prev_url.origin() == next_url.origin();
     let origin = || prev_url.origin().ascii_serialization();

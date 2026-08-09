@@ -108,10 +108,11 @@ impl ContentDisposition {
     }
 
     /// Read an unquoted token (value)
-    /// Stops at `;` or **whitespace**
+    /// Stops at `=` or `;` or **whitespace**
     fn read_token(chars: &mut Peekable<Chars<'_>>) -> String {
         let mut s = String::new();
         while let Some(&c) = chars.peek()
+            && c != '='
             && c != ';'
             && !c.is_whitespace()
         {
@@ -151,27 +152,12 @@ impl ContentDisposition {
         parts.next()?;
         let encoded_text = parts.next()?;
         if charset.eq_ignore_ascii_case("UTF-8") {
-            Self::percent_decode(encoded_text)
+            urlencoding::decode(encoded_text)
+                .ok()
+                .map(|s| s.to_string())
         } else {
             None
         }
-    }
-
-    fn percent_decode(s: &str) -> Option<String> {
-        let mut bytes = Vec::with_capacity(s.len());
-        let mut chars = s.chars();
-        while let Some(c) = chars.next() {
-            if c == '%' {
-                let h = chars.next()?.to_digit(16)?;
-                let l = chars.next()?.to_digit(16)?;
-                #[allow(clippy::cast_possible_truncation)]
-                let byte = ((h as u8) << 4) | (l as u8);
-                bytes.push(byte);
-            } else {
-                bytes.push(c as u8);
-            }
-        }
-        String::from_utf8(bytes).ok()
     }
 }
 
