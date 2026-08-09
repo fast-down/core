@@ -7,21 +7,12 @@
 //! rather than silently corrupting an incremental download.
 
 use crate::http::{
-    FileId, GetRequestError, GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder,
-    HttpResponse,
+    FileId, GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse,
 };
-use bytes::Bytes;
+use async_stream::stream;
 use fast_pull::{ProgressEntry, PullResult, PullStream, Puller};
-use futures::Stream;
 use parking_lot::Mutex;
-use std::{
-    fmt::Debug,
-    future::Future,
-    ops::Range,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::{fmt::Debug, future::Future, sync::Arc};
 use url::Url;
 
 /// A [`Puller`] implementation that fetches data over HTTP.
@@ -79,112 +70,116 @@ impl<Client: HttpClient> Debug for HttpPuller<Client> {
     }
 }
 
-type ResponseFut<Client> =
-    Pin<Box<dyn Future<Output = PullResult<GetResponse<Client>, GetRequestError<Client>>> + Send>>;
-
-type ChunkStream<Client> = Pin<Box<dyn Stream<Item = Result<Bytes, HttpError<Client>>> + Send>>;
-
-enum ResponseState<Client: HttpClient> {
-    Pending(ResponseFut<Client>),
-    Streaming(ChunkStream<Client>),
-    None,
-}
-
-fn into_chunk_stream<Client: HttpClient>(resp: GetResponse<Client>) -> ChunkStream<Client> {
-    Box::pin(futures::stream::try_unfold(resp, |mut r| async move {
-        match r.chunk().await {
-            Ok(Some(chunk)) => Ok(Some((chunk, r))),
-            Ok(None) => Ok(None),
-            Err(e) => Err(HttpError::Chunk(e, r)),
-        }
-    }))
-}
-
 impl<Client: HttpClient> Puller for HttpPuller<Client> {
     type Error = HttpError<Client>;
     fn pull(
         &mut self,
         range: Option<&ProgressEntry>,
-    ) -> impl Future<Output = PullResult<impl PullStream<Self::Error>, Self::Error>> {
-        let range = range.cloned().unwrap_or(0..u64::MAX);
-        std::future::ready(Ok(RandRequestStream {
-            client: self.client.clone(),
-            url: self.url.clone(),
-            state: if range.start == 0
-                && let Some(resp) = &self.resp
-                && let Some(resp) = resp.lock().take()
-            {
-                ResponseState::Streaming(into_chunk_stream(resp))
-            } else if range.end == u64::MAX {
-                let req = self.client.get((*self.url).clone(), None).send();
-                ResponseState::Pending(Box::pin(req))
-            } else {
-                ResponseState::None
-            },
-            range,
-            file_id: self.file_id.clone(),
-        }))
-    }
-}
-struct RandRequestStream<Client: HttpClient> {
-    client: Client,
-    url: Arc<Url>,
-    range: Range<u64>,
-    state: ResponseState<Client>,
-    file_id: FileId,
-}
-impl<Client: HttpClient> Stream for RandRequestStream<Client> {
-    type Item = PullResult<Bytes, HttpError<Client>>;
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            break match &mut self.state {
-                ResponseState::Pending(resp) => match resp.as_mut().poll(cx) {
-                    Poll::Ready(Ok(resp)) => {
-                        let new_file_id = FileId::new(
-                            resp.headers().get("etag").ok().as_deref(),
-                            resp.headers().get("last-modified").ok().as_deref(),
-                        );
-                        if new_file_id == self.file_id {
-                            self.state = ResponseState::Streaming(into_chunk_stream(resp));
-                            continue;
+    ) -> impl Future<Output = PullResult<impl PullStream<Self::Error>, Self::Error>> + Send {
+        let client = self.client.clone();
+        let url = self.url.clone();
+        let file_id = self.file_id.clone();
+        // Reuse the prefetched whole-file response whenever the requested range
+        // begins at offset 0. That covers both a whole-file request (`range ==
+        // None`) and a finite ranged slice (`Some(0..end)`): the prefetched body
+        // starts at 0, so it already contains the requested prefix. A slice with
+        // `start > 0` cannot be served from a response rooted at 0, so it issues
+        // its own ranged request. The download engine caps any overshoot to the
+        // task's end, so no per-chunk slicing is needed here.
+        let mut reused = if range.is_none_or(|r| r.start == 0) {
+            self.resp.as_ref().and_then(|m| m.lock().take())
+        } else {
+            None
+        };
+        // Keep the `Option`: `None` means a whole-file GET with no `Range` header
+        // (single-threaded, no known end), `Some(r)` means a ranged `Range:` request
+        // (multi-threaded slice, resumable). The two states are handled in distinct
+        // branches below — no `u64::MAX` sentinel.
+        let mut range = range.cloned();
+
+        std::future::ready(Ok(Box::pin(stream! {
+            // Stream contract: `Ok(None)` (clean termination) is reached ONLY on a
+            // genuine EOF — when `current.chunk()` returns `Ok(None)`. After any
+            // error the stream stays alive and keeps yielding `Irrecoverable`
+            // (whose `is_irrecoverable()` is true), so the engine re-invokes
+            // `pull` to recover and can never mistake a failed pull for a finished
+            // one. A ranged read failure instead breaks back to the top to resume
+            // from the advanced offset (`range.start` is itself the cursor — it
+            // holds the number of bytes already yielded and advances across
+            // retries, so a resumed ranged request starts from it).
+            loop {
+                // Obtain the response for this pass. The prefetched whole-file body
+                // is taken once (it is consumed on the first iteration and `reused`
+                // becomes `None`, so retries fall through to a fresh request). The
+                // request uses `range.clone()`: on the first pass `range.start` is
+                // the original start, and after yielding chunks it is the advanced
+                // offset, so a retry automatically resumes from where it stopped.
+                let mut current: GetResponse<Client>;
+                if let Some(resp) = reused.take() {
+                    current = resp;
+                } else {
+                    match client.get((*url).clone(), range.clone()).send().await {
+                        Ok(resp) => current = resp,
+                        Err((e, retry)) => {
+                            // The request itself failed: report it once, then keep
+                            // yielding `Irrecoverable` so the engine re-pulls. The
+                            // stream must never return `Ok(None)` here.
+                            yield Err((HttpError::Request(e), retry));
+                            loop {
+                                yield Err((HttpError::Irrecoverable, None));
+                            }
                         }
-                        self.state = ResponseState::None;
-                        Poll::Ready(Some(Err((
-                            HttpError::MismatchedBody(new_file_id, resp),
-                            None,
-                        ))))
                     }
-                    Poll::Ready(Err((e, d))) => {
-                        self.state = ResponseState::None;
-                        Poll::Ready(Some(Err((HttpError::Request(e), d))))
-                    }
-                    Poll::Pending => Poll::Pending,
-                },
-                ResponseState::None => {
-                    if self.range.end == u64::MAX {
-                        break Poll::Ready(Some(Err((HttpError::Irrecoverable, None))));
-                    }
-                    let resp = self
-                        .client
-                        .get((*self.url).clone(), Some(self.range.clone()))
-                        .send();
-                    self.state = ResponseState::Pending(Box::pin(resp));
-                    continue;
                 }
-                ResponseState::Streaming(stream) => match stream.as_mut().poll_next(cx) {
-                    Poll::Ready(Some(Ok(chunk))) => {
-                        self.range.start += chunk.len() as u64;
-                        Poll::Ready(Some(Ok(chunk)))
+
+                // File identity is verified for every response — the reused one and
+                // every retry — in a single, obvious place.
+                let new_file_id = FileId::new(
+                    current.headers().get("etag").ok().as_deref(),
+                    current.headers().get("last-modified").ok().as_deref(),
+                );
+                if new_file_id != file_id {
+                    // Content changed underneath us. Report the mismatch, then keep
+                    // yielding `Irrecoverable` until the engine re-pulls — the
+                    // stream never terminates with `Ok(None)` after an error.
+                    yield Err((HttpError::MismatchedBody(new_file_id, current), None));
+                    loop {
+                        yield Err((HttpError::Irrecoverable, None));
                     }
-                    Poll::Ready(Some(Err(e))) => {
-                        self.state = ResponseState::None;
-                        Poll::Ready(Some(Err((e, None))))
+                }
+
+                loop {
+                    match current.chunk().await {
+                        Ok(Some(chunk)) => {
+                            if let Some(r) = &mut range {
+                                r.start += chunk.len() as u64;
+                            }
+                            yield Ok(chunk);
+                        }
+                        Ok(None) => return,
+                        Err(e) => {
+                            // Report the underlying read failure (carries `current`
+                            // for diagnostics), then decide whether it is recoverable.
+                            yield Err((HttpError::Chunk(e, current), None));
+                            match &range {
+                                // Whole-file: there is no known end to resume from,
+                                // so the failure is fatal; the engine re-calls
+                                // `pull(None)` from the start.
+                                // Whole-file: no known end to resume from, so the
+                                // failure is terminal. Keep yielding `Irrecoverable`
+                                // (never `Ok(None)`) until the engine re-pulls.
+                                None => loop {
+                                    yield Err((HttpError::Irrecoverable, None));
+                                },
+                                // Ranged slice: `break` back to the top of the loop to
+                                // obtain a fresh request from the advanced `range.start`.
+                                Some(_) => break,
+                            }
+                        }
                     }
-                    Poll::Ready(None) => Poll::Ready(None),
-                    Poll::Pending => Poll::Pending,
-                },
-            };
-        }
+                }
+            }
+        })))
     }
 }
 
@@ -192,8 +187,12 @@ impl<Client: HttpClient> Stream for RandRequestStream<Client> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use std::borrow::Cow;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::task::{Context, Poll};
     use std::time::Duration;
+
+    use bytes::Bytes;
 
     use super::*;
     use futures::TryStreamExt;
@@ -478,6 +477,30 @@ mod tests {
         // next poll returns HttpError::Irrecoverable.
         let second = stream.try_next().await;
         assert!(matches!(second, Err((HttpError::Irrecoverable, None))));
+    }
+
+    #[tokio::test]
+    async fn test_http_puller_error_stream_never_terminates() {
+        // After a whole-file error the stream must keep yielding `Irrecoverable`
+        // and never produce `Ok(None)`: `Ok(None)` is reserved for a genuine EOF,
+        // so the engine can never treat a failed pull as finished.
+        let url = Url::parse("http://localhost").unwrap();
+        let client = ChunkErrClient;
+        let file_id = FileId::new(None, None);
+        let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
+        let mut stream = Puller::pull(&mut puller, None).await.unwrap();
+        // First poll: the chunk read error.
+        assert!(matches!(
+            stream.try_next().await,
+            Err((HttpError::Chunk(_, _), None))
+        ));
+        // Subsequent polls: always `Irrecoverable`, never `Ok(None)`.
+        for _ in 0..5 {
+            assert!(matches!(
+                stream.try_next().await,
+                Err((HttpError::Irrecoverable, None))
+            ));
+        }
     }
 
     #[tokio::test]

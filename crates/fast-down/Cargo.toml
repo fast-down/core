@@ -17,6 +17,7 @@ tokio.workspace = true
 bytes.workspace = true
 fast-pull.workspace = true
 futures.workspace = true
+async-stream = { version = "0.3", optional = true }
 httpdate = { version = "1.0", optional = true }
 parking_lot = { workspace = true, optional = true }
 path_helper = { version = "0.1", features = ["sanitize"], optional = true }
@@ -37,7 +38,7 @@ mockito = "1.7"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [features]
-http = ["dep:parking_lot", "dep:thiserror", "dep:urlencoding"]
+http = ["dep:parking_lot", "dep:thiserror", "dep:urlencoding", "dep:async-stream"]
 reqwest = ["dep:httpdate", "dep:reqwest", "http"]
 sanitize-filename = ["dep:path_helper"]
 serde = ["dep:serde", "url/serde"]
