@@ -162,5 +162,30 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-hack
+      - name: Install cargo-minimal-versions
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-minimal-versions
       - name: Check with minimal versions
-        run: cargo hack check --feature-powerset -Z minimal-versions
+        run: cargo hack minimal-versions check --feature-powerset
+
+  semver-checks:
+    name: Semver Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "ubuntu-stable"
+          add-job-id-key: "false"
+          cache-on-failure: "true"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: Run Semver Checks
+        run: cargo semver-checks --all-features
