@@ -2271,3 +2271,53 @@ async fn test_resume_rejects_non_part_extension() {
         "should not rename when tmp_path has wrong extension"
     );
 }
+
+/// A filename template that expands into a subdirectory of `save_dir` (e.g.
+/// `{parent_path}/{file_name}`) must make the download executor create that
+/// subdirectory before writing, so the file lands inside it.
+///
+/// This is the integration-level counterpart of the pure-`gen_path` contract:
+/// `gen_path` only computes the path and must not touch the filesystem, while
+/// `claim_and_run` creates the parent directory right before opening the file.
+#[tokio::test]
+async fn download_creates_template_subdir() {
+    let dir = temp_dir("template_subdir");
+    let (_server, base) = start_server(original_bytes(), "orig", "LM-A", true).await;
+    // A multi-segment URL path so `{parent_path}` expands to a non-empty subdir.
+    let url = format!("{base}/a/b/data.bin");
+
+    let cfg = PartialConfig {
+        save_dir: Some(dir.clone()),
+        filename: Some("{parent_path}/{file_name}".to_string()),
+        parse_filename: Some(true),
+        overwrite: Some(true),
+        write_method: Some(WriteMethod::Mmap),
+        min_chunk_size: Some(1024 * 1024),
+        threads: Some(32),
+        cache_high_watermark: Some(1),
+        cache_low_watermark: Some(0),
+        write_buffer_size: Some(1),
+        ..Default::default()
+    };
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = drain(rx).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "a template-subdir download must complete with Renamed"
+    );
+
+    let final_path = dir.join("a").join("b").join("data.bin");
+    assert!(
+        final_path.exists(),
+        "the template subdir must be created and the file must land inside it"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(
+        got,
+        original_bytes(),
+        "downloaded content must match source"
+    );
+}

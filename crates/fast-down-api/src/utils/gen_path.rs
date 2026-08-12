@@ -3,7 +3,6 @@ use fast_down::UrlInfo;
 use path_helper::{auto_ext, sanitize_filename, sanitize_path};
 use soft_canonicalize::soft_canonicalize;
 use std::{borrow::Cow, path::PathBuf};
-use tokio::fs;
 use url::Url;
 
 pub async fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Result<PathBuf> {
@@ -18,11 +17,7 @@ pub async fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Re
     );
     let mut save_dir = soft_canonicalize::soft_canonicalize(&config.save_dir)?;
     if config.parse_filename && !config.filename.is_empty() {
-        let path = PathBuf::from(parse_filename_template(
-            config.filename.clone(),
-            url,
-            &filename,
-        ));
+        let path = PathBuf::from(parse_filename_template(&config.filename, url, &filename));
         if let Some(s) = path.file_name() {
             filename = sanitize_filename(s.to_string_lossy().as_ref(), 248);
         }
@@ -106,8 +101,14 @@ mod tests {
         let p = gen_path(&url, &info, &cfg).await.unwrap();
         // parent_path of /a/b/data.bin is "a/b", so the resolved path ends with it.
         assert!(p.ends_with("a/b/data.bin"), "unexpected path: {p:?}");
-        // The synthesized parent directory must have been created by gen_path.
-        assert!(p.parent().is_some_and(std::path::Path::exists));
+        // `gen_path` only computes the path; it must NOT create the directory.
+        // Directory creation is the download executor's job (`claim_and_run`),
+        // covered by the integration test `download_creates_template_subdir`
+        // in tests/resume.rs.
+        assert!(
+            !p.parent().unwrap().exists(),
+            "gen_path must not touch the filesystem"
+        );
     }
 
     #[tokio::test]

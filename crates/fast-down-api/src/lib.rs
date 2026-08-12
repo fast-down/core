@@ -25,3 +25,14 @@ pub type Rx = crossfire::MAsyncRx<crossfire::mpmc::List<Event>>;
 pub fn create_channel() -> (Tx, Rx) {
     crossfire::mpmc::unbounded_async()
 }
+
+/// Create a new [`CancellationToken`] for cooperative cancellation of a download.
+///
+/// Pass the returned token to [`download`] (or a related entry
+/// point) and call
+/// [`CancellationToken::cancel`](tokio_util::sync::CancellationToken::cancel) to
+/// abort the in-flight download.
+#[must_use]
+pub fn create_cancellation_token() -> CancellationToken {
+    CancellationToken::new()
+}
