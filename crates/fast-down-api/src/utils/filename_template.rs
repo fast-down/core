@@ -18,7 +18,7 @@ pub fn parse_filename_template(template: &str, url: &Url, filename: &str) -> Str
         })
         .collect();
     parent_path.pop();
-    todo!("是否会导致两个连续的分隔符？");
+    parent_path.retain(|segment| !segment.is_empty());
     let parent_path = if parent_path.is_empty() {
         ".".to_string()
     } else {
