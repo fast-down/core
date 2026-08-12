@@ -437,6 +437,7 @@ dependencies = [
  "chrono",
  "crossfire",
  "fast-down",
+ "file_alloc",
  "futures",
  "http-body-util",
  "humantime-serde",
@@ -485,6 +486,17 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
+name = "file_alloc"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "152d511127cc6e0cf61912eb7f7f1a7e5c910c8c43d43f1f0ba7eb26d674f511"
+dependencies = [
+ "rustix",
+ "tokio",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -1222,9 +1234,9 @@ dependencies = [
 
 [[package]]
 name = "path_helper"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1cf0534c5a78bd12bd2c8d9ad3231f22ef07fc2205b5093e63e40cab4c4a8fc"
+checksum = "5c1b0eb8451e0718ff71661887df7206b717b33a17ebebe3bb74771ff5e8c1e1"
 dependencies = [
  "mime_guess",
  "sanitize-filename",

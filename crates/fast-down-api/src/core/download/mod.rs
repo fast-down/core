@@ -1,11 +1,7 @@
-use crate::core::download::overwrite::OverwriteOption;
 use crate::utils::ForceSendExt;
 use crate::{DownloadState, Event, StateError};
-use crate::{PartialConfig, Tx, prefetch, tx_err, utils::gen_path};
+use crate::{PartialConfig, TerminationReason, Tx};
 use fast_down::UrlInfo;
-use inherit_config::ConfigLayer;
-use overwrite::overwrite;
-use path_helper::IterStemExt;
 use std::path::Path;
 use tokio::fs::{self, OpenOptions};
 use tokio_util::sync::CancellationToken;
@@ -13,7 +9,10 @@ use url::Url;
 
 mod overwrite;
 mod pipeline;
+mod plan;
 mod progress_reporter;
+
+pub use plan::*;
 
 fn open_existing() -> OpenOptions {
     let mut o = OpenOptions::new();
@@ -33,12 +32,14 @@ fn open_create_new() -> OpenOptions {
 
 /// Attempt to load and validate a resume state from disk.
 ///
-/// This helper consolidates the resume logic shared between `run_download` (overwrite and non-overwrite branches)
-/// and `run_resume`. It checks if both `.fd` and `.part` exist, validates the state against the current server info,
-/// and merges the new config into the loaded state.
+/// This checks that both the `.fd` and `.part` exist, validates the state
+/// against the current server info, and merges the new config into the loaded
+/// state.
 ///
-/// Returns `Ok(Some(state))` if resume is possible, `Ok(None)` if no resume state exists (caller should start fresh),
-/// or `Err(StateError)` if the state exists but is invalid.
+/// Returns `Ok(Some(state))` if resume is possible, `Ok(None)` if there is
+/// nothing usable to resume from (the pair is incomplete, or the `.part` is
+/// shorter than the recorded progress), or `Err(StateError)` if the state exists
+/// but does not describe the current remote file.
 #[allow(clippy::result_large_err)]
 async fn try_load_resume_state(
     url: &Url,
@@ -61,22 +62,10 @@ async fn try_load_resume_state(
     // Validate the state against current server info
     state.validate(info)?;
 
-    // Check that the .part file size is consistent with the recorded progress.
-    // Only applies to regular files — directories or other special files are not a
-    // valid .part and will fail later when build_pipeline tries to open them.
-    if let Ok(metadata) = fs::metadata(tmp_path).await
-        && metadata.is_file()
-    {
-        let actual_size = metadata.len();
-        let recorded_progress = state.get_progress();
-        let max_recorded_end = recorded_progress.iter().map(|r| r.end).max().unwrap_or(0);
-
-        if actual_size < max_recorded_end {
-            // The .part file is smaller than what we think is already downloaded.
-            // This could lead to data corruption if we continue with resume.
-            // Treat this as if no valid state exists and start fresh.
-            return Ok(None);
-        }
+    // A `.part` shorter than the recorded progress claims bytes that are not on
+    // disk; continuing would leave that span zero-filled and never fetched.
+    if state.part_shortfall(tmp_path).await.is_some() {
+        return Ok(None);
     }
 
     // Merge the new config into the loaded state

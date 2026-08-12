@@ -12,7 +12,8 @@ pub async fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Re
             auto_ext(&info.raw_name, info.content_type.as_deref())
         } else {
             Cow::Borrowed(config.filename.as_str())
-        },
+        }
+        .as_ref(),
         248,
     );
     let mut save_dir = soft_canonicalize::soft_canonicalize(&config.save_dir)?;
@@ -23,7 +24,7 @@ pub async fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Re
             &filename,
         ));
         if let Some(s) = path.file_name() {
-            filename = sanitize_filename(s.to_string_lossy(), 248);
+            filename = sanitize_filename(s.to_string_lossy().as_ref(), 248);
         }
         if let Some(parent_path) = path.parent()
             && let Ok(new_save_dir) = soft_canonicalize(save_dir.join(sanitize_path(parent_path)))
@@ -32,7 +33,6 @@ pub async fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Re
             save_dir = new_save_dir;
         }
     }
-    fs::create_dir_all(&save_dir).await?;
     Ok(save_dir.join(&filename))
 }
 

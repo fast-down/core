@@ -29,9 +29,6 @@ pub struct Config {
     /// 文件名
     pub filename: String,
 
-    /// 用于在 prefetch 阶段生成占位文件名
-    pub gid: String,
-
     /// Number of threads. Recommended: `32` / `16` / `8`. More threads does not always mean faster.
     #[config(default = 32)]
     pub threads: usize,
@@ -53,6 +50,21 @@ pub struct Config {
     ///
     /// Set to `true` only if you need to power off immediately after download.
     pub sync_all: bool,
+
+    /// Reserve the whole file size on disk before downloading. Recommended: `false`
+    ///
+    /// Claiming the space up front keeps the file in fewer fragments and turns
+    /// a full disk into an error before any bytes are fetched instead of
+    /// halfway through. The cost depends on the platform: `fallocate` on Unix
+    /// and `SetFileValidData` on Windows reserve the space instantly, but
+    /// without them the fallback writes zeros across the whole file, which
+    /// takes as long as a full-size write pass.
+    ///
+    /// `SetFileValidData` needs the `SeManageVolumePrivilege`, which is
+    /// enabled automatically when available; without it Windows falls back to
+    /// the zero-fill path. Failure to reserve is reported as
+    /// [`crate::Event::AllocError`] and does not stop the download.
+    pub pre_alloc: bool,
 
     /// Write buffer size in bytes. Recommended: `16 * 1024 * 1024`
     ///
@@ -325,6 +337,11 @@ mod range_list {
                     }
                     ranges.push(start..end_inclusive.saturating_add(1));
                 }
+                // Normalize to ascending `start` order on load so downstream
+                // consumers (resume gap computation, `part_shortfall`, ...) can
+                // rely on the sorted invariant even when the `.fd` was hand-edited
+                // or written by an older build that stored chunks out of order.
+                ranges.sort_by_key(|r| r.start);
                 Ok(Some(ranges))
             }
         }
@@ -504,5 +521,15 @@ mod range_list_tests {
             msg.contains("downloaded_chunk"),
             "wrapping end must be rejected with a clear error, got: {msg}"
         );
+    }
+
+    /// Deserialize must normalize chunks to ascending `start` order so downstream
+    /// consumers can rely on the sorted invariant even for hand-edited `.fd` files.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn downloaded_chunk_deserialize_normalizes_order() {
+        let toml = "downloaded_chunk = \"5-9,1-3,100-100\"\n";
+        let pc: PartialConfig = toml::from_str(toml).unwrap();
+        assert_eq!(pc.downloaded_chunk, Some(vec![1..4, 5..10, 100..101]));
     }
 }
