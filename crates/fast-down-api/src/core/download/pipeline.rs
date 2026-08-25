@@ -14,7 +14,6 @@ use parking_lot::Mutex;
 use reqwest::Response;
 use std::{path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use url::Url;
 
 /// Construct the (puller, pusher) pipeline for a `.part` file.
 ///
