@@ -828,4 +828,73 @@ mod tests {
         while result.event_chain().recv().await.is_ok() {}
         assert_eq!(&**receive.lock(), mock_data);
     }
+
+    // -------------------------------------------------------------------------
+    // Regression baseline for the stalled-body hang (FluxDown-style #545).
+    // -------------------------------------------------------------------------
+
+    use crate::{PullResult, PullStream};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    /// A stream whose `next` never resolves — models a server that answers
+    /// the request (headers) but never delivers the body (a "stall"/"slowloris"
+    /// server). `TryStream` is satisfied automatically because `Item` is a
+    /// `Result`, so we only need to implement the underlying `Stream`.
+    struct PendingStream;
+    impl futures::Stream for PendingStream {
+        type Item = Result<Bytes, (std::convert::Infallible, Option<Duration>)>;
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+    impl Unpin for PendingStream {}
+
+    /// A puller that returns a never-resolving stream (see [`PendingStream`]).
+    #[derive(Clone)]
+    struct StallPuller;
+    impl Puller for StallPuller {
+        type Error = std::convert::Infallible;
+        fn pull(
+            &mut self,
+            _range: Option<&ProgressEntry>,
+        ) -> impl Future<Output = PullResult<impl PullStream<Self::Error>, Self::Error>> + Send
+        {
+            std::future::ready(Ok(PendingStream))
+        }
+    }
+
+    /// `download_single` reads the body with a bare `stream.try_next().await`
+    /// (single.rs) and its `DownloadOptions` has no `pull_timeout` field, so a
+    /// stalled body blocks forever. This asserts the session ends (a
+    /// `PullTimeout`/error surfaces and the event channel closes) within 3s.
+    ///
+    /// `#[ignore]`d because the fix (adding `pull_timeout` to `DownloadOptions`
+    /// and giving up with an error instead of hanging) does not exist yet; remove
+    /// `#[ignore]` once that lands.
+    #[tokio::test]
+    #[ignore = "regression baseline: download_single has no pull_timeout, a stalled body hangs forever; enable after adding pull_timeout to DownloadOptions and surfacing a PullTimeout/error"]
+    async fn test_single_stall_body_hangs_without_timeout() {
+        let puller = StallPuller;
+        let pusher = MemPusher::with_capacity(0);
+        let result = download_single(
+            puller,
+            pusher,
+            DownloadOptions {
+                retry_gap: Duration::from_secs(1),
+                push_queue_cap: 1024,
+            },
+        );
+        // The session must not block forever: within 3s the event channel must
+        // close (a timeout/error must surface and end the download). Today it
+        // hangs, so the outer timeout fires and the assertion fails.
+        let drained = tokio::time::timeout(Duration::from_secs(3), async {
+            while result.event_chain().recv().await.is_ok() {}
+        })
+        .await;
+        assert!(
+            drained.is_ok(),
+            "download_single must not hang forever on a stalled body; a pull_timeout should surface a PullTimeout or error and end the session"
+        );
+    }
 }

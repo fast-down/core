@@ -39,11 +39,11 @@ pub struct Config {
     /// Custom request headers.
     pub headers: HashMap<String, String>,
 
-    /// Minimum chunk size in bytes. Recommended: `8 * 1024 * 1024`
+    /// Minimum chunk size in bytes. Recommended: `1024 * 1024`
     ///
     /// - Chunks that are too small may cause heavy contention.
     /// - When chunking is no longer possible, speculative mode is used.
-    #[config(default = 8 * 1024 * 1024)]
+    #[config(default = 1024 * 1024)]
     pub min_chunk_size: u64,
 
     /// Whether to ensure data is fully flushed to disk. Recommended: `false`

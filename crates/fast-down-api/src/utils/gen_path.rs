@@ -144,4 +144,26 @@ mod tests {
             "the file name must be the template's leaf, not the traversal target, got {p:?}"
         );
     }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn unix_style_save_dir_maps_to_rooted_path() {
+        // Regression baseline for the path-mangling defect: a Git-Bash style
+        // `/c/Users/...` save_dir is canonicalized as a rooted path under the
+        // current drive (e.g. `E:\c\Users\...`) rather than `C:\Users\...`.
+        // `gen_path` itself faithfully follows Windows path semantics; the fix
+        // belongs in the CLI layer (translate `/x/...` -> `X:/...` before the
+        // config is built). Keeping this test pins the current behavior so a
+        // future change to `gen_path`'s path handling is caught.
+        let dir = std::path::PathBuf::from("/c/Users/example/downloads");
+        let url = Url::parse("https://example.com/a.bin").unwrap();
+        let info = make_info("a.bin", None);
+        let cfg = make_config(&dir, "a.bin", false);
+        let p = gen_path(&url, &info, &cfg).await.unwrap();
+        let s = p.to_string_lossy();
+        assert!(
+            s.contains("c\\Users") || s.contains("c/Users"),
+            "expected a rooted `/c/...` mapping under the current drive, got {s}"
+        );
+    }
 }
