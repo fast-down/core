@@ -2411,6 +2411,10 @@ async fn test_download_from_fd_reuses_fd_when_part_missing() {
         "download_from_fd must NOT emit a ResumeError when .part is missing"
     );
     assert!(
+        !events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "a manifest-only fresh download must not be reported as resumed"
+    );
+    assert!(
         events.iter().any(|e| matches!(e, Event::Renamed(_))),
         "download_from_fd must complete with Renamed even without a .part"
     );
@@ -2426,7 +2430,7 @@ async fn test_download_from_fd_reuses_fd_when_part_missing() {
 /// download when the server does not support range requests (so byte-resume is
 /// impossible) and the `.part` is missing. This exercises the
 /// `!info.fast_download` branch of `plan_from_fd` (which always reuses the
-/// manifest) together with the `.part`-creation fallback in `DownloadPlan::run`.
+/// manifest) together with the explicit manifest-fresh start action.
 #[tokio::test]
 async fn test_download_from_fd_reuses_fd_when_part_missing_non_range() {
     let dir = temp_dir("from_fd_missing_part_non_range");

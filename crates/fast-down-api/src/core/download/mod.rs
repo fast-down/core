@@ -62,14 +62,16 @@ async fn try_load_resume_state(
     // Validate the state against current server info
     state.validate(info)?;
 
-    // A `.part` shorter than the recorded progress claims bytes that are not on
-    // disk; continuing would leave that span zero-filled and never fetched.
+    // Merge the new config into the loaded state
+    state.merge_config(partial_config);
+
+    // Check after merging so caller-supplied progress is validated too. A
+    // `.part` shorter than any claimed range would otherwise be extended with
+    // zeros while the download engine skipped those bytes.
     if state.part_shortfall(tmp_path).await.is_some() {
         return Ok(None);
     }
 
-    // Merge the new config into the loaded state
-    state.merge_config(partial_config);
     state.refresh_identity(url, info);
 
     Ok(Some(state))
