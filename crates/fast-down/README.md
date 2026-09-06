@@ -40,22 +40,25 @@ Supporting building blocks (behind feature flags) include the backend-agnostic
 
 ## Example
 
-Download a file concurrently to disk. This requires the `reqwest` feature
-(which also enables `http` and `fast-puller`) and a network connection, so the
-block is marked `no_run` to compile it without making a real network request:
+Download a file concurrently to disk. This requires the `fast-puller` feature
+(which also enables `reqwest` and `http`), the `file` feature, and a network
+connection, so the block is marked `no_run` to compile it without making a real
+network request. The fallback `main` keeps the example compilable when rustdoc
+checks a feature combination that does not provide those APIs:
 
 ```rust,no_run
-use std::sync::Arc;
-use std::time::Duration;
-use url::Url;
-
-use fast_down::{FileId, Proxy};
-use fast_down::fast_puller::{FastDownPuller, FastDownPullerOptions};
-use fast_pull::StdFilePusher;
-use fast_pull::multi::{DownloadOptions, download_multi};
-
+#[cfg(all(feature = "fast-puller", feature = "file"))]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use url::Url;
+
+    use fast_down::{FileId, Proxy};
+    use fast_down::fast_puller::{FastDownPuller, FastDownPullerOptions};
+    use fast_pull::StdFilePusher;
+    use fast_pull::multi::{DownloadOptions, download_multi};
+
     let url = Url::parse("https://example.com/large.bin")?;
     let file = tokio::fs::File::create("large.bin").await?;
     // Pre-size the file; pass `true` to fsync on flush.
@@ -91,6 +94,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while result.event_chain().recv().await.is_ok() {}
     Ok(())
 }
+
+#[cfg(not(all(feature = "fast-puller", feature = "file")))]
+fn main() {}
 ```
 
 For a sequential, single-threaded download, swap `download_multi` for
