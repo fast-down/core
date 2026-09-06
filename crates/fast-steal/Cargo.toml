@@ -1,11 +1,10 @@
 [package]
 name = "fast-steal"
-version = "6.5.4"
+version = "7.0.0"
 authors.workspace = true
 edition.workspace = true
 description = "An ultra-fast multi-threaded task scheduler with fine-grained work stealing"
 documentation = "https://docs.rs/fast-steal"
-readme = "README.md"
 homepage.workspace = true
 repository.workspace = true
 license.workspace = true

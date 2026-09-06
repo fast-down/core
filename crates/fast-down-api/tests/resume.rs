@@ -23,7 +23,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use fast_down_api::{
     Event, PartialConfig, Rx, StateError, WriteMethod, create_cancellation_token, create_channel,
-    download, resume,
+    download, download_from_fd, resume,
 };
 use futures::StreamExt;
 use futures::stream::unfold;
@@ -2270,4 +2270,286 @@ async fn test_resume_rejects_non_part_extension() {
         !events.iter().any(|e| matches!(e, Event::Renamed(_))),
         "should not rename when tmp_path has wrong extension"
     );
+}
+
+/// A filename template that expands into a subdirectory of `save_dir` (e.g.
+/// `{parent_path}/{file_name}`) must make the download executor create that
+/// subdirectory before writing, so the file lands inside it.
+///
+/// This is the integration-level counterpart of the pure-`gen_path` contract:
+/// `gen_path` only computes the path and must not touch the filesystem, while
+/// `claim_and_run` creates the parent directory right before opening the file.
+#[tokio::test]
+async fn download_creates_template_subdir() {
+    let dir = temp_dir("template_subdir");
+    let (_server, base) = start_server(original_bytes(), "orig", "LM-A", true).await;
+    // A multi-segment URL path so `{parent_path}` expands to a non-empty subdir.
+    let url = format!("{base}/a/b/data.bin");
+
+    let cfg = PartialConfig {
+        save_dir: Some(dir.clone()),
+        filename: Some("{parent_path}/{file_name}".to_string()),
+        parse_filename: Some(true),
+        overwrite: Some(true),
+        write_method: Some(WriteMethod::Mmap),
+        min_chunk_size: Some(1024 * 1024),
+        threads: Some(32),
+        cache_high_watermark: Some(1),
+        cache_low_watermark: Some(0),
+        write_buffer_size: Some(1),
+        ..Default::default()
+    };
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = drain(rx).await;
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "a template-subdir download must complete with Renamed"
+    );
+
+    let final_path = dir.join("a").join("b").join("data.bin");
+    assert!(
+        final_path.exists(),
+        "the template subdir must be created and the file must land inside it"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(
+        got,
+        original_bytes(),
+        "downloaded content must match source"
+    );
+}
+
+// ---- download_from_fd (manifest-driven) tests ----
+
+/// `download_from_fd` resumes when both `.fd` and `.part` are present and
+/// describe the remote file: it emits `Event::Resumed` (inheriting the
+/// cancelled run's progress) and completes with `Event::Renamed`.
+#[tokio::test]
+async fn test_download_from_fd_resumes_when_part_present() {
+    let dir = temp_dir("from_fd_resume");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(
+        part.exists() && fd.exists(),
+        "precondition: .part and .fd must exist"
+    );
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel2 = create_cancellation_token();
+    download_from_fd(
+        fd.clone(),
+        Some(Url::parse(&url).expect("valid url")),
+        cfg,
+        tx,
+        cancel2,
+    );
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "download_from_fd must resume (emit Event::Resumed) when .part exists"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download_from_fd must complete with Renamed"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::ResumeError(_))),
+        "download_from_fd must NOT emit a ResumeError on a valid state"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(got, original_bytes(), "resumed content mismatch");
+}
+
+/// `download_from_fd` reuses the `.fd` manifest but restarts byte progress from
+/// zero when the `.part` is missing: it must complete (Renamed) with the correct
+/// content and must NOT emit a `ResumeError`.
+#[tokio::test]
+async fn test_download_from_fd_reuses_fd_when_part_missing() {
+    let dir = temp_dir("from_fd_missing_part");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(fd.exists(), "precondition: .fd must exist");
+    // The `.part` is gone; only the manifest remains — exactly the case the
+    // feature targets.
+    tokio::fs::remove_file(&part).await.expect("delete .part");
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel2 = create_cancellation_token();
+    download_from_fd(
+        fd.clone(),
+        Some(Url::parse(&url).expect("valid url")),
+        cfg,
+        tx,
+        cancel2,
+    );
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::ResumeError(_))),
+        "download_from_fd must NOT emit a ResumeError when .part is missing"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "a manifest-only fresh download must not be reported as resumed"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download_from_fd must complete with Renamed even without a .part"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(
+        got,
+        original_bytes(),
+        "fresh download from the manifest must produce correct content"
+    );
+}
+
+/// `download_from_fd` reuses the `.fd` manifest for a fresh, single-stream
+/// download when the server does not support range requests (so byte-resume is
+/// impossible) and the `.part` is missing. This exercises the
+/// `!info.fast_download` branch of `plan_from_fd` (which always reuses the
+/// manifest) together with the explicit manifest-fresh start action.
+#[tokio::test]
+async fn test_download_from_fd_reuses_fd_when_part_missing_non_range() {
+    let dir = temp_dir("from_fd_missing_part_non_range");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", false).await;
+
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(fd.exists(), "precondition: .fd must exist");
+    tokio::fs::remove_file(&part).await.expect("delete .part");
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel2 = create_cancellation_token();
+    download_from_fd(
+        fd.clone(),
+        Some(Url::parse(&url).expect("valid url")),
+        cfg,
+        tx,
+        cancel2,
+    );
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::ResumeError(_))),
+        "download_from_fd must NOT emit a ResumeError when .part is missing"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download_from_fd must complete with Renamed even without a .part on a non-range server"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(
+        got,
+        original_bytes(),
+        "fresh single-stream download from the manifest must produce correct content"
+    );
+}
+
+/// `download_from_fd` reports `StateError::Open` when the `.fd` itself is
+/// missing — there is no manifest to drive the download from.
+#[tokio::test]
+async fn test_download_from_fd_missing_fd_reports_error() {
+    let dir = temp_dir("from_fd_missing");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let final_path = dir.join("out.bin");
+    let fd = final_path.with_added_extension("fd");
+    assert!(!fd.exists(), "precondition: .fd must not exist");
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    download_from_fd(
+        fd.clone(),
+        Some(Url::parse(&url).expect("valid url")),
+        cfg,
+        tx,
+        cancel,
+    );
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    let err = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ResumeError(r) => Some(r),
+            _ => None,
+        })
+        .expect("expected Event::ResumeError for a missing .fd");
+    assert!(
+        matches!(err, StateError::Open(_)),
+        "expected Event::ResumeError(StateError::Open) for a missing .fd, got {err:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download_from_fd must NOT rename when there is no .fd"
+    );
+}
+
+/// `download_from_fd` with `url = None` reuses the durable initial URL recorded
+/// in the `.fd`, so an external program can drive a resume from the `.fd` path
+/// alone — the core "hand over a `.fd`" use case.
+#[tokio::test]
+async fn test_download_from_fd_uses_fd_url_when_none_given() {
+    let dir = temp_dir("from_fd_url_none");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let cancel = create_cancellation_token();
+    partial_download_via_cancel(&url, &dir, cancel).await;
+
+    let final_path = dir.join("out.bin");
+    let part = final_path.with_added_extension("part");
+    let fd = final_path.with_added_extension("fd");
+    assert!(part.exists() && fd.exists());
+
+    let cfg = make_config(&dir);
+    let (tx, rx) = create_channel();
+    let cancel2 = create_cancellation_token();
+    // No url: the `.fd` must supply the durable initial URL.
+    download_from_fd(fd.clone(), None, cfg, tx, cancel2);
+    let events = timeout(Duration::from_secs(30), drain(rx))
+        .await
+        .expect("drain timed out");
+
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Resumed { .. })),
+        "download_from_fd(None) must resume using the .fd's durable url"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Renamed(_))),
+        "download_from_fd(None) must complete with Renamed"
+    );
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(got, original_bytes(), "resumed content mismatch");
 }

@@ -12,6 +12,10 @@ use std::{path::PathBuf, time::Duration};
 /// and completion ([`Event::Renamed`]). Error variants (`*Error`) report failures
 /// without aborting the stream, so a consumer can decide whether to retry,
 /// cancel, or surface them in a UI.
+///
+/// Every run ends with exactly one [`Event::Terminated`], which is always the
+/// last event on the channel. A consumer that only needs the outcome can wait
+/// for it instead of draining until the channel disconnects.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Event {
@@ -38,6 +42,20 @@ pub enum Event {
     BuildClientError(reqwest::Error),
     /// Creating the output sink — opening the `.part` file — failed.
     BuildPusherError(std::io::Error),
+    /// Disk space for the whole file is about to be reserved, carrying the
+    /// target size in bytes.
+    ///
+    /// Only emitted when [`crate::Config::pre_alloc`] is enabled and the remote
+    /// size is known. Where the platform has no fast-reservation path this is
+    /// followed by a full-size zero-fill pass, which can take a while — this
+    /// event exists so a UI can say so instead of appearing frozen.
+    Allocating(u64),
+    /// Reserving disk space failed.
+    ///
+    /// Non-fatal: the download continues and the file grows on demand. The
+    /// trade-off is more fragmentation and the chance of running out of space
+    /// mid-download rather than up front.
+    AllocError(std::io::Error),
     /// The final rename of the `.part` file to its destination failed.
     ///
     /// The success counterpart is [`Event::Renamed`]. The bytes are already on
@@ -115,6 +133,32 @@ pub enum Event {
     FlushError(anyhow::Error),
     /// Worker `id` completed its assigned range and exited.
     Finished(WorkerId),
+
+    /// The run has ended. Sent exactly once, as the last event on the channel.
+    ///
+    /// Preceding `*Error` events carry the details of whatever went wrong; this
+    /// one only reports the outcome.
+    Terminated(TerminationReason),
+}
+
+/// How a download run ended, carried by [`Event::Terminated`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminationReason {
+    /// Every byte was written and the `.part` file was renamed into place.
+    /// [`Event::Renamed`] carries the path it landed on.
+    Completed,
+    /// The [`CancellationToken`](crate::create_cancellation_token) was
+    /// triggered. The `.part` and `.fd` files are left on disk so a later
+    /// resume can pick up where this run stopped.
+    Cancelled,
+    /// The run stopped on its own without completing the file — every worker
+    /// gave up, for example because the connection kept failing. Like
+    /// [`TerminationReason::Cancelled`], the `.part` and `.fd` files are left
+    /// on disk.
+    Incomplete,
+    /// A fatal error ended the run: metadata could not be fetched, the output
+    /// file could not be opened, the rename failed, and so on.
+    Failed,
 }
 
 /// Computed aggregate view of the current download progress, carried by

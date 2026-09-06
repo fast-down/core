@@ -11,7 +11,7 @@ pub use event::*;
 
 pub use fast_down;
 
-use tokio_util::sync::CancellationToken;
+pub use tokio_util::sync::CancellationToken;
 
 /// Sender half of the event channel, used to push [`Event`]s from the download task.
 pub type Tx = crossfire::MTx<crossfire::mpmc::List<Event>>;
@@ -26,13 +26,12 @@ pub fn create_channel() -> (Tx, Rx) {
     crossfire::mpmc::unbounded_async()
 }
 
-/// Create a new cancellation token for use with download tasks.
+/// Create a new [`CancellationToken`] for cooperative cancellation of a download.
 ///
-/// Pass the token to [`download`] or [`resume`]
-/// to cancel the download at any time. Cancellation is cooperative: the running
-/// task stops fetching, leaves the `.part`/`.fd` files in place, and returns
-/// without renaming — so a later [`resume`] call can continue
-/// from where it stopped.
+/// Pass the returned token to [`download`] (or a related entry
+/// point) and call
+/// [`CancellationToken::cancel`](tokio_util::sync::CancellationToken::cancel) to
+/// abort the in-flight download.
 #[must_use]
 pub fn create_cancellation_token() -> CancellationToken {
     CancellationToken::new()

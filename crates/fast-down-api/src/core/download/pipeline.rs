@@ -9,11 +9,11 @@ use fast_down::{
     BoxPusher, CacheFilePusher, MmapFilePusher, UrlInfo,
     fast_puller::{FastDownPuller, FastDownPullerOptions},
 };
+use file_alloc::FileAlloc;
 use parking_lot::Mutex;
 use reqwest::Response;
 use std::{path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use url::Url;
 
 /// Construct the (puller, pusher) pipeline for a `.part` file.
 ///
@@ -31,8 +31,12 @@ use url::Url;
 ///   without an extra round-trip.
 /// * `path` is the `.part` file; `tx` receives error events; `token` makes
 ///   construction cancellable.
+///
+/// With [`Config::pre_alloc`] enabled and a known size, the whole file is
+/// reserved on disk right after the `.part` file is opened
+/// ([`Event::Allocating`]). A reservation that fails is reported as
+/// [`Event::AllocError`] and does not abort the pipeline.
 pub async fn build_pipeline(
-    url: &Url,
     config: &Config,
     info: &UrlInfo,
     resp: Response,
@@ -44,7 +48,7 @@ pub async fn build_pipeline(
     let built = token
         .run_until_cancelled(async move {
             let puller = FastDownPuller::new(FastDownPullerOptions {
-                url: url.clone(),
+                url: info.final_url.clone(),
                 headers: build_header(&config.headers).into(),
                 proxy: config.proxy.as_deref(),
                 accept_invalid_certs: config.accept_invalid_certs,
@@ -57,10 +61,21 @@ pub async fn build_pipeline(
             })
             .map_err(Event::BuildClientError)?;
 
-            let file = open_existing()
+            file_alloc::init_fast_alloc();
+            let mut file = open_existing()
                 .open(path)
                 .await
                 .map_err(Event::BuildPusherError)?;
+            if info.size > 0 {
+                let _ = tx.send(Event::Allocating(info.size));
+                if config.pre_alloc {
+                    if let Err(e) = file.allocate(info.size).await {
+                        let _ = tx.send(Event::AllocError(e));
+                    }
+                } else if let Err(e) = file.try_allocate(info.size).await {
+                    let _ = tx.send(Event::AllocError(e));
+                }
+            }
             let pusher = if cfg!(target_pointer_width = "64")
                 && info.fast_download
                 && config.write_method == WriteMethod::Mmap

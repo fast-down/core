@@ -11,7 +11,8 @@
 //! `overwrite` is disabled).
 use super::progress_reporter::ProgressReporter;
 use crate::{
-    DownloadState, Event, PartialConfig, Tx, core::download::pipeline::build_pipeline, tx_err,
+    DownloadState, Event, PartialConfig, TerminationReason, Tx,
+    core::download::pipeline::build_pipeline, tx_err,
 };
 use fast_down::{UrlInfo, invert, multi::download_multi, single::download_single};
 use inherit_config::ConfigLayer;
@@ -59,8 +60,12 @@ pub struct OverwriteOption {
 ///
 /// If the token is cancelled or the download did not complete, the `.part` and
 /// `.fd` files are left in place so a later resume can continue.
+///
+/// The returned [`TerminationReason`] describes how the run ended. This
+/// function does not emit [`crate::Event::Terminated`]; the caller owns that
+/// so exactly one terminal event reaches the channel per run.
 #[allow(clippy::too_many_lines)]
-pub async fn overwrite(option: OverwriteOption) {
+pub async fn overwrite(option: OverwriteOption) -> TerminationReason {
     let OverwriteOption {
         state,
         final_path,
@@ -69,7 +74,12 @@ pub async fn overwrite(option: OverwriteOption) {
         tx,
         token,
     } = option;
-    tx_err!(state.store().await, tx, StateSaveError);
+    tx_err!(
+        state.store().await,
+        tx,
+        StateSaveError,
+        TerminationReason::Failed
+    );
     let _ = state.take_dirty();
 
     let inner_state = state.lock_inner().clone();
@@ -78,10 +88,9 @@ pub async fn overwrite(option: OverwriteOption) {
     let tmp_path = state.tmp_path();
     let config = &inner_state.config;
 
-    let pipeline =
-        build_pipeline(&info.final_url, config, &info, resp, &tmp_path, &tx, &token).await;
+    let pipeline = build_pipeline(config, &info, resp, &tmp_path, &tx, &token).await;
     let Some((puller, pusher)) = pipeline else {
-        return;
+        return TerminationReason::Failed;
     };
 
     let _ = tx.send(Event::Start {
@@ -188,21 +197,31 @@ pub async fn overwrite(option: OverwriteOption) {
         if let Err(e) = state.store().await {
             let _ = tx.send(Event::StateSaveError(e));
         }
-        return;
+        return if token.is_cancelled() {
+            TerminationReason::Cancelled
+        } else {
+            TerminationReason::Incomplete
+        };
     }
 
     let final_path = if config.overwrite {
         final_path
     } else {
-        tx_err!(gen_unique_path(final_path).await, tx, GenPathError)
+        tx_err!(
+            gen_unique_path(final_path).await,
+            tx,
+            GenPathError,
+            TerminationReason::Failed
+        )
     };
     if let Err(e) = fs::rename(tmp_path, &final_path).await {
         if !config.overwrite {
             let _ = fs::remove_file(&final_path).await;
         }
         let _ = tx.send(Event::RenameFailed(e));
-        return;
+        return TerminationReason::Failed;
     }
     let _ = fs::remove_file(&state.config_path).await;
     let _ = tx.send(Event::Renamed(final_path));
+    TerminationReason::Completed
 }

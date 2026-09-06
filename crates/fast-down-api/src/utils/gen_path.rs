@@ -3,7 +3,6 @@ use fast_down::UrlInfo;
 use path_helper::{auto_ext, sanitize_filename, sanitize_path};
 use soft_canonicalize::soft_canonicalize;
 use std::{borrow::Cow, path::PathBuf};
-use tokio::fs;
 use url::Url;
 
 pub async fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Result<PathBuf> {
@@ -12,18 +11,15 @@ pub async fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Re
             auto_ext(&info.raw_name, info.content_type.as_deref())
         } else {
             Cow::Borrowed(config.filename.as_str())
-        },
+        }
+        .as_ref(),
         248,
     );
     let mut save_dir = soft_canonicalize::soft_canonicalize(&config.save_dir)?;
     if config.parse_filename && !config.filename.is_empty() {
-        let path = PathBuf::from(parse_filename_template(
-            config.filename.clone(),
-            url,
-            &filename,
-        ));
+        let path = PathBuf::from(parse_filename_template(&config.filename, url, &filename));
         if let Some(s) = path.file_name() {
-            filename = sanitize_filename(s.to_string_lossy(), 248);
+            filename = sanitize_filename(s.to_string_lossy().as_ref(), 248);
         }
         if let Some(parent_path) = path.parent()
             && let Ok(new_save_dir) = soft_canonicalize(save_dir.join(sanitize_path(parent_path)))
@@ -32,7 +28,6 @@ pub async fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Re
             save_dir = new_save_dir;
         }
     }
-    fs::create_dir_all(&save_dir).await?;
     Ok(save_dir.join(&filename))
 }
 
@@ -106,8 +101,14 @@ mod tests {
         let p = gen_path(&url, &info, &cfg).await.unwrap();
         // parent_path of /a/b/data.bin is "a/b", so the resolved path ends with it.
         assert!(p.ends_with("a/b/data.bin"), "unexpected path: {p:?}");
-        // The synthesized parent directory must have been created by gen_path.
-        assert!(p.parent().is_some_and(std::path::Path::exists));
+        // `gen_path` only computes the path; it must NOT create the directory.
+        // Directory creation is the download executor's job (`claim_and_run`),
+        // covered by the integration test `download_creates_template_subdir`
+        // in tests/resume.rs.
+        assert!(
+            !p.parent().unwrap().exists(),
+            "gen_path must not touch the filesystem"
+        );
     }
 
     #[tokio::test]
@@ -141,6 +142,28 @@ mod tests {
         assert!(
             p.ends_with("data.bin"),
             "the file name must be the template's leaf, not the traversal target, got {p:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn unix_style_save_dir_maps_to_rooted_path() {
+        // Regression baseline for the path-mangling defect: a Git-Bash style
+        // `/c/Users/...` save_dir is canonicalized as a rooted path under the
+        // current drive (e.g. `E:\c\Users\...`) rather than `C:\Users\...`.
+        // `gen_path` itself faithfully follows Windows path semantics; the fix
+        // belongs in the CLI layer (translate `/x/...` -> `X:/...` before the
+        // config is built). Keeping this test pins the current behavior so a
+        // future change to `gen_path`'s path handling is caught.
+        let dir = std::path::PathBuf::from("/c/Users/example/downloads");
+        let url = Url::parse("https://example.com/a.bin").unwrap();
+        let info = make_info("a.bin", None);
+        let cfg = make_config(&dir, "a.bin", false);
+        let p = gen_path(&url, &info, &cfg).await.unwrap();
+        let s = p.to_string_lossy();
+        assert!(
+            s.contains("c\\Users") || s.contains("c/Users"),
+            "expected a rooted `/c/...` mapping under the current drive, got {s}"
         );
     }
 }

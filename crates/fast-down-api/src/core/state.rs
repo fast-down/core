@@ -57,6 +57,18 @@ pub enum StateError {
         remote_file_id: FileId,
         remote_file_size: u64,
     },
+    /// The `.part` file is shorter than the progress recorded in the `.fd`, so
+    /// the recorded ranges no longer describe bytes that exist on disk.
+    ///
+    /// Continuing would let the sink extend the file with zeros across the
+    /// missing span and never fetch it, silently corrupting the output.
+    #[error(
+        "the .part file was truncated: it holds {actual_size} bytes but the .fd state records progress up to {recorded_size}"
+    )]
+    Truncated {
+        actual_size: u64,
+        recorded_size: u64,
+    },
     /// The server does not support resumable (range) downloads.
     #[error(
         "server does not support resumable download\n  url_info: {:?}\n  url: {}\n  status: {}\n  headers: {:?}",
@@ -74,6 +86,12 @@ pub enum StateError {
         "cannot resume without a URL: none was supplied and the .fd state has none (tmp_path = {0})"
     )]
     NoUrl(PathBuf),
+    /// `peek_resume` 收到的 `tmp_path` 不是 `.part` 文件。
+    ///
+    /// `peek_resume` 需要的是 `.part` 临时文件路径，其同名 `.fd` 才是保存的状态；
+    /// 传入其他扩展名的路径属于参数错误，而非文件读取失败。
+    #[error("peek_resume requires a .part file, got: {0}")]
+    NotAPartFile(PathBuf),
 }
 
 /// Full (resolved) download state that is serialized into the `.fd` file.
@@ -138,6 +156,22 @@ pub struct DownloadState {
     inner: Arc<Mutex<PartialDownloadStateInner>>,
     is_dirty: Arc<AtomicBool>,
     pub config_path: PathBuf,
+}
+
+/// 已保存、可续传下载的只读快照，由 [`DownloadState::snapshot`] 产出。
+///
+/// 与引擎内部的 `DownloadState`（持有 `Mutex` 与脏标记、可持久化）不同，这是一个纯数据视图，
+/// 供 UI 等只读消费者在不持有内部 `MutexGuard` 的情况下读取进度元数据。
+#[derive(Debug, Clone)]
+pub struct ResumeInfo {
+    /// 持久化的初始 URL；旧 `.fd` 可能缺失，故为 `Option`。
+    pub url: Option<Url>,
+    /// 保存时记录的总大小；缺失时回退为 `0`。
+    pub size: u64,
+    /// 已写入 `.part` 的字节区间（续传进度的唯一真相）。
+    pub progress: Vec<ProgressEntry>,
+    /// 跨所有续传累计的活跃下载时长。
+    pub elapsed: Duration,
 }
 
 impl DownloadState {
@@ -256,8 +290,13 @@ impl DownloadState {
     /// # Errors
     #[allow(clippy::result_large_err)]
     pub fn validate(&self, info: &UrlInfo) -> Result<(), StateError> {
-        let local_file_id = self.file_id();
-        let local_file_size = self.inner.lock().size.unwrap_or(0);
+        let inner = self.inner.lock();
+        let local_file_id = FileId {
+            etag: inner.etag.clone().flatten(),
+            last_modified: inner.last_modified.clone().flatten(),
+        };
+        let local_file_size = inner.size.unwrap_or(0);
+        drop(inner);
         let is_same = local_file_size == info.size && local_file_id == info.file_id;
         if is_same {
             Ok(())
@@ -290,6 +329,25 @@ impl DownloadState {
     #[must_use]
     pub fn get_elapsed(&self) -> Duration {
         self.inner.lock().elapsed.unwrap_or(Duration::ZERO)
+    }
+
+    /// 产出一份只读快照，供 UI 等只读消费者读取进度元数据，而无需持有内部 `MutexGuard`。
+    ///
+    /// 与 [`DownloadState::lock_inner`] 不同，这里返回的是拥有所有权的 [`ResumeInfo`]，
+    /// 调用方可以随意读取 `url` / `size` / `progress` / `elapsed`，不会触及引擎内部的并发原语。
+    #[must_use]
+    pub fn snapshot(&self) -> ResumeInfo {
+        let guard = self.inner.lock();
+        ResumeInfo {
+            url: guard.url.clone(),
+            size: guard.size.unwrap_or(0),
+            progress: guard
+                .config
+                .as_ref()
+                .and_then(|c| c.downloaded_chunk.clone())
+                .unwrap_or_default(),
+            elapsed: guard.elapsed.unwrap_or(Duration::ZERO),
+        }
     }
 
     /// Set the total accumulated active download time (absolute, not additive).
@@ -382,6 +440,28 @@ impl DownloadState {
     pub fn tmp_path(&self) -> PathBuf {
         self.config_path.with_extension("part")
     }
+
+    /// Measure `tmp_path` against the progress recorded in this state.
+    ///
+    /// Returns `Some((actual_size, recorded_size))` when the file is shorter
+    /// than the highest recorded offset — the state claims bytes that are not
+    /// on disk, so resuming from it would leave that span filled with zeros
+    /// that are never fetched.
+    ///
+    /// Returns `None` when the file is long enough, is not a regular file, or
+    /// cannot be inspected; those cases surface later when the sink is built.
+    pub async fn part_shortfall(&self, tmp_path: &Path) -> Option<(u64, u64)> {
+        let metadata = fs::metadata(tmp_path).await.ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let actual_size = metadata.len();
+        // `downloaded_chunk` is normalized to ascending `start` order when the
+        // `.fd` is loaded, so the last entry's `end` is the highest recorded
+        // offset — the frontier a resume would continue from.
+        let recorded_size = self.get_progress().last().map_or(0, |r| r.end);
+        (actual_size < recorded_size).then_some((actual_size, recorded_size))
+    }
 }
 
 #[cfg(test)]
@@ -404,6 +484,30 @@ mod tests {
             content_type: Some("application/octet-stream".to_string()),
         };
         DownloadState::new(&url, &url_info, &PartialConfig::default(), path)
+    }
+
+    #[tokio::test]
+    async fn part_shortfall_reports_short_file_against_recorded_frontier() {
+        let dir = std::env::temp_dir().join(format!("fd_ps_short_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let part = dir.join("a.part");
+        let state = make_state(Path::new("dummy.fd"));
+        state.merge_progress(0u64..600);
+        std::fs::write(&part, vec![0u8; 500]).unwrap();
+        assert_eq!(state.part_shortfall(&part).await, Some((500, 600)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn part_shortfall_is_none_when_file_covers_frontier() {
+        let dir = std::env::temp_dir().join(format!("fd_ps_ok_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let part = dir.join("a.part");
+        let state = make_state(Path::new("dummy.fd"));
+        state.merge_progress(0u64..600);
+        std::fs::write(&part, vec![0u8; 700]).unwrap();
+        assert_eq!(state.part_shortfall(&part).await, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

@@ -1,9 +1,29 @@
-use crate::{Config, Event, Tx, tx_err, utils::build_header};
+use crate::{Config, Event, PlanError, Tx, utils::build_header};
 use fast_down::{UrlInfo, fast_puller::build_client, http::Prefetch};
 use reqwest::Response;
 use url::Url;
 
-pub async fn prefetch(url: &Url, config: &Config, tx: &Tx) -> Option<(UrlInfo, Response)> {
+/// Resolve the remote file's metadata, retrying up to
+/// [`Config::retry_times`](crate::Config::retry_times).
+///
+/// On success emits [`Event::Prefetch`] and hands back the [`UrlInfo`] together
+/// with the open [`Response`], which the download pipeline reuses to seed the
+/// first range request instead of paying for another round-trip.
+///
+/// # Errors
+///
+/// Retries that still have an attempt left are reported as
+/// [`Event::PrefetchError`]; the attempt that exhausts the budget is returned
+/// as [`PlanError::Prefetch`] instead, because
+/// [`ReqwestResponseError`](fast_down::reqwest::ReqwestResponseError) cannot be
+/// cloned into both places. A client that cannot be built at all is returned as
+/// [`PlanError::BuildClient`] without emitting an event.
+#[allow(clippy::result_large_err)]
+pub async fn prefetch(
+    url: &Url,
+    config: &Config,
+    tx: &Tx,
+) -> Result<(UrlInfo, Response), PlanError> {
     let client = build_client(
         build_header(&config.headers),
         config.proxy.as_deref(),
@@ -12,21 +32,21 @@ pub async fn prefetch(url: &Url, config: &Config, tx: &Tx) -> Option<(UrlInfo, R
         config.cookie_store,
         config.local_address.first().copied(),
         config.max_redirects,
-    );
-    let client = tx_err!(client, tx, BuildClientError, None);
+    )
+    .map_err(PlanError::BuildClient)?;
     let mut retry_count = 0;
     loop {
         match client.prefetch(url.clone()).await {
             Ok(t) => {
                 let _ = tx.send(Event::Prefetch(t.0.clone()));
-                break Some(t);
+                break Ok(t);
             }
             Err((e, t)) => {
-                let _ = tx.send(Event::PrefetchError(e));
                 retry_count += 1;
                 if retry_count >= config.retry_times {
-                    return None;
+                    return Err(PlanError::Prefetch(e));
                 }
+                let _ = tx.send(Event::PrefetchError(e));
                 tokio::time::sleep(t.unwrap_or(config.retry_gap)).await;
             }
         }
@@ -55,9 +75,9 @@ mod tests {
 
     #[tokio::test]
     async fn prefetch_gives_up_after_retries_on_unreachable() {
-        // Exercises the Err branch of prefetch (prefetch.rs lines 24-30): a
-        // connection that is refused must emit `Event::PrefetchError`, retry up
-        // to `retry_times`, then return `None`.
+        // Exercises the Err branch of prefetch: a connection that is refused
+        // must emit `Event::PrefetchError` for every attempt that still has a
+        // retry left, then return the final failure instead of emitting it.
         let url = Url::parse("http://127.0.0.1:1/never").unwrap();
         let config = Config {
             retry_times: 2,
@@ -67,8 +87,8 @@ mod tests {
         let (tx, rx) = create_channel();
         let result = prefetch(&url, &config, &tx).await;
         assert!(
-            result.is_none(),
-            "prefetch must give up after exhausting retries"
+            matches!(result, Err(PlanError::Prefetch(_))),
+            "prefetch must return the last error after exhausting retries"
         );
         drop(tx);
         let mut errors = 0;
@@ -77,7 +97,10 @@ mod tests {
                 errors += 1;
             }
         }
-        assert!(errors >= 1, "expected at least one Event::PrefetchError");
+        assert_eq!(
+            errors, 1,
+            "2 attempts means 1 retryable failure is reported as an event and 1 is returned"
+        );
     }
 
     #[tokio::test]
@@ -147,7 +170,7 @@ mod tests {
         let result = prefetch(&url, &config, &tx).await;
 
         assert!(
-            result.is_some(),
+            result.is_ok(),
             "prefetch must succeed against a well-behaved server"
         );
         let (info, _resp) = result.unwrap();

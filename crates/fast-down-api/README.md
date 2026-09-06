@@ -12,10 +12,10 @@ that turns the pull/push engine into a few lines of async code: spawn a download
 drain progress events, resume after interruption, and cancel cooperatively.
 
 - **Concurrent, resumable downloads** powered by the `fast-down` engine (work-stealing, range requests).
-- **Two entry points**: `download` (auto-resume when possible) and `resume` (hard error if it can't continue).
-- **Event stream**: a single channel carries prefetch, per-worker progress, rename, and error events.
+- **Two layers of entry points**: the fire-and-forget `download` / `resume` wrappers, and the lower-level `plan` / `plan_resume` pair that prefetches the remote and inspects the disk _without writing a single byte_ — so you can preview the outcome and decide before committing.
+- **Event stream**: a single channel carries prefetch, disk allocation, per-worker progress, resume, rename, and lifecycle events. Every run ends with exactly one `Event::Terminated(TerminationReason)`.
 - **Cooperative cancellation**: cancelling mid-flight preserves the `.part` / `.fd` files so you can resume later.
-- **Configurable**: threads, chunk size, write method (`Mmap` / `Std`), proxies, headers, retries, and more via `PartialConfig`.
+- **Configurable**: threads, chunk size, write method (`Mmap` / `Std`), proxies, headers, retries, disk pre-allocation, and more via `PartialConfig`.
 
 ## Quick start
 
@@ -79,6 +79,12 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
             Event::ResumeError(e) => eprintln!("resume error: {e}"),
+            Event::Allocating(size) => println!("pre-allocating {size} bytes on disk"),
+            Event::AllocError(e) => eprintln!("pre-allocation failed (continuing): {e}"),
+            Event::Terminated(reason) => {
+                println!("terminated: {reason:?}");
+                break;
+            }
             _ => {}
         }
     }
@@ -115,17 +121,51 @@ resume(
 token.cancel(); // stops fetching, keeps .part / .fd so you can resume later
 ```
 
+### Two-phase planning (inspect before you commit)
+
+`plan` and `plan_resume` do everything `download` / `resume` do _except_ touch
+the disk: they prefetch the remote metadata, resolve the output path, and probe
+the `.fd` / `.part` pair left by a previous run. The returned [`DownloadPlan`]
+tells you what starting it would do — [`DownloadPlan::resume_outcome`] reports
+`Resumable`, `Fresh`, or `Mismatch` — and nothing is created until you call one
+of its `start` methods. Dropping the plan abandons the download with no side
+effects.
+
+```rust,ignore
+let plan = plan(url, config.clone(), tx.clone(), token.clone()).await?;
+
+match plan.resume_outcome() {
+    ResumeOutcome::Resumable { .. } => println!("will continue from a previous run"),
+    ResumeOutcome::Fresh => println!("will download the whole file"),
+    ResumeOutcome::Mismatch(e) => println!("stale state: {e} (use start_forced_resume)"),
+}
+
+// Commit when you're ready. Each start method emits exactly one `Event::Terminated`.
+plan.start().await;                 // resume if possible, else fresh (or refuse for plan_resume)
+// plan.start_fresh().await;        // ignore any saved progress and re-download
+// plan.start_forced_resume().await; // continue from a mismatched state when only identity changed
+```
+
+`plan_resume` takes a `.part` path instead of a URL and hard-refuses a
+`Mismatch` (sending `Event::ResumeError` + `TerminationReason::Failed`) rather
+than restarting — because the caller asked to continue one specific file, not to
+fetch it again. Pass a `url` to re-fetch the metadata, or `None` to reuse the URL
+recorded in the `.fd`.
+
 ## API overview
 
-| Item                                                                                                                | Purpose                                                                                                                                                           |
-| ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`download`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.download.html)                                   | Start a download; auto-resume when a valid `.fd` + `.part` exist, else fresh. Observe completion by draining the `Rx` from `create_channel` until it disconnects. |
-| [`resume`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.resume.html)                                       | Resume a specific `.part` file; hard-error (`Event::ResumeError`) if it can't. Completion is observed the same way, by draining `Rx`.                             |
-| [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html)                       | Create the `(Tx, Rx)` event channel.                                                                                                                              |
-| [`create_cancellation_token`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_cancellation_token.html) | Create a `CancellationToken` for cooperative cancellation.                                                                                                        |
-| [`Event`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.Event.html)                                       | The event enum delivered over the channel.                                                                                                                        |
-| [`PartialConfig`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.PartialConfig.html)                     | Layered, optional configuration for a download.                                                                                                                   |
-| [`StateError`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StateError.html)                             | Errors surfaced via `Event::ResumeError`.                                                                                                                         |
+| Item                                                                                                                | Purpose                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`download`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.download.html)                                   | Start a download; auto-resume when a valid `.fd` + `.part` exist, else fresh. Observe completion by draining the `Rx` from `create_channel` until it disconnects.                            |
+| [`resume`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.resume.html)                                       | Resume a specific `.part` file; hard-error (`Event::ResumeError`) if it can't. Completion is observed the same way, by draining `Rx`.                                                        |
+| [`plan`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.plan.html)                                           | Prefetch + probe the disk and return a [`DownloadPlan`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadPlan.html) **without writing anything**; start it only when ready. |
+| [`plan_resume`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.plan_resume.html)                             | Like `plan` but targets a specific `.part`; refuses a `Mismatch` instead of re-downloading.                                                                                                  |
+| [`DownloadPlan`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadPlan.html)                       | A prepared, not-yet-started download. Inspect with `resume_outcome`, then call `start` / `start_fresh` / `start_forced_resume`.                                                              |
+| [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html)                       | Create the `(Tx, Rx)` event channel.                                                                                                                                                         |
+| [`create_cancellation_token`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_cancellation_token.html) | Create a `CancellationToken` for cooperative cancellation.                                                                                                                                   |
+| [`Event`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.Event.html)                                       | The event enum delivered over the channel.                                                                                                                                                   |
+| [`PartialConfig`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.PartialConfig.html)                     | Layered, optional configuration for a download.                                                                                                                                              |
+| [`StateError`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StateError.html)                             | Errors surfaced via `Event::ResumeError`.                                                                                                                                                    |
 
 ## How resume works
 
@@ -139,6 +179,11 @@ size). On the next run:
 3. `resume` applies the same checks but, instead of falling back, reports `Event::ResumeError`.
 
 Cancellation leaves both files in place, so a later `resume` (or `download`) can pick up exactly where it stopped.
+
+Every run — whether it completes, is cancelled, stops incomplete, or fails —
+ends with exactly one `Event::Terminated(TerminationReason)` as the last event
+on the channel, so draining `Rx` until `Terminated` is the reliable way to know
+a run has finished.
 
 ## License
 
