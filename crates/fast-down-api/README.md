@@ -105,7 +105,14 @@ can resume purely from the `.part` path. If the download cannot be continued (no
 auto-resumes when it can and otherwise falls back to a fresh download. With
 `url = None` and no resolvable URL available it reports `StateError::NoUrl`.
 
-```rust,ignore
+```rust,no_run
+use fast_down_api::{PartialConfig, create_cancellation_token, create_channel, resume};
+use url::Url;
+
+let url = Url::parse("https://example.com/large-file.bin")?;
+let config = PartialConfig::default();
+let (tx, _rx) = create_channel();
+let token = create_cancellation_token();
 resume(
     "./downloads/large-file.bin.part", // the .part file from a previous run
     Some(url),                          // pass None to reuse the URL stored in the .fd
@@ -113,11 +120,15 @@ resume(
     tx,
     token,
 );
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 ### Cancelling cooperatively
 
-```rust,ignore
+```rust,no_run
+use fast_down_api::create_cancellation_token;
+
+let token = create_cancellation_token();
 token.cancel(); // stops fetching, keeps .part / .fd so you can resume later
 ```
 
@@ -131,7 +142,18 @@ tells you what starting it would do — [`DownloadPlan::resume_outcome`] reports
 of its `start` methods. Dropping the plan abandons the download with no side
 effects.
 
-```rust,ignore
+```rust,no_run
+use fast_down_api::{
+    PartialConfig, ResumeOutcome, create_cancellation_token, create_channel, plan,
+};
+use url::Url;
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let url = Url::parse("https://example.com/large-file.bin")?;
+let config = PartialConfig::default();
+let (tx, _rx) = create_channel();
+let token = create_cancellation_token();
 let plan = plan(url, config.clone(), tx.clone(), token.clone()).await?;
 
 match plan.resume_outcome() {
@@ -144,6 +166,8 @@ match plan.resume_outcome() {
 plan.start().await;                 // resume if possible, else fresh (or refuse for plan_resume)
 // plan.start_fresh().await;        // ignore any saved progress and re-download
 // plan.start_forced_resume().await; // continue from a mismatched state when only identity changed
+# Ok(())
+# }
 ```
 
 `plan_resume` takes a `.part` path instead of a URL and hard-refuses a

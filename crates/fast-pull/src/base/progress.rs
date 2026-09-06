@@ -21,17 +21,19 @@ impl Total for ProgressEntry {
     }
 }
 
-/// Total number of bytes across all entries, computed by summing each entry's length.
+/// Total number of bytes across all entries, computed by saturating the sum of
+/// each entry's length at [`u64::MAX`].
 ///
 /// # Preconditions
 ///
 /// The entries must be **disjoint** (non-overlapping), as produced by
 /// [`Merge::merge_progress`](crate::Merge::merge_progress). Overlapping entries are
-/// silently counted twice, inflating the total; and the naive `u64` sum is unchecked,
-/// so a combined length beyond `u64::MAX` panics in debug builds and wraps in release.
+/// silently counted twice, inflating the total. If the combined length exceeds
+/// [`u64::MAX`], the result is [`u64::MAX`].
 impl Total for Vec<ProgressEntry> {
     fn total(&self) -> u64 {
-        self.iter().map(Total::total).sum()
+        self.iter()
+            .fold(0, |total, entry| total.saturating_add(entry.total()))
     }
 }
 
@@ -101,12 +103,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, should_panic)]
-    #[allow(clippy::should_panic_without_expect)]
-    fn vec_progress_total_overflow_is_unchecked() {
-        // `sum()` on u64 is unchecked: it panics in debug and wraps in release.
-        // Only reachable with pathological input whose total exceeds 16 EiB.
+    fn vec_progress_total_overflow_saturates() {
         let v: Vec<ProgressEntry> = vec![0..u64::MAX, 0..1];
-        let _ = v.total(); // u64::MAX + 1 -> debug panic
+        assert_eq!(v.total(), u64::MAX);
     }
 }

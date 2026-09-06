@@ -42,16 +42,17 @@ Supporting building blocks (behind feature flags) include the backend-agnostic
 
 Download a file concurrently to disk. This requires the `reqwest` feature
 (which also enables `http` and `fast-puller`) and a network connection, so the
-block is marked `ignore` to keep doctests hermetic:
+block is marked `no_run` to compile it without making a real network request:
 
-```rust,ignore
+```rust,no_run
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
-use fast_down::{FastDownPuller, FastDownPullerOptions, FileId, Proxy};
+use fast_down::{FileId, Proxy};
+use fast_down::fast_puller::{FastDownPuller, FastDownPullerOptions};
 use fast_pull::StdFilePusher;
-use fast_pull::multi::DownloadOptions;
+use fast_pull::multi::{DownloadOptions, download_multi};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -73,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_redirects: 10,
     })?;
 
-    let result = fast_pull::download_multi(
+    let result = download_multi(
         puller,
         pusher,
         DownloadOptions {
@@ -93,5 +94,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 For a sequential, single-threaded download, swap `download_multi` for
-`fast_pull::download_single` and use `fast_pull::single::DownloadOptions`
+`fast_pull::single::download_single` and use `fast_pull::single::DownloadOptions`
 (which only has `retry_gap` and `push_queue_cap`).
