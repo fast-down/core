@@ -110,8 +110,6 @@ pub async fn plan_resume(
             "tmp_path must end with .part extension",
         ))));
     }
-    partial_config.overwrite = Some(false);
-
     if !fs::try_exists(tmp_path).await.unwrap_or(false) {
         let Some(url) = url else {
             return Err(PlanError::Resume(StateError::NoUrl(tmp_path.to_path_buf())));
@@ -128,7 +126,6 @@ pub async fn plan_resume(
         return Err(PlanError::Resume(StateError::NoUrl(tmp_path.to_path_buf())));
     };
     inherit_persisted_config(&mut partial_config, &loaded);
-    partial_config.overwrite = Some(false);
     partial_config.resume = Some(true);
     drop(loaded);
 

@@ -112,8 +112,6 @@ pub async fn plan_from_fd(
             "fd_path must end with .fd extension",
         ))));
     }
-    partial_config.overwrite = Some(false);
-
     let loaded = DownloadState::load(fd_path)
         .await
         .map_err(PlanError::Resume)?;
@@ -122,7 +120,6 @@ pub async fn plan_from_fd(
     };
 
     inherit_persisted_config(&mut partial_config, &loaded);
-    partial_config.overwrite = Some(false);
     partial_config.resume = Some(true);
     let probe = probe(&url, &partial_config, &tx).await?;
 
