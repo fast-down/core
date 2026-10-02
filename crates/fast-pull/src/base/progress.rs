@@ -30,10 +30,16 @@ impl Total for ProgressEntry {
 /// [`Merge::merge_progress`](crate::Merge::merge_progress). Overlapping entries are
 /// silently counted twice, inflating the total. If the combined length exceeds
 /// [`u64::MAX`], the result is [`u64::MAX`].
-impl Total for Vec<ProgressEntry> {
+impl Total for [ProgressEntry] {
     fn total(&self) -> u64 {
         self.iter()
             .fold(0, |total, entry| total.saturating_add(entry.total()))
+    }
+}
+
+impl Total for Vec<ProgressEntry> {
+    fn total(&self) -> u64 {
+        self.as_slice().total()
     }
 }
 
@@ -57,6 +63,15 @@ mod tests {
         let v: Vec<ProgressEntry> = vec![1..5, 8..10, 12..15];
         assert_eq!(v.total(), 9);
         let empty: Vec<ProgressEntry> = vec![];
+        assert_eq!(empty.total(), 0);
+    }
+
+    #[test]
+    fn slice_progress_total_matches_vec() {
+        #![allow(clippy::single_range_in_vec_init)]
+        let v: Vec<ProgressEntry> = vec![1..5, 8..10, 12..15];
+        assert_eq!(v.as_slice().total(), v.total());
+        let empty: &[ProgressEntry] = &[];
         assert_eq!(empty.total(), 0);
     }
 
