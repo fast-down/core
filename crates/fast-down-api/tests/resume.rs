@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fast_down_api::{
-    Event, PartialConfig, Rx, StateError, WriteMethod, create_cancellation_token, create_channel,
-    download, download_from_fd, resume,
+    Event, PartialConfig, PlanError, Rx, StartMode, State, StateError, TerminationReason, Tx,
+    WriteMethod, create_cancellation_token, create_channel,
 };
 use futures::StreamExt;
 use futures::stream::unfold;
@@ -278,6 +278,154 @@ async fn drain(rx: Rx) -> Vec<Event> {
         events.push(e);
     }
     events
+}
+
+// ---- shims mapping the old entry points onto the new `State`/`Ready` API ----
+//
+// The public API collapsed `download`/`resume`/`download_from_fd` into a single
+// resolve-then-run flow. These helpers reproduce the old observable behavior on
+// top of it so the scenarios below read the same. `start` emits exactly one
+// `Event::Terminated` and closes the channel when it returns, matching the old
+// detached-task contract that `drain` relies on.
+
+/// Old `download(url, cfg, tx, token)` semantics: silent fallback to a full
+/// download when the recorded state cannot be resumed (`StartMode::Auto`).
+fn download(url: Url, cfg: PartialConfig, tx: Tx, token: CancellationToken) {
+    tokio::spawn(async move {
+        match State::new(url, cfg).build(tx.clone()).await {
+            Ok(ready) => ready.start(StartMode::Auto, tx, token).await,
+            Err(e) => {
+                e.emit(&tx);
+                let _ = tx.send(Event::Terminated(TerminationReason::Failed));
+            }
+        }
+    });
+}
+
+/// Old `resume(tmp_path, url, cfg, tx, token)` semantics: continue exactly the
+/// state paired with `tmp_path`, refusing (via `Event::ResumeError`) when it
+/// cannot (`StartMode::Resume`).
+///
+/// `url` is accepted for source-compatibility but ignored: the new API always
+/// resolves from the `.fd`'s recorded URL, which is what the old `resume(..,
+/// None, ..)` used and what the caller-supplied URL ultimately resolved to.
+fn resume(
+    tmp_path: impl AsRef<Path>,
+    url: Option<Url>,
+    mut cfg: PartialConfig,
+    tx: Tx,
+    token: CancellationToken,
+) {
+    let tmp_path = tmp_path.as_ref().to_path_buf();
+    // `resume` means "continue this state", so the probe is always on. Unlike
+    // the old entry point, it no longer forces `overwrite` — that follows the
+    // caller's config.
+    cfg.resume = Some(true);
+    tokio::spawn(async move {
+        // The `.fd` is derived from the `.part`, so a path that does not end in
+        // `.part` cannot identify a pair — the same contract the old `resume`
+        // enforced up front.
+        if tmp_path.extension() != Some(std::ffi::OsStr::new("part")) {
+            let err = StateError::Open(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "tmp_path must end with .part extension",
+            ));
+            let _ = tx.send(Event::ResumeError(err));
+            let _ = tx.send(Event::Terminated(TerminationReason::Failed));
+            return;
+        }
+
+        // With no `.part` to continue, a supplied URL turns this into a plain
+        // download at the same path (old `plan_resume` behavior); without one
+        // there is nothing to resolve.
+        if !tmp_path.exists() {
+            let Some(url) = url else {
+                let _ = tx.send(Event::ResumeError(StateError::NotFound(tmp_path)));
+                let _ = tx.send(Event::Terminated(TerminationReason::Failed));
+                return;
+            };
+            cfg.resume = Some(false);
+            let state = State::new(url, cfg.clone());
+            resolve_and_run(Ok(state), cfg, StartMode::Resume, tx, token).await;
+            return;
+        }
+
+        let fd_path = tmp_path.with_extension("fd");
+        resolve_and_run(
+            State::load(&fd_path).await,
+            cfg,
+            StartMode::Resume,
+            tx,
+            token,
+        )
+        .await;
+    });
+}
+
+/// Old `download_from_fd(fd_path, url, cfg, tx, token)` semantics: reuse the
+/// resolved `.fd` as a manifest, resuming when the `.part` is still usable and
+/// otherwise downloading fresh into the same pair (`StartMode::Auto` — the
+/// pinned `.fd` from `State::load` carries the "reuse this pair" behavior).
+fn download_from_fd(
+    fd_path: impl AsRef<Path>,
+    _url: Option<Url>,
+    cfg: PartialConfig,
+    tx: Tx,
+    token: CancellationToken,
+) {
+    let fd_path = fd_path.as_ref().to_path_buf();
+    tokio::spawn(async move {
+        resolve_and_run(State::load(&fd_path).await, cfg, StartMode::Auto, tx, token).await;
+    });
+}
+
+/// Shared tail for the shims: build the resolved plan (overriding the loaded
+/// config with the caller's, so a `resume=false` override can still be forced
+/// by `StartMode::Resume`), then run it.
+async fn resolve_and_run(
+    loaded: Result<State, StateError>,
+    cfg: PartialConfig,
+    mode: StartMode,
+    tx: Tx,
+    token: CancellationToken,
+) {
+    let loaded = match loaded {
+        Ok(state) => state,
+        Err(e) => {
+            let _ = tx.send(Event::ResumeError(e));
+            let _ = tx.send(Event::Terminated(TerminationReason::Failed));
+            return;
+        }
+    };
+    // Layer the caller's overrides over the persisted config (caller wins on
+    // set fields) while keeping the recorded progress, mirroring the old
+    // `inherit_persisted_config` + caller-merge order.
+    let mut state = loaded;
+    state.record.merge_config(&cfg);
+    match state.build(tx.clone()).await {
+        Ok(ready) => ready.start(mode, tx, token).await,
+        Err(e) => {
+            e.emit(&tx);
+            let _ = tx.send(Event::Terminated(TerminationReason::Failed));
+        }
+    }
+}
+
+/// Emit the event that corresponds to a planning failure, so `drain` observers
+/// see the same `*Error` they did before.
+trait EmitPlanError {
+    fn emit(self, tx: &Tx);
+}
+
+impl EmitPlanError for PlanError {
+    fn emit(self, tx: &Tx) {
+        let _ = match self {
+            Self::BuildClient(e) => tx.send(Event::BuildClientError(e)),
+            Self::Prefetch(e) => tx.send(Event::PrefetchError(e)),
+            Self::GenPath(e) => tx.send(Event::GenPathError(e)),
+            Self::State(e) => tx.send(Event::ResumeError(e)),
+        };
+    }
 }
 
 /// Bytes that must actually reach the sink before a partial download is
@@ -568,8 +716,8 @@ async fn test_resume_no_state_file() {
         })
         .expect("expected Event::ResumeError");
     assert!(
-        matches!(err, StateError::Open(_)),
-        "expected Event::ResumeError(StateError::Open) for missing .fd, got {err:?}"
+        matches!(err, StateError::NotFound(_)),
+        "expected Event::ResumeError(StateError::NotFound) for missing .fd, got {err:?}"
     );
     assert!(
         !events.iter().any(|e| matches!(e, Event::Renamed(_))),
@@ -610,7 +758,7 @@ async fn test_resume_not_resumable() {
         })
         .expect("expected Event::ResumeError");
     assert!(
-        matches!(err, StateError::NotResumable(..)),
+        matches!(err, StateError::NotResumable),
         "expected Event::ResumeError(StateError::NotResumable), got {err:?}"
     );
 }
@@ -1752,12 +1900,13 @@ async fn test_resume_corrupt_fd_reports_decode_error() {
     assert!(part.exists() && fd.exists(), "partial files must be kept");
 }
 
-/// `resume()` forces `overwrite = false`, so an already-existing final file is
-/// never clobbered: the finished download is renamed into a *unique* variant
-/// while the pre-existing file keeps its exact content.
+/// `resume` no longer forces `overwrite = false`: the caller's `overwrite`
+/// setting decides what happens to an already-existing final file. With the
+/// default `overwrite = true` (as `make_config` sets), the completed resume
+/// replaces the pre-existing file.
 #[tokio::test]
-async fn test_resume_never_overwrites_existing_final_file() {
-    let dir = temp_dir("resume_no_clobber");
+async fn test_resume_respects_overwrite_config() {
+    let dir = temp_dir("resume_overwrite_config");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
     let cancel = create_cancellation_token();
@@ -1766,7 +1915,7 @@ async fn test_resume_never_overwrites_existing_final_file() {
     let final_path = dir.join("out.bin");
     let part = final_path.with_added_extension("part");
     assert!(part.exists(), "cancel must leave the .part");
-    // A pre-existing final file the resume must not touch.
+    // A pre-existing final file. `overwrite = true` means the resume replaces it.
     tokio::fs::write(&final_path, b"sentinel")
         .await
         .expect("create pre-existing final file");
@@ -1792,19 +1941,15 @@ async fn test_resume_never_overwrites_existing_final_file() {
             _ => None,
         })
         .expect("resume must complete with Renamed");
-    assert_ne!(
-        renamed, final_path,
-        "resume must NOT overwrite the existing final file"
-    );
-    let sentinel = tokio::fs::read(&final_path)
-        .await
-        .expect("pre-existing file must remain readable");
+    // Compare by file name only: on Windows the rename can return a
+    // `\\?\`-prefixed verbatim path, so an exact PathBuf match is fragile.
     assert_eq!(
-        sentinel, b"sentinel",
-        "the pre-existing final file content must be untouched"
+        renamed.file_name(),
+        final_path.file_name(),
+        "overwrite = true must replace the pre-existing final file in place"
     );
-    let got = tokio::fs::read(&renamed).await.expect("read renamed file");
-    assert_eq!(got, original_bytes(), "renamed content mismatch");
+    let got = tokio::fs::read(&final_path).await.expect("read final file");
+    assert_eq!(got, original_bytes(), "final content mismatch");
 }
 
 /// `resume()` forces `partial_config.resume = true`, so a user-supplied
@@ -2076,9 +2221,9 @@ async fn test_resume_without_url_uses_fd_url() {
     assert_eq!(got, original_bytes(), "resumed content mismatch");
 }
 
-/// `resume()` with `url = None` and no `.part` to fall back from must report
-/// `StateError::NoUrl`: there is no URL to fetch and no `.fd` to read one from,
-/// so a silent fallback to a fresh download is impossible.
+/// `resume()` with no `.fd` to read a URL from cannot resolve anything: the new
+/// API reports the missing state file directly as `StateError::NotFound` (the
+/// old `StateError::NoUrl` no longer exists — a `.fd` always carries the URL).
 #[tokio::test]
 async fn test_resume_without_url_missing_tmp_path_errors() {
     let dir = temp_dir("resume_no_url_no_tmp");
@@ -2098,10 +2243,10 @@ async fn test_resume_without_url_missing_tmp_path_errors() {
             Event::ResumeError(r) => Some(r),
             _ => None,
         })
-        .expect("expected Event::ResumeError when no url and no .part");
+        .expect("expected Event::ResumeError when there is no .fd to resolve a URL from");
     assert!(
-        matches!(err, StateError::NoUrl(_)),
-        "expected StateError::NoUrl, got {err:?}"
+        matches!(err, StateError::NotFound(_)),
+        "expected StateError::NotFound, got {err:?}"
     );
     assert!(
         !events.iter().any(|e| matches!(e, Event::Renamed(_))),
@@ -2109,9 +2254,10 @@ async fn test_resume_without_url_missing_tmp_path_errors() {
     );
 }
 
-/// `resume()` with `url = None` against a `.fd` that carries no resolvable URL
-/// (written by an older build, or hand-trimmed) must report `StateError::NoUrl`
-/// rather than silently failing at prefetch with a default/blank URL.
+/// A `.fd` that carries no URL (written by an older build, or hand-trimmed) no
+/// longer has a "use the caller's URL" escape hatch: the new API always reads
+/// the URL from the state file, so an invalid one is reported as
+/// `StateError::Decode` rather than silently proceeding with a blank URL.
 #[tokio::test]
 async fn test_resume_without_url_and_fd_has_no_url_errors() {
     let dir = temp_dir("resume_no_url_fd_blank");
@@ -2138,14 +2284,14 @@ async fn test_resume_without_url_and_fd_has_no_url_errors() {
             Event::ResumeError(r) => Some(r),
             _ => None,
         })
-        .expect("expected Event::ResumeError when .fd has no url and none supplied");
+        .expect("expected Event::ResumeError when the .fd has no url");
     assert!(
-        matches!(err, StateError::NoUrl(_)),
-        "expected StateError::NoUrl for a url-less .fd with no url arg, got {err:?}"
+        matches!(err, StateError::Decode(_)),
+        "expected StateError::Decode for a url-less .fd, got {err:?}"
     );
     assert!(
         part.exists() && fd.exists(),
-        "partial files must be kept on NoUrl"
+        "partial files must be kept on a decode error"
     );
 }
 
@@ -2508,8 +2654,8 @@ async fn test_download_from_fd_missing_fd_reports_error() {
         })
         .expect("expected Event::ResumeError for a missing .fd");
     assert!(
-        matches!(err, StateError::Open(_)),
-        "expected Event::ResumeError(StateError::Open) for a missing .fd, got {err:?}"
+        matches!(err, StateError::NotFound(_)),
+        "expected Event::ResumeError(StateError::NotFound) for a missing .fd, got {err:?}"
     );
     assert!(
         !events.iter().any(|e| matches!(e, Event::Renamed(_))),

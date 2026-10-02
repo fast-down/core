@@ -1,37 +1,33 @@
 #![doc = include_str!("../README.md")]
+#![allow(clippy::missing_errors_doc)]
+
+pub mod state;
+pub use state::{
+    PartState, PlanError, Ready, Record, ResumeOutcome, State, StateError, tmp_path_for,
+};
+
+mod engine;
+pub use engine::*;
 
 mod config;
-mod core;
-mod event;
-pub(crate) mod utils;
-
 pub use config::*;
-pub use core::*;
+
+pub mod event;
 pub use event::*;
 
-pub use fast_down;
+pub(crate) mod utils;
 
+pub use fast_down;
 pub use tokio_util::sync::CancellationToken;
 
-/// Sender half of the event channel, used to push [`Event`]s from the download task.
 pub type Tx = crossfire::MTx<crossfire::mpmc::List<Event>>;
-/// Receiver half of the event channel, used to receive [`Event`]s from the download task.
 pub type Rx = crossfire::MAsyncRx<crossfire::mpmc::List<Event>>;
 
-/// Create a new unbounded event channel for receiving download progress events.
-///
-/// Returns a sender (`Tx`) and receiver (`Rx`) pair.
 #[must_use]
 pub fn create_channel() -> (Tx, Rx) {
     crossfire::mpmc::unbounded_async()
 }
 
-/// Create a new [`CancellationToken`] for cooperative cancellation of a download.
-///
-/// Pass the returned token to [`download`] (or a related entry
-/// point) and call
-/// [`CancellationToken::cancel`](tokio_util::sync::CancellationToken::cancel) to
-/// abort the in-flight download.
 #[must_use]
 pub fn create_cancellation_token() -> CancellationToken {
     CancellationToken::new()

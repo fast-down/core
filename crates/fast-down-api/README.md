@@ -8,11 +8,13 @@
 [![License](https://img.shields.io/crates/l/fast-down-api.svg)](https://github.com/fast-down/core/blob/main/LICENSE)
 
 A convenient, high-level wrapper around [`fast-down`](https://github.com/fast-down/fast-down)
-that turns the pull/push engine into a few lines of async code: spawn a download,
-drain progress events, resume after interruption, and cancel cooperatively.
+that turns the pull/push engine into a few lines of async code: resolve a
+download against the remote, inspect what it will do, run it, drain progress
+events, and cancel cooperatively.
 
 - **Concurrent, resumable downloads** powered by the `fast-down` engine (work-stealing, range requests).
-- **Two layers of entry points**: the fire-and-forget `download` / `resume` wrappers, and the lower-level `plan` / `plan_resume` pair that prefetches the remote and inspects the disk _without writing a single byte_ — so you can preview the outcome and decide before committing.
+- **One state type, one source of truth**: a [`Record`] is the `.fd` file itself, and every entry point resolves into the same [`Ready`] value before anything is written.
+- **Two-phase by construction**: [`State::build`] prefetches, resolves paths, and probes the disk _without writing a single byte_, returning a [`Ready`] you can inspect before committing.
 - **Event stream**: a single channel carries prefetch, disk allocation, per-worker progress, resume, rename, and lifecycle events. Every run ends with exactly one `Event::Terminated(TerminationReason)`.
 - **Cooperative cancellation**: cancelling mid-flight preserves the `.part` / `.fd` files so you can resume later.
 - **Configurable**: threads, chunk size, write method (`Mmap` / `Std`), proxies, headers, retries, disk pre-allocation, and more via `PartialConfig`.
@@ -20,107 +22,64 @@ drain progress events, resume after interruption, and cancel cooperatively.
 ## Quick start
 
 ```rust,no_run
-use fast_down_api::{create_cancellation_token, create_channel, download, Event, PartialConfig};
+use fast_down_api::{PartialConfig, ResumeOutcome, State, create_cancellation_token, create_channel};
 use std::path::PathBuf;
 use url::Url;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // 1. Channel for progress / lifecycle events, plus a cancellation token.
-    let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
-
-    // 2. Configure the download. Every field is optional; unset fields
-    //    fall back to Config::default(). (save_dir is required at runtime.)
-    let config = PartialConfig {
-        save_dir: Some(PathBuf::from("./downloads")),
-        overwrite: Some(true),
-        threads: Some(16),
-        ..Default::default()
-    };
-
-    // 3. Start the download. This spawns a detached task and returns at once.
-    let url = Url::parse("https://example.com/large-file.bin")?;
-    download(url, config, tx, token.clone());
-
-    // 4. Drain events until the task finishes or is cancelled.
-    while let Ok(event) = rx.recv().await {
-        match event {
-            // Aggregated progress on a fixed cadence (Config::progress_emit_gap).
-            // Convenient for a progress bar — no need to re-accumulate ranges.
-            Event::Progress(sample) => {
-                // `downloaded`, `percent`, and `total` are pre-computed for you;
-                // the fields below are equivalent to deriving them from `progress`.
-                let written: u64 = sample.progress.iter().map(|r| r.end - r.start).sum();
-                assert_eq!(written, sample.downloaded);
-                let pct = if sample.total > 0 {
-                    written * 100 / sample.total
-                } else {
-                    0
-                };
-                // `eta` is the estimated remaining time, or `None` until a rate
-                // can be measured.
-                let eta_str = sample
-                    .eta
-                    .map_or_else(|| "?".to_string(), |d| format!("{d:?}"));
-                println!(
-                    "progress: {pct}% ({:.1}%)  {written}/{} bytes  \
-                     {} B/s (inst)  {} B/s (avg)  elapsed {:?}  eta {eta_str}",
-                    sample.percent, sample.total, sample.bps, sample.avg_bps, sample.elapsed
-                );
-            }
-            Event::PushProgress(p) => println!("wrote range: {p:?}"),
-            Event::Renamed(path) => {
-                println!("done -> {path:?}");
-                break;
-            }
-            Event::RenameFailed(e) => {
-                eprintln!("rename failed: {e}");
-                break;
-            }
-            Event::ResumeError(e) => eprintln!("resume error: {e}"),
-            Event::Allocating(size) => println!("pre-allocating {size} bytes on disk"),
-            Event::AllocError(e) => eprintln!("pre-allocation failed (continuing): {e}"),
-            Event::Terminated(reason) => {
-                println!("terminated: {reason:?}");
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    // 5. Draining `rx` above already waits for completion: the loop ends when the
-    //    task drops its last sender, so no separate join handle is needed.
-    Ok(())
-}
-```
-
-### Resuming an interrupted download
-
-`resume` targets the existing `.part` file. The `url` argument is optional: pass
-`None` to re-use the initial URL already recorded in the `.fd` state file, so you
-can resume purely from the `.part` path. If the download cannot be continued (no
-`.fd` state, no range support, or the remote file changed) it emits
-`Event::ResumeError` and **does not** silently restart — unlike `download`, which
-auto-resumes when it can and otherwise falls back to a fresh download. With
-`url = None` and no resolvable URL available it reports `StateError::NoUrl`.
-
-```rust,no_run
-use fast_down_api::{PartialConfig, create_cancellation_token, create_channel, resume};
-use url::Url;
-
-let url = Url::parse("https://example.com/large-file.bin")?;
-let config = PartialConfig::default();
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+// 1. Channel for progress / lifecycle events, plus a cancellation token.
 let (tx, _rx) = create_channel();
 let token = create_cancellation_token();
-resume(
-    "./downloads/large-file.bin.part", // the .part file from a previous run
-    Some(url),                          // pass None to reuse the URL stored in the .fd
-    config,
-    tx,
-    token,
-);
-# Ok::<(), Box<dyn std::error::Error>>(())
+
+// 2. Configure the download. Every field is optional; unset fields
+//    fall back to Config::default(). (save_dir is required at runtime.)
+let config = PartialConfig {
+    save_dir: Some(PathBuf::from("./downloads")),
+    threads: Some(16),
+    ..Default::default()
+};
+
+// 3. Resolve the download. This prefetches the remote metadata and probes the
+//    disk, but writes nothing: the returned `Ready` is a plan you can inspect.
+let url = Url::parse("https://example.com/large-file.bin")?;
+let ready = State::new(url, config).build(tx).await?;
+
+// 4. Decide based on what starting would do.
+match ready.resume_outcome() {
+    ResumeOutcome::Resumable => println!("will continue from a previous run"),
+    ResumeOutcome::Fresh => println!("will download the whole file"),
+    ResumeOutcome::Mismatch(e) => println!("stale state, cannot resume: {e}"),
+}
+println!("final path: {:?}", ready.final_path());
+println!("already fetched: {} ranges", ready.progress().len());
+# let _ = token;
+# Ok(())
+# }
+```
+
+Starting the resolved download, draining its events, and cancelling mid-flight
+are provided by `Ready` and the event stream; see the crate documentation for
+the run API.
+
+### Loading an existing `.fd`
+
+When you already know where a state file lives — a UI rebuilding a list of
+paused downloads, or a caller resuming one specific file — load it directly.
+`State::load` pins the location, so `build` probes exactly that file instead of
+the default `<final>.fd`.
+
+```rust,no_run
+use fast_down_api::{PartialConfig, State, create_channel};
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let (tx, _rx) = create_channel();
+let state = State::load("./downloads/large-file.bin.fd").await?;
+let ready = state.build(tx).await?;
+println!("resuming {:?}", ready.config_path());
+# Ok(())
+# }
 ```
 
 ### Cancelling cooperatively
@@ -132,77 +91,87 @@ let token = create_cancellation_token();
 token.cancel(); // stops fetching, keeps .part / .fd so you can resume later
 ```
 
-### Two-phase planning (inspect before you commit)
+### Choosing what `start` does
 
-`plan` and `plan_resume` do everything `download` / `resume` do _except_ touch
-the disk: they prefetch the remote metadata, resolve the output path, and probe
-the `.fd` / `.part` pair left by a previous run. The returned [`DownloadPlan`]
-tells you what starting it would do — [`DownloadPlan::resume_outcome`] reports
-`Resumable`, `Fresh`, or `Mismatch` — and nothing is created until you call one
-of its `start` methods. Dropping the plan abandons the download with no side
-effects.
+`Ready::start` takes a policy that decides what happens to any recorded
+`.fd`/`.part`. The common combinations are presets ([`StartMode`]):
+
+| `StartMode` | Behavior |
+| ----------- | -------- |
+| `Auto`      | Resume when valid, otherwise download the whole file. |
+| `Resume`    | Resume this specific state; report `Event::ResumeError` when it no longer matches the remote. |
+| `Fresh`     | Ignore any recorded progress and download the whole file. |
+| `Forced`    | Continue from a mismatch when the size still matches (identity headers changed but the byte layout did not). |
+
+Pass a [`StartPolicy`] when you need per-dimension control — each field is the
+action for one independent reason a resume might not be possible:
 
 ```rust,no_run
-use fast_down_api::{
-    PartialConfig, ResumeOutcome, create_cancellation_token, create_channel, plan,
+use fast_down_api::{Recovery, StartPolicy};
+
+let policy = StartPolicy {
+    // Resume a truncated `.part`? No — treat it as "nothing to continue" and re-download.
+    truncated: Recovery::Fresh,
+    // A remote identity change: refuse rather than silently restart.
+    identity_changed: fast_down_api::IdentityRecovery::Fail,
+    ..StartPolicy::auto()
 };
-use url::Url;
-
-# #[tokio::main]
-# async fn main() -> Result<(), Box<dyn std::error::Error>> {
-let url = Url::parse("https://example.com/large-file.bin")?;
-let config = PartialConfig::default();
-let (tx, _rx) = create_channel();
-let token = create_cancellation_token();
-let plan = plan(url, config.clone(), tx.clone(), token.clone()).await?;
-
-match plan.resume_outcome() {
-    ResumeOutcome::Resumable { .. } => println!("will continue from a previous run"),
-    ResumeOutcome::Fresh => println!("will download the whole file"),
-    ResumeOutcome::Mismatch(e) => println!("stale state: {e} (use start_forced_resume)"),
-}
-
-// Commit when you're ready. Each start method emits exactly one `Event::Terminated`.
-plan.start().await;                 // resume if possible, else fresh (or refuse for plan_resume)
-// plan.start_fresh().await;        // ignore any saved progress and re-download
-// plan.start_forced_resume().await; // continue from a mismatched state when only identity changed
-# Ok(())
-# }
+# let _ = policy;
 ```
 
-`plan_resume` takes a `.part` path instead of a URL and hard-refuses a
-`Mismatch` (sending `Event::ResumeError` + `TerminationReason::Failed`) rather
-than restarting — because the caller asked to continue one specific file, not to
-fetch it again. Pass a `url` to re-fetch the metadata, or `None` to reuse the URL
-recorded in the `.fd`.
+| Field | When it applies | Values |
+| ----- | --------------- | ------ |
+| `use_recorded` | overall | `bool` — `false` ignores all recorded progress |
+| `no_state` | no `.fd`, or its `.part` is gone | `Recovery` |
+| `truncated` | `.part` shorter than the recorded progress | `Recovery` |
+| `unreadable` | `.fd` cannot be read/decoded | `Recovery` |
+| `size_changed` | remote size changed | `Recovery` |
+| `not_resumable` | server does not support ranges | `Recovery` |
+| `identity_changed` | identity headers changed, size unchanged | `IdentityRecovery` |
+
+`Recovery` is `Fresh` (download the whole file) or `Fail` (emit
+`Event::ResumeError`). `IdentityRecovery` adds `Force` (continue anyway) — only
+offered where the byte layout is known intact, so a forced resume cannot splice
+two versions together.
 
 ## API overview
 
-| Item                                                                                                                | Purpose                                                                                                                                                                                      |
-| ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`download`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.download.html)                                   | Start a download; auto-resume when a valid `.fd` + `.part` exist, else fresh. Observe completion by draining the `Rx` from `create_channel` until it disconnects.                            |
-| [`resume`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.resume.html)                                       | Resume a specific `.part` file; hard-error (`Event::ResumeError`) if it can't. Completion is observed the same way, by draining `Rx`.                                                        |
-| [`plan`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.plan.html)                                           | Prefetch + probe the disk and return a [`DownloadPlan`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadPlan.html) **without writing anything**; start it only when ready. |
-| [`plan_resume`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.plan_resume.html)                             | Like `plan` but targets a specific `.part`; refuses a `Mismatch` instead of re-downloading.                                                                                                  |
-| [`DownloadPlan`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.DownloadPlan.html)                       | A prepared, not-yet-started download. Inspect with `resume_outcome`, then call `start` / `start_fresh` / `start_forced_resume`.                                                              |
-| [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html)                       | Create the `(Tx, Rx)` event channel.                                                                                                                                                         |
-| [`create_cancellation_token`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_cancellation_token.html) | Create a `CancellationToken` for cooperative cancellation.                                                                                                                                   |
-| [`Event`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.Event.html)                                       | The event enum delivered over the channel.                                                                                                                                                   |
-| [`PartialConfig`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.PartialConfig.html)                     | Layered, optional configuration for a download.                                                                                                                                              |
-| [`StateError`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StateError.html)                             | Errors surfaced via `Event::ResumeError`.                                                                                                                                                    |
+| Item | Purpose |
+| ---- | ------- |
+| [`State`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.State.html) | A download that has not been resolved yet. `State::new` starts from a URL; `State::load` reads an existing `.fd`. |
+| [`State::build`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.State.html) | Prefetch + resolve paths + probe the disk, returning a [`Ready`] **without writing anything**. |
+| [`Ready`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Ready.html) | A resolved download. Inspect with `resume_outcome`, `final_path`, `config_path`, `tmp_path`, `progress`, `info`, then run it. |
+| [`StartMode`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StartMode.html) | A preset for how to start: `Auto`, `Resume`, `Fresh`, `Forced`. Accepted by `Ready::start`. |
+| [`StartPolicy`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.StartPolicy.html) | Per-dimension start policy (what to do for each reason a resume might fail). Also accepted by `Ready::start`. |
+| [`ResumeOutcome`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.ResumeOutcome.html) | `Fresh` (nothing to continue), `Resumable`, or `Mismatch(StateError)`. |
+| [`Record`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Record.html) | The `.fd` state file: URL, remote identity, elapsed time, and the merged config (which carries `downloaded_chunk`). |
+| [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html) | Create the `(Tx, Rx)` event channel. |
+| [`create_cancellation_token`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_cancellation_token.html) | Create a `CancellationToken` for cooperative cancellation. |
+| [`Event`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.Event.html) | The event enum delivered over the channel. |
+| [`PartialConfig`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.PartialConfig.html) | Layered, optional configuration for a download. |
+| [`StateError`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StateError.html) / [`PlanError`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.PlanError.html) | Errors from loading/probing state and from resolving a plan. |
 
 ## How resume works
 
-During a download the engine periodically persists a `.fd` state file next to
-the `.part` partial file. That state records the byte ranges already written
-(`downloaded_chunk`) and the remote file identity (`etag` / `last_modified` /
-size). On the next run:
+A download's progress lives in a `.fd` state file, written next to its `.part`
+partial file. The state records the byte ranges already written
+(`downloaded_chunk`), the remote file identity (`etag` / `last_modified` /
+size), and the accumulated active time. The `.part` path is **not** stored — it
+is always the `.fd` path with its extension swapped to `.part`, so the two move
+together and no path can be hand-edited to redirect a write.
 
-1. `download` loads the `.fd`, validates it still matches the remote (size + identity), and — if the `.part` file is present — emits `Event::Resumed` and continues from the recorded offset.
-2. If validation fails (remote changed) or there is no `.part`, it starts fresh.
-3. `resume` applies the same checks but, instead of falling back, reports `Event::ResumeError`.
+Resolving a download against the remote:
 
-Cancellation leaves both files in place, so a later `resume` (or `download`) can pick up exactly where it stopped.
+1. `State::build` prefetches the remote and computes the output path.
+2. It loads the candidate `.fd` (the pinned one, or the default `<final>.fd`).
+3. The record is validated against the freshly fetched identity **before** it is
+   refreshed, and the `.part` is measured against the recorded progress:
+   - matching identity and a long-enough `.part` → `Resumable`,
+   - a changed remote or a truncated `.part` → `Mismatch`,
+   - no `.fd` (or a missing `.part`) → `Fresh`.
+
+Cancellation leaves both files in place, so a later resolve can pick up exactly
+where the run stopped.
 
 Every run — whether it completes, is cancelled, stops incomplete, or fails —
 ends with exactly one `Event::Terminated(TerminationReason)` as the last event

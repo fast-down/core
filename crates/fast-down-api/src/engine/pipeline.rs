@@ -1,10 +1,7 @@
-//! Builds the pull/push pipeline shared by `download` and `resume`.
-//!
-//! [`build_pipeline`] constructs a [`FastDownPuller`] (network side) and a
-//! [`BoxPusher`] (file side) for the `.part` file, choosing the memory-mapped
-//! writer on 64-bit targets when the server supports fast (resumable) downloads
-//! and `Mmap` writing is configured, and the buffered/cache writer otherwise.
-use crate::{Config, Event, Tx, WriteMethod, core::download::open_existing, utils::build_header};
+//! Builds the pull/push pipeline for a `.part` file.
+
+use super::open_existing;
+use crate::{Config, Event, Tx, WriteMethod, utils::build_header};
 use fast_down::{
     BoxPusher, CacheFilePusher, MmapFilePusher, UrlInfo,
     fast_puller::{FastDownPuller, FastDownPullerOptions},
@@ -15,27 +12,24 @@ use reqwest::Response;
 use std::{path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
-/// Construct the (puller, pusher) pipeline for a `.part` file.
+/// Construct the (puller, pusher) pipeline for `path`.
 ///
-/// Returns `None` (after forwarding the failure as a public
-/// [`crate::Event`]) if the HTTP client or the output file cannot be created,
-/// or if `token` is cancelled before construction finishes.
+/// Returns `None` (after forwarding the failure as a public [`Event`]) if the
+/// HTTP client or the output file cannot be created, or if `token` is cancelled
+/// before construction finishes.
 ///
-/// * `url` / `config` drive the puller (headers, proxy, cert handling, range
-///   identity, local bind address, redirect limit).
+/// * `config` drives the puller (headers, proxy, cert handling, local bind
+///   address, redirect limit) and the writer choice.
 /// * `info` supplies the file identity used for range validation and selects
 ///   the writer: on 64-bit targets a resumable `info.fast_download` download
 ///   with [`WriteMethod::Mmap`] uses [`MmapFilePusher`]; otherwise
 ///   [`CacheFilePusher`] (buffered + out-of-order reordering).
-/// * `resp` is the prefetch response, reused to seed the first range request
-///   without an extra round-trip.
-/// * `path` is the `.part` file; `tx` receives error events; `token` makes
-///   construction cancellable.
+/// * `resp` is the prefetch response, reused to seed the first range request.
+/// * `path` is the `.part` file to write; `tx` receives error events.
 ///
 /// With [`Config::pre_alloc`] enabled and a known size, the whole file is
-/// reserved on disk right after the `.part` file is opened
-/// ([`Event::Allocating`]). A reservation that fails is reported as
-/// [`Event::AllocError`] and does not abort the pipeline.
+/// reserved on disk right after it is opened ([`Event::Allocating`]); a failed
+/// reservation is reported as [`Event::AllocError`] and does not abort.
 pub async fn build_pipeline(
     config: &Config,
     info: &UrlInfo,
@@ -100,9 +94,9 @@ pub async fn build_pipeline(
         })
         .await;
     match built {
-        Some(Ok(b)) => Some(b),
-        Some(Err(e)) => {
-            let _ = tx.send(e);
+        Some(Ok(built)) => Some(built),
+        Some(Err(event)) => {
+            let _ = tx.send(event);
             None
         }
         None => None,

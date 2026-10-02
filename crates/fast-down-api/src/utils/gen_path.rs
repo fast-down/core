@@ -1,11 +1,11 @@
 use crate::{Config, utils::parse_filename_template};
 use fast_down::UrlInfo;
-use path_helper::{auto_ext, sanitize_filename, sanitize_path};
+use path_helper::{auto_ext, comparable, sanitize_filename, sanitize_path};
 use soft_canonicalize::soft_canonicalize;
 use std::{borrow::Cow, path::PathBuf};
 use url::Url;
 
-pub async fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Result<PathBuf> {
+pub fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Result<PathBuf> {
     let mut filename = sanitize_filename(
         if config.filename.is_empty() || config.parse_filename {
             auto_ext(&info.raw_name, info.content_type.as_deref())
@@ -23,7 +23,7 @@ pub async fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Re
         }
         if let Some(parent_path) = path.parent()
             && let Ok(new_save_dir) = soft_canonicalize(save_dir.join(sanitize_path(parent_path)))
-            && new_save_dir.starts_with(&save_dir)
+            && comparable(&new_save_dir).starts_with(comparable(&save_dir))
         {
             save_dir = new_save_dir;
         }
@@ -76,7 +76,7 @@ mod tests {
         let url = Url::parse("https://example.com/path/data.bin?x=1").unwrap();
         let info = make_info("data.bin", Some("application/octet-stream"));
         let cfg = make_config(&dir, "", false);
-        let p = gen_path(&url, &info, &cfg).await.unwrap();
+        let p = gen_path(&url, &info, &cfg).unwrap();
         assert_eq!(p.file_name().unwrap(), "data.bin");
     }
 
@@ -87,7 +87,7 @@ mod tests {
         let url = Url::parse("https://example.com/path/data.bin").unwrap();
         let info = make_info("data.bin", None);
         let cfg = make_config(&dir, "myname.txt", false);
-        let p = gen_path(&url, &info, &cfg).await.unwrap();
+        let p = gen_path(&url, &info, &cfg).unwrap();
         assert_eq!(p.file_name().unwrap(), "myname.txt");
     }
 
@@ -98,7 +98,7 @@ mod tests {
         let url = Url::parse("https://example.com/a/b/data.bin").unwrap();
         let info = make_info("data.bin", None);
         let cfg = make_config(&dir, "{parent_path}/{file_name}", true);
-        let p = gen_path(&url, &info, &cfg).await.unwrap();
+        let p = gen_path(&url, &info, &cfg).unwrap();
         // parent_path of /a/b/data.bin is "a/b", so the resolved path ends with it.
         assert!(p.ends_with("a/b/data.bin"), "unexpected path: {p:?}");
         // `gen_path` only computes the path; it must NOT create the directory.
@@ -124,7 +124,7 @@ mod tests {
         let url = Url::parse("https://example.com/a/b/data.bin").unwrap();
         let info = make_info("data.bin", None);
         let cfg = make_config(&dir, "../../etc/pwned/{file_name}", true);
-        let p = gen_path(&url, &info, &cfg).await.unwrap();
+        let p = gen_path(&url, &info, &cfg).unwrap();
 
         let norm = |p: &std::path::Path| -> String {
             let s = p.to_string_lossy();
@@ -159,7 +159,7 @@ mod tests {
         let url = Url::parse("https://example.com/a.bin").unwrap();
         let info = make_info("a.bin", None);
         let cfg = make_config(&dir, "a.bin", false);
-        let p = gen_path(&url, &info, &cfg).await.unwrap();
+        let p = gen_path(&url, &info, &cfg).unwrap();
         let s = p.to_string_lossy();
         assert!(
             s.contains("c\\Users") || s.contains("c/Users"),

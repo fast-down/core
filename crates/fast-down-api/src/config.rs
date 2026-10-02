@@ -209,52 +209,12 @@ impl PartialConfig {
     ///
     /// The range is folded into `downloaded_chunk` (created if absent), keeping
     /// it normalized and de-duplicated. This is the in-memory counterpart of
-    /// [`DownloadState::merge_progress`](crate::DownloadState::merge_progress):
-    /// callers use it to record progress before handing the config to
-    /// [`resume`](crate::resume).
+    /// [`Record::merge_config`](crate::Record::merge_config): callers use it to
+    /// record progress on the config they hand to [`State`](crate::State).
     pub fn merge_progress(&mut self, progress: ProgressEntry) {
         self.downloaded_chunk
             .get_or_insert_default()
             .merge_progress(progress);
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::single_range_in_vec_init)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn merge_progress_none_to_some() {
-        let mut c = PartialConfig::default();
-        assert_eq!(c.downloaded_chunk, None);
-        c.merge_progress(1u64..5);
-        assert_eq!(c.downloaded_chunk, Some(vec![1u64..5]));
-    }
-
-    #[test]
-    fn merge_progress_coalesces() {
-        let mut c = PartialConfig::default();
-        c.merge_progress(1u64..5);
-        c.merge_progress(5u64..10);
-        c.merge_progress(10u64..20);
-        assert_eq!(c.downloaded_chunk, Some(vec![1u64..20]));
-    }
-
-    #[test]
-    fn merge_progress_empty_is_noop() {
-        let mut c = PartialConfig::default();
-        c.merge_progress(1u64..5);
-        c.merge_progress(3u64..3);
-        assert_eq!(c.downloaded_chunk, Some(vec![1u64..5]));
-    }
-
-    #[test]
-    fn merge_progress_disjoint() {
-        let mut c = PartialConfig::default();
-        c.merge_progress(1u64..5);
-        c.merge_progress(10u64..20);
-        assert_eq!(c.downloaded_chunk, Some(vec![1u64..5, 10u64..20]));
     }
 }
 
@@ -313,7 +273,6 @@ mod range_list {
                 }
                 let mut ranges = Vec::new();
                 for part in trimmed.split(',') {
-                    let part = part.trim();
                     let (start_repr, end_repr) = part.split_once('-').ok_or_else(|| {
                         serde::de::Error::custom(format!(
                             "invalid range `{part}` in downloaded_chunk"
@@ -349,8 +308,42 @@ mod range_list {
 }
 
 #[cfg(test)]
-mod range_list_tests {
+#[allow(clippy::single_range_in_vec_init)]
+mod tests {
     use super::*;
+
+    #[test]
+    fn merge_progress_none_to_some() {
+        let mut c = PartialConfig::default();
+        assert_eq!(c.downloaded_chunk, None);
+        c.merge_progress(1u64..5);
+        assert_eq!(c.downloaded_chunk, Some(vec![1u64..5]));
+    }
+
+    #[test]
+    fn merge_progress_coalesces() {
+        let mut c = PartialConfig::default();
+        c.merge_progress(1u64..5);
+        c.merge_progress(5u64..10);
+        c.merge_progress(10u64..20);
+        assert_eq!(c.downloaded_chunk, Some(vec![1u64..20]));
+    }
+
+    #[test]
+    fn merge_progress_empty_is_noop() {
+        let mut c = PartialConfig::default();
+        c.merge_progress(1u64..5);
+        c.merge_progress(3u64..3);
+        assert_eq!(c.downloaded_chunk, Some(vec![1u64..5]));
+    }
+
+    #[test]
+    fn merge_progress_disjoint() {
+        let mut c = PartialConfig::default();
+        c.merge_progress(1u64..5);
+        c.merge_progress(10u64..20);
+        assert_eq!(c.downloaded_chunk, Some(vec![1u64..5, 10u64..20]));
+    }
 
     #[test]
     fn downloaded_chunk_round_trips_as_http_range_string() {
