@@ -10,10 +10,12 @@
 use crate::Event;
 use crossfire::{MAsyncRx, mpmc};
 use fast_steal::{Executor, TaskQueue};
+use force_send::ForceSend;
 use std::fmt;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+mod force_send;
 pub mod mock;
 pub mod multi;
 pub mod single;
@@ -114,17 +116,22 @@ where
 /// value. There is intentionally **no** `Deref` impl — `DownloadResultInner`
 /// is private, so callers reach session state only through these methods.
 ///
-/// Completion is observed by draining [`event_chain`](Self::event_chain): once
-/// the last sender is dropped (the download finished or was aborted) the
-/// receiver disconnects, so `while result.event_chain().recv().await.is_ok() {}`
-/// awaits the session end.
+/// The inner value is held in a `ForceSend`, a deliberately isolated
+/// workaround so the handle is `Send` even when it is built inside an `async`
+/// block (see that type's module docs).
+///
+/// Completion is observed by draining the event stream: once the last sender is
+/// dropped (the download finished or was aborted) the receiver disconnects, so
+/// `while result.recv().await.is_ok() {}` awaits the session end. [`recv`](Self::recv)
+/// is the `Send`-safe form of that call; prefer it over
+/// `result.event_chain().recv()` in a `tokio::spawn`ed driver.
 pub struct DownloadResult<E, PullError, PushError>
 where
     E: Executor + Send + Sync,
     PullError: Send + Unpin + 'static,
     PushError: Send + Unpin + 'static,
 {
-    inner: Arc<DownloadResultInner<E, PullError, PushError>>,
+    inner: ForceSend<Arc<DownloadResultInner<E, PullError, PushError>>>,
 }
 
 impl<E, PullError, PushError> fmt::Debug for DownloadResult<E, PullError, PushError>
@@ -135,7 +142,7 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DownloadResult")
-            .field("inner", &self.inner)
+            .field("inner", &*self.inner)
             .finish()
     }
 }
@@ -171,11 +178,11 @@ where
         abort_token: CancellationToken,
     ) -> Self {
         Self {
-            inner: Arc::new(DownloadResultInner {
+            inner: ForceSend(Arc::new(DownloadResultInner {
                 event_chain,
                 task_queue,
                 abort_token,
-            }),
+            })),
         }
     }
 
@@ -186,6 +193,23 @@ where
     #[must_use]
     pub fn event_chain(&self) -> &MAsyncRx<mpmc::List<Event<PullError, PushError>>> {
         &self.inner.event_chain
+    }
+
+    /// Await the next event, or `Err` once the session has ended.
+    ///
+    /// Equivalent to `self.event_chain().recv()`, but returns
+    /// `impl Future + Send`, so an enclosing `async` block that awaits it stays
+    /// `Send`. Prefer this over `event_chain().recv()` in a `tokio::spawn`ed
+    /// driver: the underlying `RecvFuture` is only `Send` through a hand-written
+    /// impl that the `async fn` auto-trait leak check does not see through, so
+    /// awaiting it inline reintroduces a spurious `higher-ranked lifetime error`.
+    /// No allocation.
+    pub fn recv(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Event<PullError, PushError>, crossfire::RecvError>>
+    + Send
+    + '_ {
+        self.inner.event_chain.recv()
     }
 
     /// Cancel all workers immediately.

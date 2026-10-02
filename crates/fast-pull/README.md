@@ -33,9 +33,10 @@ byte ranges from any source to any sink.
    flush runs once a watermark is reached; `BufWriterPusher` batches contiguous
    writes like `std::io::BufWriter`.
 5. **📈 Progress & cancellation**
-   Streaming `Event`s (pull/push progress, errors, completion) are delivered on
-   `DownloadResult::event_chain`, and a session is cancelled by
-   `DownloadResult::abort` or simply dropping the last handle clone.
+   Streaming `Event`s (pull/push progress, errors, completion) are delivered via
+   `DownloadResult::recv` (a `Send`-safe future, so a `tokio::spawn`ed driver can
+   await it directly) or `DownloadResult::event_chain`, and a session is cancelled
+   by `DownloadResult::abort` or simply dropping the last handle clone.
 6. **🧪 Testing-friendly**
    `MockPuller` + `build_mock_data` give you a deterministic in-memory source for
    tests — no network or disk required.
@@ -87,7 +88,7 @@ async fn main() {
             push_queue_cap: 16,
         },
     );
-    while result.event_chain().recv().await.is_ok() {}
+    while result.recv().await.is_ok() {}
 
     assert_eq!(&*out.lock().unwrap(), &expected);
 }

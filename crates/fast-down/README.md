@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    while result.event_chain().recv().await.is_ok() {}
+    while result.recv().await.is_ok() {}
     Ok(())
 }
 
