@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .build(tx.clone())
     .await?;
 
-    println!("final path: {}", ready.final_path().display());
+    println!("final path: {}", ready.final_path.display());
 
     // 2. Drain the event stream on another task.
     let drain = tokio::spawn(async move {

@@ -35,11 +35,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `build` prefetched metadata and computed paths but wrote nothing to disk.
     println!(
         "remote: {} bytes, final_path = {}, fast_download = {}",
-        ready.info().size,
-        ready.final_path().display(),
-        ready.info().fast_download
+        ready.info.size,
+        ready.final_path.display(),
+        ready.info.fast_download
     );
-    match ready.resume_outcome() {
+    match &ready.outcome {
         ResumeOutcome::Fresh => println!("nothing to continue; will download the whole file"),
         ResumeOutcome::Resumable => println!("will continue a previous run"),
         ResumeOutcome::Mismatch(e) => println!("stale state; cannot resume: {e}"),

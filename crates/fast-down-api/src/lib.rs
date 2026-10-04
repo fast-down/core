@@ -1,10 +1,7 @@
 #![doc = include_str!("../README.md")]
-#![allow(clippy::missing_errors_doc)]
 
 pub mod state;
-pub use state::{
-    PartState, PlanError, Ready, Record, ResumeOutcome, State, StateError, tmp_path_for,
-};
+pub use state::{PartState, PlanError, Ready, Record, ResumeOutcome, State, StateError};
 
 mod engine;
 pub use engine::*;

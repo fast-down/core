@@ -11,7 +11,7 @@ use super::{build_pipeline, open_create, open_create_new, progress};
 use crate::{
     Event, PartialConfig, TerminationReason, Tx,
     engine::progress::RateEstimator,
-    state::{Record, ResumeOutcome, StateError, tmp_path_for},
+    state::{Record, ResumeOutcome, StateError},
 };
 use fast_down::{UrlInfo, invert, multi::download_multi, single::download_single};
 use inherit_config::ConfigLayer;
@@ -307,12 +307,12 @@ async fn drive(
             let _ = tx.send(Event::ResumeError(StateError::NotResumable));
             return TerminationReason::Failed;
         };
-        (fd_path.clone(), tmp_path_for(&fd_path))
+        (fd_path.clone(), fd_path.with_extension("part"))
     } else if let Some(fd_path) = fd_path {
         // Fresh over an existing pair: reuse the location and the `.part`, but
         // start from byte zero. This is how a pinned `.fd` (from `State::load`)
         // is reused even when its `.part` is missing.
-        let tmp = tmp_path_for(&fd_path);
+        let tmp = fd_path.with_extension("part");
         if let Err(e) = open_create().open(&tmp).await {
             let _ = tx.send(Event::BuildPusherError(e));
             return TerminationReason::Failed;
@@ -334,7 +334,7 @@ async fn drive(
     if resuming {
         let _ = tx.send(Event::Resumed {
             config_path: fd_path.clone(),
-            progress: record.progress(),
+            progress: record.progress().to_vec(),
             size: info.size,
         });
     }
@@ -518,7 +518,7 @@ where
 /// A clean record at the caller's configuration, carrying `info`'s identity and
 /// no progress.
 fn fresh_over(record: &Record, origin_config: &PartialConfig, info: &UrlInfo) -> Record {
-    let mut fresh = Record::from_url(record.url.clone(), origin_config.clone());
+    let mut fresh = Record::new(record.url.clone(), origin_config.clone());
     fresh.refresh_identity(info);
     fresh
 }
@@ -532,7 +532,7 @@ fn fresh_over(record: &Record, origin_config: &PartialConfig, info: &UrlInfo) ->
 async fn claim_pair(final_path: &Path, tx: &Tx) -> Result<(PathBuf, PathBuf), TerminationReason> {
     for base in final_path.iter_stem() {
         let fd_path = base.with_added_extension("fd");
-        let tmp_path = tmp_path_for(&fd_path);
+        let tmp_path = fd_path.with_extension("part");
         match open_create_new().open(&tmp_path).await {
             Ok(_) => match open_create_new().open(&fd_path).await {
                 Ok(_) => return Ok((fd_path, tmp_path)),

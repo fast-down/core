@@ -46,12 +46,12 @@ let url = Url::parse("https://example.com/large-file.bin")?;
 let ready = State::new(url, config).build(tx).await?;
 
 // 4. Decide based on what starting would do.
-match ready.resume_outcome() {
+match &ready.outcome {
     ResumeOutcome::Resumable => println!("will continue from a previous run"),
     ResumeOutcome::Fresh => println!("will download the whole file"),
     ResumeOutcome::Mismatch(e) => println!("stale state, cannot resume: {e}"),
 }
-println!("final path: {:?}", ready.final_path());
+println!("final path: {:?}", ready.final_path);
 println!("already fetched: {} ranges", ready.progress().len());
 # let _ = token;
 # Ok(())
@@ -77,7 +77,7 @@ use fast_down_api::{PartialConfig, State, create_channel};
 let (tx, _rx) = create_channel();
 let state = State::load("./downloads/large-file.bin.fd").await?;
 let ready = state.build(tx).await?;
-println!("resuming {:?}", ready.config_path());
+println!("resuming {:?}", ready.fd_path);
 # Ok(())
 # }
 ```
@@ -140,7 +140,7 @@ two versions together.
 | ---- | ------- |
 | [`State`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.State.html) | A download that has not been resolved yet. `State::new` starts from a URL; `State::load` reads an existing `.fd`. |
 | [`State::build`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.State.html) | Prefetch + resolve paths + probe the disk, returning a [`Ready`] **without writing anything**. |
-| [`Ready`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Ready.html) | A resolved download. Inspect with `resume_outcome`, `final_path`, `config_path`, `tmp_path`, `progress`, `info`, then run it. |
+| [`Ready`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Ready.html) | A resolved download. Inspect its public fields (`outcome`, `final_path`, `fd_path`, `info`) plus `progress()` / `tmp_path()`, then run it. |
 | [`StartMode`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StartMode.html) | A preset for how to start: `Auto`, `Resume`, `Fresh`, `Forced`. Accepted by `Ready::start`. |
 | [`StartPolicy`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.StartPolicy.html) | Per-dimension start policy (what to do for each reason a resume might fail). Also accepted by `Ready::start`. |
 | [`ResumeOutcome`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.ResumeOutcome.html) | `Fresh` (nothing to continue), `Resumable`, or `Mismatch(StateError)`. |

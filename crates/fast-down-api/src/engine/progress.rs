@@ -58,7 +58,7 @@ impl RateEstimator {
 /// one).
 #[must_use]
 pub fn sample(
-    progress: Vec<fast_down::ProgressEntry>,
+    progress: &[fast_down::ProgressEntry],
     total: u64,
     elapsed: Duration,
     now: Instant,
@@ -100,7 +100,7 @@ pub fn sample(
     };
 
     ProgressSample {
-        progress,
+        progress: progress.to_vec(),
         bps,
         avg_bps,
         downloaded,
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn sample_reports_zero_percent_when_total_is_zero() {
-        let s = sample(Vec::new(), 0, Duration::ZERO, Instant::now(), None);
+        let s = sample(&[], 0, Duration::ZERO, Instant::now(), None);
         assert_eq!(s.total, 0);
         assert!(s.percent.abs() < f64::EPSILON);
         assert_eq!(s.downloaded, 0);
@@ -168,8 +168,9 @@ mod tests {
     #[test]
     #[allow(clippy::single_range_in_vec_init)]
     fn sample_derives_percent_and_eta() {
+        let progress = vec![0u64..500];
         let s = sample(
-            vec![0u64..500],
+            &progress,
             1000,
             Duration::from_secs(1),
             Instant::now(),
@@ -180,5 +181,6 @@ mod tests {
         assert_eq!(s.bps, 0, "no rate estimator forces bps to 0");
         assert!(s.avg_bps > 0);
         assert!(s.eta.is_some());
+        assert_eq!(s.progress, progress, "the sample owns a copy of the ranges");
     }
 }

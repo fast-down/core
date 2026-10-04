@@ -1,10 +1,8 @@
 mod error;
-mod path;
 mod ready;
 mod record;
 
 pub use error::*;
-pub use path::*;
 pub use ready::*;
 pub use record::*;
 
@@ -25,7 +23,7 @@ use url::Url;
 ///
 /// [`State::new`] and [`State::load`] are the two ways in; both only differ in
 /// whether the record already carries remote identity and progress.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct State {
     pub record: Record,
     pub fd_path: Option<PathBuf>,
@@ -36,7 +34,7 @@ impl State {
     #[must_use]
     pub const fn new(url: Url, config: PartialConfig) -> Self {
         Self {
-            record: Record::from_url(url, config),
+            record: Record::new(url, config),
             fd_path: None,
         }
     }
@@ -78,7 +76,7 @@ impl State {
     #[allow(clippy::result_large_err)]
     pub async fn build(self, tx: Tx) -> Result<Ready, PlanError> {
         let Self { record, fd_path } = self;
-        let url = record.url.clone();
+        let url = &record.url;
         // `origin_config` is the caller's configuration with any *recorded
         // progress* stripped: a fresh start rebuilds from it, so leaking the
         // `.fd`'s `downloaded_chunk` here would make a "fresh" download skip the
@@ -88,29 +86,29 @@ impl State {
         let mut partial = record.config.clone();
         partial.downloaded_chunk = None;
         let config = partial.clone().build();
-        let (info, resp) = prefetch(&url, &config, &tx).await?;
-        let final_path = gen_path(&url, &info, &config).map_err(PlanError::GenPath)?;
+        let (info, resp) = prefetch(url, &config, &tx).await?;
+        let final_path = gen_path(url, &info, &config).map_err(PlanError::GenPath)?;
 
-        // The caller's explicitly pinned `.fd` (from [`State::load`]), if any. It
-        // is preserved through the `Fresh` outcomes so a later start can reuse
-        // the pinned pair instead of claiming a new one.
-        let pinned = fd_path.clone();
-        let probe = fd_path
-            .clone()
-            .unwrap_or_else(|| final_path.with_added_extension("fd"));
+        // Whether the caller pinned a specific `.fd` (via [`State::load`]). A
+        // `Fresh` outcome keeps that pin; without one, `start` claims a free pair.
+        let caller_pinned = fd_path.is_some();
+        // The `.fd` to probe: the pinned one, or the default `<final>.fd`. No
+        // clone: the resume paths move it into the result, and a fresh path only
+        // needs `caller_pinned` to decide whether to keep it.
+        let probe_fd_path = fd_path.unwrap_or_else(|| final_path.with_added_extension("fd"));
 
         // A clean, caller-configured record carrying the current identity but no
         // progress: what every `Fresh` path falls back to.
         let fresh_record = || {
-            let mut fresh = Record::from_url(url.clone(), partial.clone());
+            let mut fresh = Record::new(url.clone(), partial.clone());
             fresh.refresh_identity(&info);
             fresh
         };
 
         let (record, outcome, fd_path) = if config.resume {
-            match Record::load(&probe).await {
+            match Record::load(&probe_fd_path).await {
                 Ok(mut old) if info.fast_download => {
-                    let tmp = tmp_path_for(&probe);
+                    let tmp = probe_fd_path.with_extension("part");
                     // Every judgement reads the OLD state and must run before
                     // any mutation: `validate` compares the recorded identity,
                     // and `part_state` measures the file against the recorded
@@ -122,30 +120,33 @@ impl State {
                     // The caller's URL always wins; the identity is only
                     // refreshed when the state still describes this file, so a
                     // `Mismatch` keeps its self-consistent old identity.
-                    old.set_url(&url);
+                    old.set_url(url);
                     if validation.is_ok() {
                         old.refresh_identity(&info);
                     }
                     old.merge_config(&partial);
 
                     match (validation, part) {
-                        (Err(e), _) => (old, ResumeOutcome::Mismatch(e), Some(probe)),
-                        (Ok(()), PartState::Ready) => (old, ResumeOutcome::Resumable, Some(probe)),
+                        (Err(e), _) => (old, ResumeOutcome::Mismatch(e), Some(probe_fd_path)),
+                        (Ok(()), PartState::Ready) => {
+                            (old, ResumeOutcome::Resumable, Some(probe_fd_path))
+                        }
                         (Ok(()), PartState::Short { actual, recorded }) => (
                             old,
                             ResumeOutcome::Mismatch(StateError::Truncated {
                                 actual_size: actual,
                                 recorded_size: recorded,
                             }),
-                            Some(probe),
+                            Some(probe_fd_path),
                         ),
-                        // The `.part` is gone: nothing safe to continue. An
-                        // explicitly pinned `.fd` (from `State::load`) is kept
-                        // so a later start can reuse it; otherwise start claims a
-                        // free pair.
-                        (Ok(()), PartState::Missing) => {
-                            (fresh_record(), ResumeOutcome::Fresh, pinned.clone())
-                        }
+                        // The `.part` is gone: nothing safe to continue. A pinned
+                        // `.fd` (from `State::load`) keeps its location so a later
+                        // start can reuse it; otherwise start claims a free pair.
+                        (Ok(()), PartState::Missing) => (
+                            fresh_record(),
+                            ResumeOutcome::Fresh,
+                            caller_pinned.then_some(probe_fd_path),
+                        ),
                     }
                 }
                 // A `.fd` exists, but the server cannot serve ranges: resume is
@@ -153,18 +154,28 @@ impl State {
                 Ok(_) => (
                     fresh_record(),
                     ResumeOutcome::Mismatch(StateError::NotResumable),
-                    Some(probe),
+                    Some(probe_fd_path),
                 ),
-                Err(StateError::NotFound(_)) => {
-                    (fresh_record(), ResumeOutcome::Fresh, pinned.clone())
-                }
+                Err(StateError::NotFound(_)) => (
+                    fresh_record(),
+                    ResumeOutcome::Fresh,
+                    caller_pinned.then_some(probe_fd_path),
+                ),
                 // Any other read/decode failure means the state exists but is
                 // unusable: classify it as a mismatch so `Auto` falls back to a
                 // fresh download while `Resume` reports it.
-                Err(e) => (fresh_record(), ResumeOutcome::Mismatch(e), Some(probe)),
+                Err(e) => (
+                    fresh_record(),
+                    ResumeOutcome::Mismatch(e),
+                    Some(probe_fd_path),
+                ),
             }
         } else {
-            (fresh_record(), ResumeOutcome::Fresh, pinned.clone())
+            (
+                fresh_record(),
+                ResumeOutcome::Fresh,
+                caller_pinned.then_some(probe_fd_path),
+            )
         };
 
         Ok(Ready {

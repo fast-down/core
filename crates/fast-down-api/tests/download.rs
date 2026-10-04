@@ -16,7 +16,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use fast_down_api::{
     Event, PartialConfig, Record, ResumeOutcome, Rx, StartMode, State, TerminationReason,
-    WriteMethod, create_cancellation_token, create_channel, tmp_path_for,
+    WriteMethod, create_cancellation_token, create_channel,
 };
 use http_body_util::BodyExt;
 use http_body_util::combinators::BoxBody;
@@ -213,7 +213,7 @@ async fn probe(url: &str, dir: &Path) -> (PathBuf, fast_down::UrlInfo) {
         .build(tx)
         .await
         .expect("probe build");
-    (ready.final_path().to_path_buf(), ready.info().clone())
+    (ready.final_path, ready.info)
 }
 
 /// Seed a `.fd` + `.part` pair as if a previous run had already fetched the
@@ -230,8 +230,8 @@ async fn seed_partial(
     progress_end: u64,
 ) -> PathBuf {
     let fd = final_path.with_added_extension("fd");
-    let tmp = tmp_path_for(&fd);
-    let mut record = Record::from_url(Url::parse(url).unwrap(), make_config(dir));
+    let tmp = fd.with_extension("part");
+    let mut record = Record::new(Url::parse(url).unwrap(), make_config(dir));
     record.refresh_identity(info);
     record.etag = Some(etag.into());
     record.set_progress(vec![0..progress_end]);
@@ -264,8 +264,8 @@ async fn fresh_download_completes_and_renames() {
         .build(tx.clone())
         .await
         .expect("build");
-    assert!(matches!(ready.resume_outcome(), ResumeOutcome::Fresh));
-    let final_path = ready.final_path().to_path_buf();
+    assert!(matches!(&ready.outcome, ResumeOutcome::Fresh));
+    let final_path = ready.final_path.clone();
 
     let drain = tokio::spawn(run_to_end(rx));
     ready.start(StartMode::Auto, tx, token).await;
@@ -293,7 +293,7 @@ async fn resumes_from_seeded_state() {
         .await
         .expect("build");
     assert!(
-        matches!(ready.resume_outcome(), ResumeOutcome::Resumable),
+        matches!(&ready.outcome, ResumeOutcome::Resumable),
         "a valid .fd + long enough .part must resolve as resumable"
     );
 
@@ -319,7 +319,7 @@ async fn changed_remote_is_mismatch_and_resume_mode_refuses() {
         .await
         .expect("build");
     assert!(
-        matches!(ready.resume_outcome(), ResumeOutcome::Mismatch(_)),
+        matches!(&ready.outcome, ResumeOutcome::Mismatch(_)),
         "a changed remote must be reported as a mismatch, not silently resumable"
     );
 
@@ -337,7 +337,7 @@ async fn truncated_part_is_mismatch() {
     let (final_path, info) = probe(&url, &dir).await;
     let fd = seed_partial(&url, &dir, &final_path, &info, "v1", &payload, PARTIAL).await;
     // Shrink the `.part` below what the state claims.
-    let tmp = tmp_path_for(&fd);
+    let tmp = fd.with_extension("part");
     tokio::fs::write(&tmp, vec![0u8; 16]).await.unwrap();
 
     let (tx, _rx) = create_channel();
@@ -346,7 +346,7 @@ async fn truncated_part_is_mismatch() {
         .await
         .expect("build");
     assert!(
-        matches!(ready.resume_outcome(), ResumeOutcome::Mismatch(_)),
+        matches!(&ready.outcome, ResumeOutcome::Mismatch(_)),
         "a truncated .part must not be resumed"
     );
 }
@@ -365,7 +365,7 @@ async fn fresh_mode_redownloads_and_completes() {
         .build(tx.clone())
         .await
         .expect("build");
-    assert!(matches!(ready.resume_outcome(), ResumeOutcome::Resumable));
+    assert!(matches!(&ready.outcome, ResumeOutcome::Resumable));
 
     let drain = tokio::spawn(run_to_end(rx));
     ready.start(StartMode::Fresh, tx, token).await;
@@ -392,7 +392,7 @@ async fn cancellation_keeps_state_and_resume_completes() {
         .build(tx.clone())
         .await
         .expect("build");
-    assert!(matches!(ready.resume_outcome(), ResumeOutcome::Fresh));
+    assert!(matches!(&ready.outcome, ResumeOutcome::Fresh));
     let drain = tokio::spawn(run_to_end(rx));
     let watcher = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -416,7 +416,7 @@ async fn cancellation_keeps_state_and_resume_completes() {
         .build(tx.clone())
         .await
         .expect("build");
-    assert!(matches!(ready.resume_outcome(), ResumeOutcome::Resumable));
+    assert!(matches!(&ready.outcome, ResumeOutcome::Resumable));
     let drain = tokio::spawn(run_to_end(rx));
     ready.start(StartMode::Auto, tx, token).await;
     assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
@@ -476,7 +476,7 @@ async fn start_policy_per_dimension_override() {
         FILE_SIZE as u64 / 2,
     )
     .await;
-    let tmp = tmp_path_for(&fd);
+    let tmp = fd.with_extension("part");
     let file = tokio::fs::OpenOptions::new()
         .write(true)
         .open(&tmp)
@@ -494,7 +494,7 @@ async fn start_policy_per_dimension_override() {
         .await
         .unwrap();
     assert!(
-        matches!(ready.resume_outcome(), ResumeOutcome::Mismatch(_)),
+        matches!(&ready.outcome, ResumeOutcome::Mismatch(_)),
         "precondition: the shrunk .part must be a mismatch"
     );
 

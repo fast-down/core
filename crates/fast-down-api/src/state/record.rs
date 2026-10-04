@@ -1,5 +1,5 @@
 use crate::{PartialConfig, StateError};
-use fast_down::{FileId, Merge, ProgressEntry, Total, UrlInfo};
+use fast_down::{FileId, ProgressEntry, Total, UrlInfo};
 use inherit_config::ConfigLayer;
 use path_helper::tokio::safe_replace;
 use serde::{Deserialize, Serialize};
@@ -9,11 +9,10 @@ use url::Url;
 /// The on-disk `.fd` state of one download: the remote identity it was written
 /// for, the byte ranges already fetched, and the accumulated active time.
 ///
-/// The `.part` file it describes is **not** recorded here — it is always
-/// [`crate::state::tmp_path_for`] of the `.fd` path, i.e. the same path with its
-/// extension swapped to `.part`. Keeping the pairing implicit lets the two
-/// files be renamed or moved together, and removes a hand-editable path from
-/// the file.
+/// The `.part` file it describes is **not** recorded here — it is always the
+/// `.fd` path with its extension swapped to `.part`. Keeping the pairing
+/// implicit lets the two files be renamed or moved together, and removes a
+/// hand-editable path from the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     /// The durable initial URL (never a transient redirect target).
@@ -31,7 +30,7 @@ pub struct Record {
 impl Record {
     /// A brand-new record for an unfetched URL: no identity, no progress.
     #[must_use]
-    pub const fn from_url(url: Url, config: PartialConfig) -> Self {
+    pub const fn new(url: Url, config: PartialConfig) -> Self {
         Self {
             url,
             config,
@@ -102,7 +101,8 @@ impl Record {
 
     /// Highest exclusive offset the recorded progress reaches; `0` when nothing
     /// has been downloaded.
-    fn recorded_end(&self) -> u64 {
+    #[must_use]
+    pub fn recorded_end(&self) -> u64 {
         self.config
             .downloaded_chunk
             .as_ref()
@@ -151,10 +151,7 @@ impl Record {
 
     /// Merge a freshly-written byte range into the recorded progress.
     pub fn merge_progress(&mut self, range: ProgressEntry) {
-        self.config
-            .downloaded_chunk
-            .get_or_insert_default()
-            .merge_progress(range);
+        self.config.merge_progress(range);
     }
 
     /// Replace the recorded progress with `progress`.
@@ -178,10 +175,10 @@ impl Record {
             .map_or(0, Total::total)
     }
 
-    /// A copy of the recorded progress ranges.
+    /// The recorded progress ranges. Empty when nothing has been downloaded.
     #[must_use]
-    pub fn progress(&self) -> Vec<ProgressEntry> {
-        self.config.downloaded_chunk.clone().unwrap_or_default()
+    pub fn progress(&self) -> &[ProgressEntry] {
+        self.config.downloaded_chunk.as_deref().map_or(&[], |v| v)
     }
 
     /// Whether every byte of a `total`-byte file has been recorded. A zero-size

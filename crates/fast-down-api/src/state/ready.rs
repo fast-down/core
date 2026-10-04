@@ -1,11 +1,7 @@
-use crate::{
-    PartialConfig, StateError, Tx,
-    engine::StartPolicy,
-    state::{Record, tmp_path_for},
-};
+use crate::{PartialConfig, StateError, Tx, engine::StartPolicy, state::Record};
 use fast_down::{ProgressEntry, UrlInfo};
 use reqwest::Response;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 /// What a resolved download will do when started, reported by [`crate::State::build`].
@@ -26,8 +22,8 @@ pub enum ResumeOutcome {
 ///
 /// Produced by [`crate::State::build`]. Holds the live prefetch [`Response`] so
 /// `start` can seed its first range request without another round trip; that
-/// field is never persisted. Inspect [`Ready::resume_outcome`] (and
-/// [`Ready::progress`]) before committing, then call `start`.
+/// field is never persisted. Inspect the public [`outcome`](Ready::outcome) (and
+/// [`progress`](Ready::progress)) before committing, then call `start`.
 #[derive(Debug)]
 pub struct Ready {
     /// The caller's original overrides, kept so a fresh start can rebuild a
@@ -81,36 +77,11 @@ impl Ready {
         .await;
     }
 
-    /// Remote metadata resolved by the prefetch: size, identity, range support.
-    #[must_use]
-    pub const fn info(&self) -> &UrlInfo {
-        &self.info
-    }
-
-    /// The base output path, before any final-name uniquification.
-    #[must_use]
-    pub fn final_path(&self) -> &Path {
-        &self.final_path
-    }
-
-    /// The `.fd` state file backing this run, when its location is already
-    /// known. `None` means `start` will claim one.
-    #[must_use]
-    pub fn config_path(&self) -> Option<&Path> {
-        self.fd_path.as_deref()
-    }
-
     /// The `.part` file this run writes to, derived from the `.fd` path.
     /// `None` when the `.fd` location is not decided yet.
     #[must_use]
     pub fn tmp_path(&self) -> Option<PathBuf> {
-        self.fd_path.as_deref().map(tmp_path_for)
-    }
-
-    /// What `start` would do.
-    #[must_use]
-    pub const fn resume_outcome(&self) -> &ResumeOutcome {
-        &self.outcome
+        self.fd_path.as_deref().map(|p| p.with_extension("part"))
     }
 
     /// Byte ranges recorded so far (empty for a fresh download).

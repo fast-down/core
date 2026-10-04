@@ -39,8 +39,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build(tx.clone())
         .await?;
     let fd_path = ready
-        .config_path()
-        .map(std::path::Path::to_path_buf)
+        .fd_path
+        .clone()
         .expect("a fresh build decides the .fd path when overwrite is set");
 
     let run = ready.start(StartMode::Auto, tx, token.clone());
@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = create_channel();
     let token = create_cancellation_token();
     let ready = State::load(&fd_path).await?.build(tx.clone()).await?;
-    println!("resuming: {:?}", ready.resume_outcome());
+    println!("resuming: {:?}", ready.outcome);
 
     let drain = tokio::spawn(async move {
         let mut reason = TerminationReason::Failed;
