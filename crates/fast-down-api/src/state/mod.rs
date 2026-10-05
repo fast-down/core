@@ -74,7 +74,7 @@ impl State {
     /// exhausts its retries, or the output path cannot be computed. A `.fd` that
     /// exists but cannot be read is reported rather than silently replaced.
     #[allow(clippy::result_large_err)]
-    pub async fn build(self, tx: Tx) -> Result<Ready, PlanError> {
+    pub async fn build(self, tx: &Tx) -> Result<Ready, PlanError> {
         let Self { record, fd_path } = self;
         let url = &record.url;
         // `origin_config` is the caller's configuration with any *recorded
@@ -86,7 +86,7 @@ impl State {
         let mut partial = record.config.clone();
         partial.downloaded_chunk = None;
         let config = partial.clone().build();
-        let (info, resp) = prefetch(url, &config, &tx).await?;
+        let (info, resp) = prefetch(url, &config, tx).await?;
         let final_path = gen_path(url, &info, &config).map_err(PlanError::GenPath)?;
 
         // Whether the caller pinned a specific `.fd` (via [`State::load`]). A

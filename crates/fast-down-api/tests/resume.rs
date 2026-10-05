@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fast_down_api::{
-    Event, PartialConfig, PlanError, Rx, StartMode, State, StateError, TerminationReason, Tx,
-    WriteMethod, create_cancellation_token, create_channel,
+    Event, PartialConfig, PlanError, Record, Rx, StartMode, State, StateError, TerminationReason,
+    Tx, WriteMethod, create_cancellation_token, create_channel,
 };
 use futures::StreamExt;
 use futures::stream::unfold;
@@ -292,8 +292,8 @@ async fn drain(rx: Rx) -> Vec<Event> {
 /// download when the recorded state cannot be resumed (`StartMode::Auto`).
 fn download(url: Url, cfg: PartialConfig, tx: Tx, token: CancellationToken) {
     tokio::spawn(async move {
-        match State::new(url, cfg).build(tx.clone()).await {
-            Ok(ready) => ready.start(StartMode::Auto, tx, token).await,
+        match State::new(url, cfg).build(&tx).await {
+            Ok(ready) => ready.start(StartMode::Auto, tx, &token).await,
             Err(e) => {
                 e.emit(&tx);
                 let _ = tx.send(Event::Terminated(TerminationReason::Failed));
@@ -402,8 +402,8 @@ async fn resolve_and_run(
     // `inherit_persisted_config` + caller-merge order.
     let mut state = loaded;
     state.record.merge_config(&cfg);
-    match state.build(tx.clone()).await {
-        Ok(ready) => ready.start(mode, tx, token).await,
+    match state.build(&tx).await {
+        Ok(ready) => ready.start(mode, tx, &token).await,
         Err(e) => {
             e.emit(&tx);
             let _ = tx.send(Event::Terminated(TerminationReason::Failed));
@@ -1166,13 +1166,13 @@ async fn test_progress_event_emitted() {
         .filter_map(|e| match e {
             Event::Progress(s) => Some((
                 s.progress.clone(),
-                s.bps,
-                s.avg_bps,
-                s.downloaded,
-                s.percent,
+                s.push.bps,
+                s.push.avg_bps,
+                s.push.downloaded,
+                s.push.percent,
                 s.total,
                 s.elapsed,
-                s.eta,
+                s.push.eta,
             )),
             _ => None,
         })
@@ -1303,6 +1303,48 @@ async fn test_progress_event_emitted() {
     );
 }
 
+/// `progress_emit_gap = 0` disables periodic `Event::Progress` frames, but the
+/// single terminal snapshot at the end of the run is still emitted (with full
+/// coverage), so a consumer that only reads `Progress` still learns the final
+/// state.
+#[tokio::test]
+async fn test_progress_disabled_still_emits_terminal() {
+    let dir = temp_dir("progress_disabled");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+
+    let mut cfg = make_config(&dir);
+    cfg.progress_emit_gap = Some(Duration::ZERO);
+
+    let (tx, rx) = create_channel();
+    let cancel = create_cancellation_token();
+    download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
+    let events = drain(rx).await;
+
+    let progresses: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Progress(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        progresses.len(),
+        1,
+        "gap=0 must suppress periodic frames but still send exactly the terminal one"
+    );
+    let last = progresses.last().expect("terminal Progress");
+    assert_eq!(
+        last.progress,
+        vec![0u64..FILE_SIZE as u64],
+        "the terminal Progress must cover the whole file"
+    );
+    assert!(
+        (last.push.percent - 100.0).abs() < f64::EPSILON,
+        "terminal Progress must be at 100%, got {}",
+        last.push.percent
+    );
+}
+
 /// Regression guard for persisted `elapsed`: after a mid-download cancel the
 /// `.fd` state records the active time spent; a subsequent `resume()` must
 /// continue that clock (its first `Progress` reports an `elapsed` at least as
@@ -1350,9 +1392,9 @@ async fn test_progress_elapsed_persisted_across_resume() {
         .filter_map(|e| match e {
             Event::Progress(s) => Some((
                 s.progress.clone(),
-                s.downloaded,
+                s.push.downloaded,
                 s.elapsed,
-                s.percent,
+                s.push.percent,
                 s.total,
             )),
             _ => None,
@@ -1390,6 +1432,52 @@ async fn test_progress_elapsed_persisted_across_resume() {
     assert!(
         events.iter().any(|e| matches!(e, Event::Renamed(_))),
         "resume must complete with Renamed"
+    );
+}
+
+/// Regression guard for the persisted `elapsed` clock: it must be written on the
+/// periodic `.fd` snapshots, not only on the graceful exit path. A run that is
+/// killed (here: its task is aborted, so the final flush never runs) must still
+/// leave an `elapsed` reflecting the time it was active, otherwise a later
+/// resume treats the lost time as free and reports a deflated `avg_bps`.
+#[tokio::test]
+async fn test_elapsed_persisted_on_kill() {
+    let dir = temp_dir("elapsed_kill");
+    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+    let final_path = dir.join("out.bin");
+    let fd = final_path.with_added_extension("fd");
+
+    let (tx, rx) = create_channel();
+    let token = create_cancellation_token();
+    // Never cancel: the run must be aborted mid-flight, not ended gracefully.
+    let handle = tokio::spawn(async move {
+        if let Ok(ready) = State::new(Url::parse(&url).expect("valid url"), make_config(&dir))
+            .build(&tx)
+            .await
+        {
+            ready.start(StartMode::Auto, tx, &token).await;
+        }
+    });
+
+    // Wait until at least two persist ticks (PERSIST_GAP = 1s) have had a chance
+    // to snapshot.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    handle.abort();
+    let _ = handle.await;
+    drop(rx);
+
+    let record = Record::load(&fd).await.expect("a periodic .fd snapshot");
+    // The elapsed clock must be advancing, not stuck at the pre-run value (zero).
+    assert!(
+        record.elapsed >= Duration::from_secs(1),
+        "a killed run must persist its active time on periodic snapshots, got {:?}",
+        record.elapsed
+    );
+    // And it must still be partial (the run was aborted, not completed).
+    assert!(
+        record.downloaded() < FILE_SIZE as u64,
+        "the run should have been interrupted mid-download ({} bytes)",
+        record.downloaded()
     );
 }
 
@@ -1648,7 +1736,7 @@ async fn test_prefetch_retries_then_gives_up() {
     );
 }
 
-/// A zero-byte file reports `total == 0`; `ProgressSample::percent` is then
+/// A zero-byte file reports `total == 0`; `DownloadStats::push.percent` is then
 /// forced to `0.0` (`progress_reporter.rs` line 134) rather than dividing by zero.
 #[tokio::test]
 async fn test_progress_zero_total_file() {
@@ -1680,7 +1768,7 @@ async fn test_progress_zero_total_file() {
         .collect();
     assert!(!progresses.is_empty(), "expected Event::Progress events");
     assert!(
-        progresses.iter().all(|s| s.percent == 0.0),
+        progresses.iter().all(|s| s.push.percent == 0.0),
         "percent must be exactly 0.0 for a zero-byte file (line 134)"
     );
     let final_path = dir.join("out.bin");

@@ -3,21 +3,16 @@
 //! Everything that talks to the engine lives here, so `state` stays pure data
 //! and decision logic that can be tested without a server.
 
+mod paths;
 mod pipeline;
-mod progress;
+mod policy;
 mod runner;
+mod stats;
 
-#[expect(
-    clippy::redundant_pub_crate,
-    reason = "`engine` is a private module; `pub(crate)` keeps these out of the `pub use engine::*` glob"
-)]
-pub(crate) use pipeline::build_pipeline;
-#[expect(
-    clippy::redundant_pub_crate,
-    reason = "`engine` is a private module; `pub(crate)` keeps these out of the `pub use engine::*` glob"
-)]
-pub(crate) use runner::run;
-pub use runner::{IdentityRecovery, Recovery, StartMode, StartPolicy};
+pub use pipeline::build_pipeline;
+pub use policy::{IdentityRecovery, Recovery, StartMode, StartPolicy};
+pub use runner::PreparedRun;
+pub use runner::run;
 
 mod prefetch;
 pub use prefetch::*;

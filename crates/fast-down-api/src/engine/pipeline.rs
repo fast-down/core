@@ -63,17 +63,34 @@ pub async fn build_pipeline(
             if info.size > 0 {
                 let _ = tx.send(Event::Allocating(info.size));
                 if config.pre_alloc {
-                    if let Err(e) = file.allocate(info.size).await {
-                        let _ = tx.send(Event::AllocError(e));
+                    match file.allocate(info.size).await {
+                        Ok(()) => {
+                            let _ = tx.send(Event::Allocated(info.size));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Event::AllocError(e));
+                        }
                     }
-                } else if let Err(e) = file.try_allocate(info.size).await {
-                    let _ = tx.send(Event::AllocError(e));
+                } else {
+                    match file.try_allocate(info.size).await {
+                        Ok(true) => {
+                            let _ = tx.send(Event::Allocated(info.size));
+                        }
+                        Ok(false) => {
+                            // The platform offered no fast-reservation path, so
+                            // nothing was reserved. Reporting success here would
+                            // lie; the download grows the file on demand.
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Event::AllocError(e));
+                        }
+                    }
                 }
             }
-            let pusher = if cfg!(target_pointer_width = "64")
+            let use_mmap = cfg!(target_pointer_width = "64")
                 && info.fast_download
-                && config.write_method == WriteMethod::Mmap
-            {
+                && config.write_method == WriteMethod::Mmap;
+            let pusher = if use_mmap {
                 MmapFilePusher::new(&file, info.size, config.sync_all)
                     .await
                     .map(BoxPusher::new)
@@ -90,6 +107,11 @@ pub async fn build_pipeline(
                 .map(BoxPusher::new)
             }
             .map_err(Event::BuildPusherError)?;
+            let _ = tx.send(Event::WriteMethodChosen(if use_mmap {
+                WriteMethod::Mmap
+            } else {
+                WriteMethod::Std
+            }));
             Ok::<_, Event>((puller, pusher))
         })
         .await;

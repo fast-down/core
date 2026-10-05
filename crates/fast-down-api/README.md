@@ -43,7 +43,7 @@ let config = PartialConfig {
 // 3. Resolve the download. This prefetches the remote metadata and probes the
 //    disk, but writes nothing: the returned `Ready` is a plan you can inspect.
 let url = Url::parse("https://example.com/large-file.bin")?;
-let ready = State::new(url, config).build(tx).await?;
+let ready = State::new(url, config).build(&tx).await?;
 
 // 4. Decide based on what starting would do.
 match &ready.outcome {
@@ -76,7 +76,7 @@ use fast_down_api::{PartialConfig, State, create_channel};
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 let (tx, _rx) = create_channel();
 let state = State::load("./downloads/large-file.bin.fd").await?;
-let ready = state.build(tx).await?;
+let ready = state.build(&tx).await?;
 println!("resuming {:?}", ready.fd_path);
 # Ok(())
 # }

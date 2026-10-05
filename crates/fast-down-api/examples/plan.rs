@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
     )
-    .build(tx.clone())
+    .build(&tx)
     .await?;
 
     // `build` prefetched metadata and computed paths but wrote nothing to disk.
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut reason = TerminationReason::Failed;
         while let Ok(ev) = rx.recv().await {
             match ev {
-                Event::Progress(pr) => println!("{:5.1}%  {} B/s", pr.percent, pr.bps),
+                Event::Progress(pr) => println!("{:5.1}%  {} B/s", pr.push.percent, pr.push.bps),
                 Event::Renamed(path) => println!("renamed -> {}", path.display()),
                 Event::Terminated(r) => {
                     reason = r;
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Start with `Auto`: resume when possible, otherwise download fresh.
-    ready.start(StartMode::Auto, tx, token).await;
+    ready.start(StartMode::Auto, tx, &token).await;
     println!("ended: {:?}", drain.await?);
 
     Ok(())

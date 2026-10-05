@@ -35,15 +35,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    `.part`/`.fd` pair behind.
     let (tx, rx) = create_channel();
     let token = create_cancellation_token();
-    let ready = State::new(url.clone(), config.clone())
-        .build(tx.clone())
-        .await?;
+    let ready = State::new(url.clone(), config.clone()).build(&tx).await?;
     let fd_path = ready
         .fd_path
         .clone()
         .expect("a fresh build decides the .fd path when overwrite is set");
 
-    let run = ready.start(StartMode::Auto, tx, token.clone());
+    let run = ready.start(StartMode::Auto, tx, &token);
     let mut cancelled = false;
     tokio::pin!(run);
     tokio::select! {
@@ -51,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         () = async {
             while let Ok(ev) = rx.recv().await {
                 if let Event::Progress(pr) = ev
-                    && pr.percent > 30.0
+                    && pr.push.percent > 30.0
                 {
                     token.cancel();
                     cancelled = true;
@@ -80,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    rather than corrupting the output.
     let (tx, rx) = create_channel();
     let token = create_cancellation_token();
-    let ready = State::load(&fd_path).await?.build(tx.clone()).await?;
+    let ready = State::load(&fd_path).await?.build(&tx).await?;
     println!("resuming: {:?}", ready.outcome);
 
     let drain = tokio::spawn(async move {
@@ -91,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let got: u64 = progress.iter().map(|r| r.end - r.start).sum();
                     println!("resuming from {got} bytes");
                 }
-                Event::Progress(pr) => println!("{:5.1}%  {} B/s", pr.percent, pr.bps),
+                Event::Progress(pr) => println!("{:5.1}%  {} B/s", pr.push.percent, pr.push.bps),
                 Event::Renamed(path) => println!("renamed -> {}", path.display()),
                 Event::Terminated(r) => {
                     reason = r;
@@ -106,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A short settle so the final `.part`/`.fd` flush from step 1 is complete.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    ready.start(StartMode::Resume, tx, token).await;
+    ready.start(StartMode::Resume, tx, &token).await;
     println!("ended: {:?}", drain.await?);
 
     Ok(())

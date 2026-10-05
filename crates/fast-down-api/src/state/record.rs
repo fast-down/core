@@ -140,7 +140,6 @@ impl Record {
     /// # Errors
     /// Returns [`StateError::Encode`] when the record cannot be serialized, or
     /// [`StateError::Save`] when the file cannot be written.
-    #[allow(clippy::result_large_err)]
     pub async fn store(&self, fd_path: &Path) -> Result<(), StateError> {
         let text = toml::to_string_pretty(self)?;
         safe_replace(fd_path, text.as_bytes())

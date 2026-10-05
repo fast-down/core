@@ -125,7 +125,8 @@ pub struct Config {
     /// (flushing, state saving, event forwarding) or by a slow consumer — the
     /// event channel is unbounded, so [`crate::Event::Progress`] is sent without
     /// blocking. Set it smaller for a smoother progress bar, larger to cut channel
-    /// traffic. `Duration::ZERO` emits at the maximum rate (busy-loop, not recommended).
+    /// traffic. `Duration::ZERO` disables periodic `Progress` events entirely;
+    /// the single terminal snapshot emitted when the run ends is still sent.
     #[config(default = Duration::from_millis(500))]
     #[config(partial_attr(serde(with = "humantime_serde::option")))]
     #[config(partial_attr(serde(default)))]

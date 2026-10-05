@@ -61,16 +61,18 @@ impl Ready {
     /// is awaited through the `Send`-typed `DownloadResult::recv` method. Both
     /// work around rustc's `async fn` auto-trait leak check, not a real
     /// `!Send`.
-    pub async fn start(self, policy: impl Into<StartPolicy>, tx: Tx, token: CancellationToken) {
+    pub async fn start(self, policy: impl Into<StartPolicy>, tx: Tx, token: &CancellationToken) {
         crate::engine::run(
-            self.record,
-            self.origin_config,
-            self.fd_path,
-            self.final_path,
-            self.info,
-            self.resp,
-            self.outcome,
-            policy.into(),
+            crate::engine::PreparedRun {
+                record: self.record,
+                origin_config: self.origin_config,
+                fd_path: self.fd_path,
+                final_path: self.final_path,
+                info: self.info,
+                resp: self.resp,
+                outcome: self.outcome,
+            },
+            policy,
             tx,
             token,
         )

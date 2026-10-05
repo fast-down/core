@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
     )
-    .build(tx.clone())
+    .build(&tx)
     .await?;
 
     println!("final path: {}", ready.final_path.display());
@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut reason = TerminationReason::Failed;
         while let Ok(ev) = rx.recv().await {
             match ev {
-                Event::Progress(p) => println!("{:5.1}%  {} B/s", p.percent, p.bps),
+                Event::Progress(p) => println!("{:5.1}%  {} B/s", p.push.percent, p.push.bps),
                 Event::Renamed(path) => println!("renamed -> {}", path.display()),
                 Event::Terminated(r) => {
                     reason = r;
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Run it. `Auto` continues from a previous run when possible, otherwise
     //    downloads the whole file.
-    ready.start(StartMode::Auto, tx, token).await;
+    ready.start(StartMode::Auto, tx, &token).await;
     println!("ended: {:?}", drain.await?);
 
     Ok(())

@@ -210,7 +210,7 @@ async fn start_server_throttled(
 async fn probe(url: &str, dir: &Path) -> (PathBuf, fast_down::UrlInfo) {
     let (tx, _rx) = create_channel();
     let ready = State::new(Url::parse(url).unwrap(), make_config(dir))
-        .build(tx)
+        .build(&tx)
         .await
         .expect("probe build");
     (ready.final_path, ready.info)
@@ -261,20 +261,74 @@ async fn fresh_download_completes_and_renames() {
     let (tx, rx) = create_channel();
     let token = create_cancellation_token();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
-        .build(tx.clone())
+        .build(&tx)
         .await
         .expect("build");
     assert!(matches!(&ready.outcome, ResumeOutcome::Fresh));
     let final_path = ready.final_path.clone();
 
     let drain = tokio::spawn(run_to_end(rx));
-    ready.start(StartMode::Auto, tx, token).await;
+    ready.start(StartMode::Auto, tx, &token).await;
     assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
 
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
     assert!(
         !final_path.with_added_extension("fd").exists(),
         "the .fd is removed once the file lands"
+    );
+}
+
+/// The pipeline reports the actually-chosen writer and, with `pre_alloc` on, the
+/// completion of the disk reservation. Guards the two events added on top of
+/// `Allocating`.
+#[tokio::test(flavor = "multi_thread")]
+async fn reports_write_method_and_allocation() {
+    let payload: Vec<u8> = vec![0x5A; FILE_SIZE];
+    let (_server, url) = start_server(payload.clone(), "v1", true).await;
+    let dir = temp_dir("write_method");
+
+    let mut cfg = make_config(&dir);
+    cfg.pre_alloc = Some(true);
+
+    let (tx, rx) = create_channel();
+    let token = create_cancellation_token();
+    let ready = State::new(Url::parse(&url).unwrap(), cfg)
+        .build(&tx)
+        .await
+        .expect("build");
+
+    // Collect events while the run proceeds.
+    let collect = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        while let Ok(ev) = rx.recv().await {
+            let done = matches!(ev, Event::Terminated(_));
+            seen.push(ev);
+            if done {
+                break;
+            }
+        }
+        seen
+    });
+    ready.start(StartMode::Auto, tx, &token).await;
+    let events = collect.await.unwrap();
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::WriteMethodChosen(WriteMethod::Mmap))),
+        "a resumable 64-bit Mmap download must report the Mmap writer"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Allocating(n) if *n == FILE_SIZE as u64)),
+        "pre_alloc must announce the reservation"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Allocated(n) if *n == FILE_SIZE as u64)),
+        "a successful reservation must report completion"
     );
 }
 
@@ -289,7 +343,7 @@ async fn resumes_from_seeded_state() {
     let (tx, rx) = create_channel();
     let token = create_cancellation_token();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
-        .build(tx.clone())
+        .build(&tx)
         .await
         .expect("build");
     assert!(
@@ -298,7 +352,7 @@ async fn resumes_from_seeded_state() {
     );
 
     let drain = tokio::spawn(run_to_end(rx));
-    ready.start(StartMode::Auto, tx, token).await;
+    ready.start(StartMode::Auto, tx, &token).await;
     assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 }
@@ -315,7 +369,7 @@ async fn changed_remote_is_mismatch_and_resume_mode_refuses() {
     let (tx, rx) = create_channel();
     let token = create_cancellation_token();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
-        .build(tx.clone())
+        .build(&tx)
         .await
         .expect("build");
     assert!(
@@ -324,7 +378,7 @@ async fn changed_remote_is_mismatch_and_resume_mode_refuses() {
     );
 
     let drain = tokio::spawn(run_to_end(rx));
-    ready.start(StartMode::Resume, tx, token).await;
+    ready.start(StartMode::Resume, tx, &token).await;
     assert_eq!(drain.await.unwrap(), TerminationReason::Failed);
     assert!(!final_path.exists(), "a refused resume must not rename");
 }
@@ -342,7 +396,7 @@ async fn truncated_part_is_mismatch() {
 
     let (tx, _rx) = create_channel();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
-        .build(tx)
+        .build(&tx)
         .await
         .expect("build");
     assert!(
@@ -362,13 +416,13 @@ async fn fresh_mode_redownloads_and_completes() {
     let (tx, rx) = create_channel();
     let token = create_cancellation_token();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
-        .build(tx.clone())
+        .build(&tx)
         .await
         .expect("build");
     assert!(matches!(&ready.outcome, ResumeOutcome::Resumable));
 
     let drain = tokio::spawn(run_to_end(rx));
-    ready.start(StartMode::Fresh, tx, token).await;
+    ready.start(StartMode::Fresh, tx, &token).await;
     assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 }
@@ -389,7 +443,7 @@ async fn cancellation_keeps_state_and_resume_completes() {
     let token = create_cancellation_token();
     let cancel = token.clone();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
-        .build(tx.clone())
+        .build(&tx)
         .await
         .expect("build");
     assert!(matches!(&ready.outcome, ResumeOutcome::Fresh));
@@ -398,7 +452,7 @@ async fn cancellation_keeps_state_and_resume_completes() {
         tokio::time::sleep(Duration::from_millis(200)).await;
         cancel.cancel();
     });
-    ready.start(StartMode::Auto, tx, token).await;
+    ready.start(StartMode::Auto, tx, &token).await;
     watcher.await.unwrap();
     let reason = drain.await.unwrap();
     assert_eq!(
@@ -413,12 +467,12 @@ async fn cancellation_keeps_state_and_resume_completes() {
     let (tx, rx) = create_channel();
     let token = create_cancellation_token();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
-        .build(tx.clone())
+        .build(&tx)
         .await
         .expect("build");
     assert!(matches!(&ready.outcome, ResumeOutcome::Resumable));
     let drain = tokio::spawn(run_to_end(rx));
-    ready.start(StartMode::Auto, tx, token).await;
+    ready.start(StartMode::Auto, tx, &token).await;
     assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 }
@@ -445,7 +499,7 @@ fn start_future_is_send() {
         token: tokio_util::sync::CancellationToken,
     ) {
         assert_send_future(async move {
-            ready.start(mode, tx, token).await;
+            ready.start(mode, tx, &token).await;
         });
     }
     let _ = check;
@@ -487,12 +541,7 @@ async fn start_policy_per_dimension_override() {
 
     let (tx, rx) = create_channel();
     let token = create_cancellation_token();
-    let ready = State::load(&fd)
-        .await
-        .unwrap()
-        .build(tx.clone())
-        .await
-        .unwrap();
+    let ready = State::load(&fd).await.unwrap().build(&tx).await.unwrap();
     assert!(
         matches!(&ready.outcome, ResumeOutcome::Mismatch(_)),
         "precondition: the shrunk .part must be a mismatch"
@@ -504,7 +553,7 @@ async fn start_policy_per_dimension_override() {
         ..StartPolicy::auto()
     };
     let drain = tokio::spawn(run_to_end(rx));
-    ready.start(policy, tx, token).await;
+    ready.start(policy, tx, &token).await;
     assert_eq!(
         drain.await.unwrap(),
         TerminationReason::Failed,
