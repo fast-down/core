@@ -9,6 +9,7 @@
 /// Each variant maps onto a [`StartPolicy`] (see [`From<StartMode>`]); use
 /// [`StartPolicy`] directly when you need per-dimension control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StartMode {
     /// Resume when possible, otherwise download the whole file.
     Auto,
@@ -34,6 +35,7 @@ impl From<StartMode> for StartPolicy {
 
 /// What to do when recorded state exists but cannot be resumed cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Recovery {
     /// Ignore the recorded state and download the whole file.
     #[default]
@@ -45,6 +47,7 @@ pub enum Recovery {
 /// What to do when the remote's identity headers changed but its **size** still
 /// matches, so the recorded byte ranges still describe the same bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum IdentityRecovery {
     /// Ignore the recorded state and download the whole file.
     #[default]

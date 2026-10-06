@@ -8,6 +8,7 @@ use std::{collections::HashMap, net::IpAddr, path::PathBuf, time::Duration};
 /// - `Mmap`: memory-mapped I/O (fastest, default)
 /// - `Std`: buffered standard file I/O
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum WriteMethod {
     #[default]
     Mmap,

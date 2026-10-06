@@ -17,6 +17,7 @@ use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 /// last event on the channel. A consumer that only needs the outcome can wait
 /// for it instead of draining until the channel disconnects.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Event {
     /// Emitted after the prefetch step resolves the remote file's metadata.
     ///
@@ -163,6 +164,7 @@ pub enum Event {
 
 /// How a download run ended, carried by [`Event::Terminated`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TerminationReason {
     /// Every byte was written and the `.part` file was renamed into place.
     /// [`Event::Renamed`] carries the path it landed on.
@@ -244,6 +246,7 @@ pub struct WorkerStats {
 /// What a worker is currently doing, derived from the engine's lifecycle
 /// events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WorkerState {
     /// Fetching its assigned range from the network.
     Pulling,
