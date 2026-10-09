@@ -52,7 +52,7 @@ fn handle_construction_allocates_once_and_clone_allocates_none() {
     let token = tokio_util::sync::CancellationToken::new();
 
     let before = ALLOCATIONS.load(Ordering::Relaxed);
-    let handle: Handle = DownloadResult::new(rx, None, token);
+    let handle: Handle = DownloadResult::new(rx, None, token, None);
     let after = ALLOCATIONS.load(Ordering::Relaxed);
     assert_eq!(
         after - before,

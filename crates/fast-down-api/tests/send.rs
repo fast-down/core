@@ -45,7 +45,7 @@ fn downstream_construct_and_spawn_is_send() {
         let _ = tokio::spawn(async move {
             let result = download_multi(puller, pusher, options(1024));
             tokio::time::sleep(Duration::from_millis(1)).await;
-            result.set_threads(2, 1);
+            result.set_threads(2);
             result.abort();
             while result.recv().await.is_ok() {}
         });

@@ -163,8 +163,8 @@ two versions together.
 | [`StartMode`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StartMode.html) | A preset for how to start: `Auto`, `Resume`, `Fresh`, `Forced`. Accepted by `Ready::start`. |
 | [`StartPolicy`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.StartPolicy.html) | Per-dimension start policy (what to do for each reason a resume might fail). Also accepted by `Ready::start`. |
 | [`ResumeOutcome`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.ResumeOutcome.html) | `Fresh` (nothing to continue), `Resumable`, or `Mismatch(StateError)`. |
-| [`Ctx`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Ctx.html) | The run's cancellation token + live worker-pool control, passed to `Ready::start`. `cancel` / `set_threads`. |
-| [`RunHandle`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.RunHandle.html) | Returned by `Ready::start`: delegates `set_threads` / `abort` to its `Ctx`, and `await`s to the `TerminationReason`. |
+| [`Ctx`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Ctx.html) | The run's cancellation token + live worker-pool control, passed to `Ready::start`: `cancel`, `set_threads`, `set_min_chunk_size`. |
+| [`RunHandle`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.RunHandle.html) | Returned by `Ready::start`: delegates `set_threads` / `set_min_chunk_size` / `abort` to its `Ctx`, and `await`s to the `TerminationReason`. |
 | [`Record`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Record.html) | The `.fd` state file: URL, remote identity, elapsed time, and the merged config (which carries `downloaded_chunk`). |
 | [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html) | Create the `(Tx, Rx)` event channel. |
 | [`create_cancellation_token`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_cancellation_token.html) | Create a `CancellationToken` for cooperative cancellation. |

@@ -6,9 +6,7 @@
 
 #![allow(clippy::pedantic)]
 
-use fast_down_api::{
-    Ctx, Event, PartialConfig, ResumeOutcome, StartMode, State, create_channel,
-};
+use fast_down_api::{Ctx, Event, PartialConfig, ResumeOutcome, StartMode, State, create_channel};
 use url::Url;
 
 const URL: &str = "http://speedtest.tele2.net/10MB.zip";

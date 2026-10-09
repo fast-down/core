@@ -147,7 +147,7 @@ pub fn download_single<R: Puller, W: Pusher>(
             }
         }
     });
-    DownloadResult::new(event_chain, None, token)
+    DownloadResult::new(event_chain, None, token, None)
 }
 
 #[cfg(test)]

@@ -14,9 +14,9 @@ use tokio_util::sync::CancellationToken;
 
 /// Construct the (puller, pusher) pipeline for `path`.
 ///
-/// Returns `None` (after forwarding the failure as a public [`Event`]) if the
-/// HTTP client or the output file cannot be created, or if `token` is cancelled
-/// before construction finishes.
+/// Returns `None` if `token` is cancelled before construction finishes, and
+/// `Some(Err(event))` (with the failure as a public [`Event`], for the caller to
+/// report) if the HTTP client or the output file cannot be created.
 ///
 /// * `config` drives the puller (headers, proxy, cert handling, local bind
 ///   address, redirect limit) and the writer choice.
@@ -37,9 +37,9 @@ pub async fn build_pipeline(
     path: &Path,
     tx: &Tx,
     token: &CancellationToken,
-) -> Option<(FastDownPuller, BoxPusher)> {
+) -> Option<Result<(FastDownPuller, BoxPusher), Event>> {
     let resp = Some(Arc::new(Mutex::new(Some(resp))));
-    let built = token
+    token
         .run_until_cancelled(async move {
             let puller = FastDownPuller::new(FastDownPullerOptions {
                 url: info.final_url.clone(),
@@ -114,13 +114,5 @@ pub async fn build_pipeline(
             }));
             Ok::<_, Event>((puller, pusher))
         })
-        .await;
-    match built {
-        Some(Ok(built)) => Some(built),
-        Some(Err(event)) => {
-            let _ = tx.send(event);
-            None
-        }
-        None => None,
-    }
+        .await
 }

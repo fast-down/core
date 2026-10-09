@@ -94,8 +94,15 @@ fn decide(policy: StartPolicy, outcome: &ResumeOutcome) -> Fate {
 /// worker pool while the download is in flight.
 ///
 /// The engine session does not exist until the pipeline is built, so a
-/// [`set_threads`](Self::set_threads) made before then is remembered and applied
-/// as soon as it does. [`RunHandle`] wraps a `Ctx`, so the two share one state.
+/// [`set_threads`](Self::set_threads) or [`set_min_chunk_size`](Self::set_min_chunk_size)
+/// made before then is remembered and applied as soon as it does. [`RunHandle`]
+/// wraps a `Ctx`, so the two share one state.
+///
+/// The worker count and the minimum chunk size are deliberately separate:
+/// [`set_threads`](Self::set_threads) only changes the pool size, and
+/// [`set_min_chunk_size`](Self::set_min_chunk_size) only changes the chunk
+/// granularity. The granularity bounds how finely a range may be split to hand a
+/// worker its share, and takes effect on the next steal.
 #[derive(Debug, Clone)]
 pub struct Ctx {
     token: CancellationToken,
@@ -105,8 +112,11 @@ pub struct Ctx {
 #[derive(Debug, Default)]
 struct Slot {
     session: Option<Session>,
-    /// Latest requested `(threads, min_chunk_size)` before the session existed.
-    pending: Option<(usize, u64)>,
+    /// An explicit minimum chunk size requested before the session existed;
+    /// `None` means the run's configured value is used.
+    pending_min: Option<u64>,
+    /// A pool size requested before the session existed.
+    pending_threads: Option<usize>,
 }
 
 impl Ctx {
@@ -136,27 +146,50 @@ impl Ctx {
         self.token.cancel();
     }
 
-    /// Adjust the worker count and minimum chunk size of the running download.
+    /// Resize the worker pool, keeping the current minimum chunk size (the run's
+    /// configured value unless [`set_min_chunk_size`](Self::set_min_chunk_size)
+    /// changed it).
     ///
     /// A no-op for single-threaded runs (unresumable or non-ranged downloads),
     /// which have no worker pool. A request made before the pipeline is built is
     /// remembered and applied as soon as it is.
-    pub fn set_threads(&self, threads: usize, min_chunk_size: u64) {
+    pub fn set_threads(&self, threads: usize) {
         let mut slot = self.slot.lock();
-        match &slot.session {
-            Some(session) => {
-                session.set_threads(threads, min_chunk_size);
-                slot.pending = None;
-            }
-            None => slot.pending = Some((threads, min_chunk_size)),
+        if let Some(session) = &slot.session {
+            session.set_threads(threads);
+        } else {
+            slot.pending_threads = Some(threads);
         }
     }
 
-    /// Publish the freshly-built session, flushing any queued `set_threads`.
+    /// Set the minimum chunk size (in bytes) used when a worker next steals.
+    ///
+    /// Bounds how finely a range may be split to hand a worker its share: a range
+    /// is only halved when at least `min_chunk_size * 2` bytes remain. Applied to
+    /// the live pool immediately; a request made before the pipeline is built is
+    /// remembered and applied as soon as it is.
+    pub fn set_min_chunk_size(&self, bytes: u64) {
+        let bytes = bytes.max(1);
+        let mut slot = self.slot.lock();
+        if let Some(session) = &slot.session {
+            session.set_min_chunk_size(bytes);
+        } else {
+            slot.pending_min = Some(bytes);
+        }
+    }
+
+    /// Publish the freshly-built session: apply any granularity and pool size
+    /// requested before the session existed.
+    ///
+    /// A pending minimum is applied to the live pool; without one the session
+    /// already carries the run's configured granularity, so nothing is needed.
     fn attach(&self, session: &Session) {
         let mut slot = self.slot.lock();
-        if let Some((threads, min_chunk_size)) = slot.pending.take() {
-            session.set_threads(threads, min_chunk_size);
+        if let Some(min) = slot.pending_min.take() {
+            session.set_min_chunk_size(min);
+        }
+        if let Some(threads) = slot.pending_threads.take() {
+            session.set_threads(threads);
         }
         slot.session = Some(session.clone());
     }
@@ -188,11 +221,15 @@ impl RunHandle {
         &self.ctx
     }
 
-    /// Adjust the worker count and minimum chunk size of the running download.
-    ///
-    /// Delegates to [`Ctx::set_threads`].
-    pub fn set_threads(&self, threads: usize, min_chunk_size: u64) {
-        self.ctx.set_threads(threads, min_chunk_size);
+    /// Resize the worker pool. Delegates to [`Ctx::set_threads`].
+    pub fn set_threads(&self, threads: usize) {
+        self.ctx.set_threads(threads);
+    }
+
+    /// Set the minimum chunk size used when a worker next steals. Delegates to
+    /// [`Ctx::set_min_chunk_size`].
+    pub fn set_min_chunk_size(&self, bytes: u64) {
+        self.ctx.set_min_chunk_size(bytes);
     }
 
     /// Cancel the run. Delegates to [`Ctx::cancel`].
@@ -314,9 +351,15 @@ async fn drive(
 
     // 3. Build the run config and the pull/push pipeline.
     let config = record.config.clone().build();
-    let Some((puller, pusher)) = build_pipeline(&config, &info, resp, &tmp_path, tx, token).await
-    else {
-        return TerminationReason::Failed;
+    let (puller, pusher) = match build_pipeline(&config, &info, resp, &tmp_path, tx, token).await {
+        // `None` means the run was cancelled mid-build; a cancel must report
+        // as such, not as a build failure.
+        None => return TerminationReason::Cancelled,
+        Some(Err(event)) => {
+            let _ = tx.send(event);
+            return TerminationReason::Failed;
+        }
+        Some(Ok(built)) => built,
     };
     let _ = tx.send(Event::Start {
         tmp_path: tmp_path.clone(),

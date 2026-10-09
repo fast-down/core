@@ -13,6 +13,7 @@ use fast_steal::{Executor, TaskQueue};
 use force_send::ForceSend;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
 
 mod force_send;
@@ -43,6 +44,10 @@ where
     /// download is running. It reaches the session's channels through a weak
     /// reference, so retaining it here never keeps a finished session open.
     task_queue: Option<(E, TaskQueue<E::Handle>)>,
+    /// Live lower bound on how finely a worker may split a range when it steals,
+    /// shared with the session's executor. `None` for a single-threaded session,
+    /// which has no work-stealing and so no granularity to change.
+    min_chunk_size: Option<Arc<AtomicU64>>,
     /// Session-wide cancellation token, shared (as a clone) with every worker
     /// and with the `spawn_blocking` push driver. [`abort`](Self::abort) cancels
     /// this root token, which broadcasts to all linked child tokens — including
@@ -82,9 +87,22 @@ where
         self.abort_token.cancel();
     }
 
-    pub fn set_threads(&self, threads: usize, min_chunk_size: u64) -> Option<()> {
+    pub fn set_threads(&self, threads: usize) -> Option<()> {
         let (executor, task_queue) = self.task_queue.as_ref()?;
-        task_queue.set_threads(threads, min_chunk_size, Some(executor))
+        let min = self
+            .min_chunk_size
+            .as_ref()
+            .map_or(1, |live| live.load(Ordering::Relaxed));
+        task_queue.set_threads(threads, min, Some(executor))
+    }
+
+    /// Set the live minimum chunk size used when a worker next steals work.
+    ///
+    /// A no-op for single-threaded sessions, which have no worker pool.
+    pub fn set_min_chunk_size(&self, min_chunk_size: u64) {
+        if let Some(live) = &self.min_chunk_size {
+            live.store(min_chunk_size.max(1), Ordering::Relaxed);
+        }
     }
 
     #[must_use]
@@ -111,7 +129,7 @@ where
 /// dropped. An explicit [`abort`](Self::abort) cancels immediately.
 ///
 /// `DownloadResult` wraps `Arc<DownloadResultInner>` and exposes the session
-/// methods (`abort`, `set_threads`, `is_aborted`) and
+/// methods (`abort`, `set_threads`, `set_min_chunk_size`, `is_aborted`) and
 /// [`event_chain`](Self::event_chain) directly; each delegates to the inner
 /// value. There is intentionally **no** `Deref` impl — `DownloadResultInner`
 /// is private, so callers reach session state only through these methods.
@@ -172,15 +190,20 @@ where
     /// [`download_single`](crate::single::download_single) and
     /// [`download_multi`](crate::multi::download_multi); prefer those entry
     /// points instead of calling this directly.
+    ///
+    /// `min_chunk_size` is the session's live steal-granularity cell, or `None`
+    /// for a single-threaded session (see [`set_min_chunk_size`](Self::set_min_chunk_size)).
     pub fn new(
         event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
         task_queue: Option<(E, TaskQueue<E::Handle>)>,
         abort_token: CancellationToken,
+        min_chunk_size: Option<Arc<AtomicU64>>,
     ) -> Self {
         Self {
             inner: ForceSend(Arc::new(DownloadResultInner {
                 event_chain,
                 task_queue,
+                min_chunk_size,
                 abort_token,
             })),
         }
@@ -221,8 +244,11 @@ where
         self.inner.abort();
     }
 
-    /// Adjust the worker thread count and minimum chunk size of a running
-    /// multi-threaded session.
+    /// Adjust the worker thread count of a running multi-threaded session.
+    ///
+    /// The minimum chunk size used while growing is the session's live value,
+    /// set independently with [`set_min_chunk_size`](Self::set_min_chunk_size)
+    /// (or the configured value until then).
     ///
     /// Growing spawns workers for ranges still waiting in the queue, or splits a
     /// range off the busiest running worker when nothing is waiting. Shrinking
@@ -241,8 +267,21 @@ where
     /// cannot be undone by resizing, so [`is_aborted`](Self::is_aborted) stays
     /// `true` across any later `set_threads` call, and any worker spawned by such
     /// a call observes the cancelled token and exits without pulling.
-    pub fn set_threads(&self, threads: usize, min_chunk_size: u64) {
-        self.inner.set_threads(threads, min_chunk_size);
+    pub fn set_threads(&self, threads: usize) {
+        self.inner.set_threads(threads);
+    }
+
+    /// Set the minimum chunk size used when a worker next steals work.
+    ///
+    /// Bounds how finely a running worker may split a range to take a share of a
+    /// peer's work: a range is only halved when at least `min_chunk_size * 2`
+    /// bytes remain. The new value takes effect on the next steal — there is no
+    /// need to also call [`set_threads`](Self::set_threads) — and it is also the
+    /// granularity used to split ranges the next time the pool grows.
+    ///
+    /// A no-op for single-threaded sessions, which have no worker pool.
+    pub fn set_min_chunk_size(&self, min_chunk_size: u64) {
+        self.inner.set_min_chunk_size(min_chunk_size);
     }
 
     /// Whether the session has been (or is being) cancelled.
@@ -377,7 +416,7 @@ mod tests {
         // own `Debug` impl, which forwards to the inner value.
         let _ = format!("{result:?}");
         // Lines 234-236 (forwarding) and 111-123 (inner task-queue adjustment).
-        result.set_threads(4, 1);
+        result.set_threads(4);
         // Await completion by draining `event_chain` (it disconnects once the
         // push driver drops its sender) — this replaces `join()`.
         while result.event_chain().recv().await.is_ok() {}
@@ -403,7 +442,7 @@ mod tests {
         );
         // Lines 167-171: `DownloadResult` is `Clone`.
         let _clone = result.clone();
-        result.set_threads(4, 1);
+        result.set_threads(4);
         while result.event_chain().recv().await.is_ok() {}
         assert_eq!(&**receive.lock(), mock_data);
     }
@@ -433,12 +472,12 @@ mod tests {
         );
         // Live session: flag starts false and must stay false after a resize.
         assert!(!result.is_aborted());
-        result.set_threads(4, 1);
+        result.set_threads(4);
         assert!(!result.is_aborted());
         // Now abort: flag is true and must *stay* true across a later resize.
         result.abort();
         assert!(result.is_aborted());
-        result.set_threads(4, 1);
+        result.set_threads(4);
         assert!(result.is_aborted());
         while result.event_chain().recv().await.is_ok() {}
     }
@@ -474,7 +513,7 @@ mod tests {
         let grower = result.clone();
         tokio::spawn(async move {
             sleep(Duration::from_millis(50)).await;
-            grower.set_threads(8, 1);
+            grower.set_threads(8);
         });
 
         let mut pulling_ids = BTreeSet::new();
@@ -518,7 +557,7 @@ mod tests {
         );
 
         result.abort();
-        result.set_threads(8, 1);
+        result.set_threads(8);
         // Await termination by draining `event_chain` (replaces `join()`); the
         // timeout guards against a hang.
         timeout(Duration::from_secs(10), async {
@@ -581,11 +620,11 @@ mod tests {
                 if probe.lock().len() < total {
                     inflight += 1;
                 }
-                churner.set_threads(threads, 1);
+                churner.set_threads(threads);
                 sleep(Duration::from_millis(3)).await;
             }
             // Leave a healthy pool behind so the remaining ranges drain.
-            churner.set_threads(8, 1);
+            churner.set_threads(8);
             (seen, inflight)
         });
 
@@ -617,6 +656,101 @@ mod tests {
             &**receive.lock(),
             mock_data,
             "repeated resizing corrupted the downloaded bytes"
+        );
+    }
+
+    /// A high-frequency churn of *both* live setters at once (pool size and
+    /// granularity) must leave the download intact. Unlike the threads-only
+    /// churn, this stresses the granularity cell being written concurrently with
+    /// every worker's steal. The schedule is seeded and the granularity is
+    /// varied across the `split_two` boundary (`>= 2 * piece`) and beyond, and
+    /// reset small at the end so the remaining ranges can drain.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_threads_and_min_chunk_size_churn_preserves_all_bytes() {
+        let mock_data = build_mock_data(64 * 1024);
+        let download_chunks = eight_chunks(mock_data.len() as u64);
+        let puller = ChunkedPuller {
+            data: Arc::from(mock_data.as_slice()),
+            piece: 512,
+            delay: Duration::from_millis(2),
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 4,
+                retry_gap: Duration::from_millis(10),
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 3,
+            },
+        );
+
+        let churner = result.clone();
+        let probe = receive.clone();
+        let total = mock_data.len();
+        let churn = tokio::spawn(async move {
+            let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+            let mut threads_seen = BTreeSet::new();
+            let mut mins_seen = BTreeSet::new();
+            let mut inflight = 0usize;
+            for _ in 0..40 {
+                let threads = (next_rand(&mut state) % 8 + 1) as usize;
+                // Straddle the split boundary (`2 * piece == 1024`) and go well
+                // past it, so both "can split" and "cannot split" are exercised.
+                let min = match next_rand(&mut state) % 4 {
+                    0 => 1,
+                    1 => 512,
+                    2 => 1024,
+                    _ => 4096,
+                };
+                threads_seen.insert(threads);
+                mins_seen.insert(min);
+                if probe.lock().len() < total {
+                    inflight += 1;
+                }
+                churner.set_threads(threads);
+                churner.set_min_chunk_size(min);
+                sleep(Duration::from_millis(3)).await;
+            }
+            // Leave a healthy pool and a permissive granularity behind so the
+            // remaining ranges can still be split and drained.
+            churner.set_threads(8);
+            churner.set_min_chunk_size(1);
+            (threads_seen, mins_seen, inflight)
+        });
+
+        let mut pulling_total = 0usize;
+        while let Ok(e) = result.event_chain().recv().await {
+            if matches!(e, Event::Pulling(_)) {
+                pulling_total += 1;
+            }
+        }
+        let (threads_seen, mins_seen, inflight) = churn.await.unwrap();
+        assert!(
+            threads_seen.len() > 2,
+            "churn never varied the pool size: {threads_seen:?}"
+        );
+        assert!(
+            mins_seen.len() > 2,
+            "churn never varied the granularity: {mins_seen:?}"
+        );
+        assert!(
+            inflight > 0,
+            "every churn step landed after the download finished"
+        );
+        assert!(
+            pulling_total >= download_chunks.len(),
+            "ranges were never redistributed ({pulling_total} pulls)"
+        );
+        assert_eq!(
+            &**receive.lock(),
+            mock_data,
+            "churning threads and granularity together corrupted the bytes"
         );
     }
 }

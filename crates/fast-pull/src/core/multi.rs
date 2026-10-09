@@ -3,7 +3,7 @@
 use crate::{DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, WorkerId};
 use bytes::Bytes;
 use core::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     time::Duration,
 };
 use crossfire::{MAsyncTx, MTx, WeakTx, mpmc, mpsc};
@@ -97,6 +97,7 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         }
     });
 
+    let min_chunk_size = Arc::new(AtomicU64::new(options.min_chunk_size.max(1)));
     let executor: TokioExecutor<R, W::Error> = TokioExecutor {
         token: token.clone(),
         tx: tx.downgrade(),
@@ -105,13 +106,18 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         id: AtomicUsize::new(0),
         retry_gap: options.retry_gap,
         pull_timeout: options.pull_timeout,
-        min_chunk_size: options.min_chunk_size,
+        min_chunk_size: min_chunk_size.clone(),
         max_speculative: options.max_speculative,
     };
     let task_queue = TaskQueue::new(options.download_chunks);
     let _ = task_queue.set_threads(options.concurrent, options.min_chunk_size, Some(&executor));
 
-    DownloadResult::new(event_chain, Some((executor, task_queue)), token)
+    DownloadResult::new(
+        event_chain,
+        Some((executor, task_queue)),
+        token,
+        Some(min_chunk_size),
+    )
 }
 
 /// A [`Handle`] implementation whose cancellation is a worker-local
@@ -156,7 +162,11 @@ where
     retry_gap: Duration,
     pull_timeout: Duration,
     id: AtomicUsize,
-    min_chunk_size: u64,
+    /// Live lower bound on how finely a worker may split a range when it steals.
+    /// Shared with the owning [`DownloadResult`], so
+    /// [`set_min_chunk_size`](crate::DownloadResult::set_min_chunk_size) takes
+    /// effect on the very next steal instead of only on the next pool growth.
+    min_chunk_size: Arc<AtomicU64>,
     max_speculative: usize,
 }
 impl<R, WE> Executor for TokioExecutor<R, WE>
@@ -177,7 +187,7 @@ where
         };
 
         let mut puller = self.puller.clone();
-        let min_chunk_size = self.min_chunk_size;
+        let min_chunk_size = self.min_chunk_size.clone();
         let pull_timeout = self.pull_timeout;
         let cfg_retry_gap = self.retry_gap;
         let max_speculative = self.max_speculative;
@@ -189,7 +199,8 @@ where
                 }
                 let mut start = task.start();
                 if start >= task.end() {
-                    if task_queue.steal(&id, &mut task, min_chunk_size, max_speculative) {
+                    let current_min = min_chunk_size.load(Ordering::Relaxed);
+                    if task_queue.steal(&id, &mut task, current_min, max_speculative) {
                         continue 'task;
                     }
                     break 'task;
@@ -281,6 +292,7 @@ mod tests {
     };
     use futures::{StreamExt, stream};
     use std::{dbg, vec};
+    use tokio::sync::watch;
     use tokio::time::{sleep, timeout};
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1022,5 +1034,163 @@ mod tests {
             .await
             .expect("event loop hung on empty chunks");
         assert_eq!(receive.lock().len(), 0);
+    }
+
+    /// A [`Puller`] that holds every `pull` until the test opens the gate, then
+    /// parks the one originally-second chunk (`64..128`) until released. With a
+    /// two-chunk pool this keeps that chunk's worker in flight while the first
+    /// chunk's worker finishes and steals, and any extra worker a buggy steal
+    /// spawns for a *sub-range* runs to completion instead of dead-locking.
+    #[derive(Clone)]
+    struct GatedPuller {
+        data: Arc<[u8]>,
+        /// Closed until the test has set the live granularity.
+        gate: watch::Receiver<bool>,
+        /// Closed until the first worker's steal outcome is fixed.
+        hold: watch::Receiver<bool>,
+    }
+
+    impl crate::Puller for GatedPuller {
+        type Error = std::convert::Infallible;
+        fn pull(
+            &mut self,
+            range: Option<&crate::ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            let bytes: Vec<u8> = match range {
+                Some(r) => self.data[r.start as usize..r.end as usize].to_vec(),
+                None => self.data.to_vec(),
+            };
+            // Only the originally-second chunk is held; a stolen sub-range of it
+            // proceeds, so a buggy split is observable rather than dead-locking.
+            let slow = range.is_some_and(|r| *r == (64..128u64));
+            let mut gate = self.gate.clone();
+            let mut hold = self.hold.clone();
+            async move {
+                loop {
+                    if *gate.borrow_and_update() {
+                        break;
+                    }
+                    if gate.changed().await.is_err() {
+                        break;
+                    }
+                }
+                if slow {
+                    loop {
+                        if *hold.borrow_and_update() {
+                            break;
+                        }
+                        if hold.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                let items: Vec<crate::PullResult<Bytes, std::convert::Infallible>> =
+                    vec![Ok(Bytes::from(bytes))];
+                Ok(stream::iter(items))
+            }
+        }
+    }
+
+    /// Drive the two-chunk steal probe with the live granularity set to `v`
+    /// *before* the workers are released, and return the pull spans observed,
+    /// sorted by start. Asserts the reassembled bytes are intact.
+    ///
+    /// Worker 0 owns `0..64` and finishes first; worker 1 owns `64..128` and is
+    /// held until worker 0 exits, so the only question is whether worker 0's
+    /// steal halves worker 1's 64-byte remainder (needs `remain >= 2 * v`).
+    /// `v = 0` is clamped to `1`.
+    async fn steal_granularity_probe(v: u64) -> Vec<ProgressEntry> {
+        let mock_data = build_mock_data(128);
+        let data: Arc<[u8]> = Arc::from(mock_data.as_slice());
+        let (gate_tx, gate_rx) = watch::channel(false);
+        let (hold_tx, hold_rx) = watch::channel(false);
+        let puller = GatedPuller {
+            data,
+            gate: gate_rx,
+            hold: hold_rx,
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..64u64, 64..128u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 2,
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(10),
+                min_chunk_size: 1,
+                max_speculative: 1,
+            },
+        );
+
+        // Both workers are parked on the gate; the live granularity must be set
+        // before they run, so the steal sees `v` rather than the build value.
+        result.set_min_chunk_size(v);
+        gate_tx.send(true).expect("open gate");
+
+        let mut ranges: Vec<ProgressEntry> = Vec::new();
+        let mut released = false;
+        let drained = timeout(Duration::from_secs(10), async {
+            while let Ok(event) = result.event_chain().recv().await {
+                if let Event::PullProgress(_, range) = &event {
+                    ranges.push(range.clone());
+                }
+                // The steal outcome is fixed once worker 0 exits.
+                if matches!(event, Event::Finished(0)) && !released {
+                    released = true;
+                    let _ = hold_tx.send(true);
+                }
+            }
+        })
+        .await;
+        assert!(drained.is_ok(), "the download hung for v={v}");
+        assert_eq!(&**receive.lock(), mock_data, "bytes corrupted for v={v}");
+        ranges.sort_by_key(|r| r.start);
+        ranges
+    }
+
+    /// `2 * 32 == 64`, so the finishing worker may halve the peer's 64-byte
+    /// remainder exactly once; the peer's remainder is then below the threshold,
+    /// so it cannot be halved again. Pins the boundary deterministically.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_min_chunk_size_at_half_allows_one_split() {
+        assert_eq!(
+            steal_granularity_probe(32).await,
+            vec![0..64u64, 64..96, 96..128]
+        );
+    }
+
+    /// One byte above half blocks the split (`2 * 33 > 64`), so the remainder is
+    /// pulled whole. Distinguishes the live value from the build value (1).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_min_chunk_size_just_above_half_blocks_split() {
+        assert_eq!(steal_granularity_probe(33).await, vec![0..64u64, 64..128]);
+    }
+
+    /// A granularity larger than the remainder blocks any split.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_min_chunk_size_above_remainder_blocks_split() {
+        assert_eq!(steal_granularity_probe(65).await, vec![0..64u64, 64..128]);
+    }
+
+    /// `set_min_chunk_size(0)` is clamped internally: the download must complete
+    /// with intact bytes (the probe asserts that) and every pull span must be
+    /// non-empty, rather than the clamp being skipped and a zero-width split
+    /// being handed out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_min_chunk_size_zero_is_clamped() {
+        let spans = steal_granularity_probe(0).await;
+        assert!(
+            spans.iter().all(|r| r.start < r.end),
+            "a zero minimum must not yield empty ranges: {spans:?}"
+        );
+        assert_eq!(spans.first().map(|r| r.start), Some(0));
+        assert_eq!(spans.last().map(|r| r.end), Some(128));
     }
 }

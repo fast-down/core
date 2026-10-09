@@ -477,6 +477,31 @@ async fn cancellation_keeps_state_and_resume_completes() {
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 }
 
+/// A cancel that lands before the pipeline has finished building must report
+/// [`Cancelled`](TerminationReason::Cancelled), not a build failure: the build
+/// is abandoned because the run was cancelled, which is not an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_before_pipeline_is_built_reports_cancelled() {
+    let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 211) as u8).collect();
+    let (_server, url) = start_server(payload, "v1", true).await;
+    let dir = temp_dir("cancel_build");
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    // Cancel before the run is spawned: `drive` reaches `build_pipeline` with the
+    // token already cancelled, so `run_until_cancelled` abandons the build.
+    // Resolving the `.fd`/`.part` pair happens first and does not observe the
+    // token, so this isolates the build-abandonment path.
+    ctx.cancel();
+    let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    let drain = tokio::spawn(run_to_end(rx));
+    let _handle = ready.start(StartMode::Auto, tx, &ctx);
+    assert_eq!(drain.await.unwrap(), TerminationReason::Cancelled);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn timeout_guard() {
     let _ = timeout(
@@ -557,4 +582,135 @@ async fn start_policy_per_dimension_override() {
         TerminationReason::Failed,
         "truncated: Fail must stop the run"
     );
+}
+
+/// A `set_threads` / `set_min_chunk_size` issued *before* the pipeline exists is
+/// remembered and applied once it is built, and the download still completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn ctx_resizes_pool_before_start() {
+    let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 233) as u8).collect();
+    let (_server, url) = start_server(payload.clone(), "v1", true).await;
+    let dir = temp_dir("ctx_resize");
+
+    let (tx, _rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    let final_path = ready.final_path.clone();
+
+    // Issued before the session exists: both must be remembered and applied.
+    ctx.set_min_chunk_size(4096);
+    ctx.set_threads(8);
+    let handle = ready.start(StartMode::Auto, tx, &ctx);
+    // Also exercisable through the handle, which delegates to the same `Ctx`.
+    handle.set_threads(4);
+
+    assert_eq!(handle.await, TerminationReason::Completed);
+    assert_eq!(std::fs::read(&final_path).unwrap(), payload);
+}
+
+/// Changing the minimum chunk size and pool size *while workers are running*
+/// must be accepted, reach the live pool, and leave the download intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn ctx_sets_min_chunk_size_midflight() {
+    let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 233) as u8).collect();
+    // Throttle the body so the transfer is still in flight when we mutate the
+    // live granularity and pool size.
+    let (_server, url) =
+        start_server_throttled(payload.clone(), "v1", true, Some(Duration::from_millis(20))).await;
+    let dir = temp_dir("ctx_min_midflight");
+
+    // Small chunks so several workers are actually running when the setters fire.
+    let mut cfg = make_config(&dir);
+    cfg.min_chunk_size = Some(64 * 1024);
+    cfg.threads = Some(4);
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::new(Url::parse(&url).unwrap(), cfg)
+        .build(&tx)
+        .await
+        .expect("build");
+    let final_path = ready.final_path.clone();
+
+    let handle = ready.start(StartMode::Auto, tx, &ctx);
+
+    // Wait until the transfer has started, then resize the live pool.
+    let mut saw_pull = false;
+    while let Ok(event) = rx.recv().await {
+        if matches!(event, Event::PullProgress(..)) {
+            saw_pull = true;
+            break;
+        }
+    }
+    assert!(
+        saw_pull,
+        "expected a pull before mutating the live granularity"
+    );
+    ctx.set_min_chunk_size(4096);
+    ctx.set_threads(4);
+
+    assert_eq!(handle.await, TerminationReason::Completed);
+    assert_eq!(std::fs::read(&final_path).unwrap(), payload);
+}
+
+/// Drive both live setters at high frequency through [`RunHandle`] while a
+/// throttled download is in flight, re-pulling whenever a shrink aborts a
+/// worker. The download must still finish and land the exact payload.
+#[tokio::test(flavor = "multi_thread")]
+async fn handle_churns_both_setters_midflight() {
+    const SIZE: usize = 16 * 1024 * 1024;
+    let payload: Vec<u8> = (0..SIZE).map(|i| (i % 233) as u8).collect();
+    let (_server, url) =
+        start_server_throttled(payload.clone(), "v1", true, Some(Duration::from_millis(5))).await;
+    let dir = temp_dir("ctx_churn");
+
+    let mut cfg = make_config(&dir);
+    cfg.min_chunk_size = Some(1024);
+    cfg.threads = Some(4);
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::new(Url::parse(&url).unwrap(), cfg)
+        .build(&tx)
+        .await
+        .expect("build");
+    let final_path = ready.final_path.clone();
+
+    let handle = Arc::new(ready.start(StartMode::Auto, tx, &ctx));
+    let drain = tokio::spawn(run_to_end(rx));
+
+    // Two detached tasks, one per setter, so the two cell writes race the
+    // workers independently instead of being serialized by a single churn loop.
+    // The values vary so the granularity crosses the split boundary and re-pulls
+    // actually happen.
+    const STEPS: usize = 200;
+    let t_handle = handle.clone();
+    let t_churn = tokio::spawn(async move {
+        for i in 0..STEPS {
+            t_handle.set_threads(i % 8 + 1);
+            tokio::time::sleep(Duration::from_millis(3)).await;
+        }
+    });
+    let m_handle = handle.clone();
+    let m_churn = tokio::spawn(async move {
+        for i in 0..STEPS {
+            let min = match i % 4 {
+                0 => 1,
+                1 => 512,
+                2 => 4096,
+                _ => 64 * 1024,
+            };
+            m_handle.set_min_chunk_size(min);
+            tokio::time::sleep(Duration::from_millis(3)).await;
+        }
+    });
+
+    assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
+    t_churn.await.unwrap();
+    m_churn.await.unwrap();
+
+    assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 }

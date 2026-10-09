@@ -633,11 +633,11 @@ mod tests {
                 }
                 let threads = usize::try_from(next_rand(&mut state) % 8 + 1).unwrap();
                 seen.insert(threads);
-                churner.set_threads(threads, 1);
+                churner.set_threads(threads);
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             // Leave a healthy pool behind so the remaining ranges drain.
-            churner.set_threads(8, 1);
+            churner.set_threads(8);
             (seen, inflight)
         });
 
