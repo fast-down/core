@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fast_down_api::{
-    Event, PartialConfig, Record, ResumeOutcome, Rx, StartMode, State, TerminationReason,
-    WriteMethod, create_cancellation_token, create_channel,
+    Ctx, Event, PartialConfig, Record, ResumeOutcome, Rx, StartMode, State, TerminationReason,
+    WriteMethod, create_channel,
 };
 use http_body_util::BodyExt;
 use http_body_util::combinators::BoxBody;
@@ -259,7 +259,7 @@ async fn fresh_download_completes_and_renames() {
     let dir = temp_dir("fresh");
 
     let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
+    let ctx = Ctx::new();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
         .build(&tx)
         .await
@@ -268,7 +268,7 @@ async fn fresh_download_completes_and_renames() {
     let final_path = ready.final_path.clone();
 
     let drain = tokio::spawn(run_to_end(rx));
-    ready.start(StartMode::Auto, tx, &token).await;
+    let _handle = ready.start(StartMode::Auto, tx, &ctx);
     assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
 
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
@@ -291,7 +291,7 @@ async fn reports_write_method_and_allocation() {
     cfg.pre_alloc = Some(true);
 
     let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
+    let ctx = Ctx::new();
     let ready = State::new(Url::parse(&url).unwrap(), cfg)
         .build(&tx)
         .await
@@ -309,7 +309,7 @@ async fn reports_write_method_and_allocation() {
         }
         seen
     });
-    ready.start(StartMode::Auto, tx, &token).await;
+    let _handle = ready.start(StartMode::Auto, tx, &ctx);
     let events = collect.await.unwrap();
 
     assert!(
@@ -341,7 +341,7 @@ async fn resumes_from_seeded_state() {
     seed_partial(&url, &dir, &final_path, &info, "v1", &payload, PARTIAL).await;
 
     let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
+    let ctx = Ctx::new();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
         .build(&tx)
         .await
@@ -352,7 +352,7 @@ async fn resumes_from_seeded_state() {
     );
 
     let drain = tokio::spawn(run_to_end(rx));
-    ready.start(StartMode::Auto, tx, &token).await;
+    let _handle = ready.start(StartMode::Auto, tx, &ctx);
     assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 }
@@ -367,7 +367,7 @@ async fn changed_remote_is_mismatch_and_resume_mode_refuses() {
     seed_partial(&url, &dir, &final_path, &info, "old", &payload, PARTIAL).await;
 
     let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
+    let ctx = Ctx::new();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
         .build(&tx)
         .await
@@ -378,7 +378,7 @@ async fn changed_remote_is_mismatch_and_resume_mode_refuses() {
     );
 
     let drain = tokio::spawn(run_to_end(rx));
-    ready.start(StartMode::Resume, tx, &token).await;
+    let _handle = ready.start(StartMode::Resume, tx, &ctx);
     assert_eq!(drain.await.unwrap(), TerminationReason::Failed);
     assert!(!final_path.exists(), "a refused resume must not rename");
 }
@@ -414,7 +414,7 @@ async fn fresh_mode_redownloads_and_completes() {
     seed_partial(&url, &dir, &final_path, &info, "v1", &payload, PARTIAL).await;
 
     let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
+    let ctx = Ctx::new();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
         .build(&tx)
         .await
@@ -422,7 +422,7 @@ async fn fresh_mode_redownloads_and_completes() {
     assert!(matches!(&ready.outcome, ResumeOutcome::Resumable));
 
     let drain = tokio::spawn(run_to_end(rx));
-    ready.start(StartMode::Fresh, tx, &token).await;
+    let _handle = ready.start(StartMode::Fresh, tx, &ctx);
     assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 }
@@ -440,8 +440,8 @@ async fn cancellation_keeps_state_and_resume_completes() {
     let _ = info;
 
     let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
-    let cancel = token.clone();
+    let ctx = Ctx::new();
+    let cancel = ctx.clone();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
         .build(&tx)
         .await
@@ -452,7 +452,7 @@ async fn cancellation_keeps_state_and_resume_completes() {
         tokio::time::sleep(Duration::from_millis(200)).await;
         cancel.cancel();
     });
-    ready.start(StartMode::Auto, tx, &token).await;
+    let _handle = ready.start(StartMode::Auto, tx, &ctx);
     watcher.await.unwrap();
     let reason = drain.await.unwrap();
     assert_eq!(
@@ -465,14 +465,14 @@ async fn cancellation_keeps_state_and_resume_completes() {
     let fd = final_path.with_added_extension("fd");
     assert!(fd.exists(), "cancel must leave the .fd behind");
     let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
+    let ctx = Ctx::new();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
         .build(&tx)
         .await
         .expect("build");
     assert!(matches!(&ready.outcome, ResumeOutcome::Resumable));
     let drain = tokio::spawn(run_to_end(rx));
-    ready.start(StartMode::Auto, tx, &token).await;
+    let _handle = ready.start(StartMode::Auto, tx, &ctx);
     assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 }
@@ -486,21 +486,19 @@ async fn timeout_guard() {
     .await;
 }
 
-/// Locks in that `Ready::start`'s future is `Send`: this compiles only if it is,
-/// because `tokio::spawn` requires `Send + 'static`. Guards against a future
-/// refactor quietly reintroducing the `async fn` auto-trait inference gap.
+/// `Ready::start` hands back a `RunHandle` that is `Send + Sync`, so it can be
+/// moved into another task and shared for control.
 #[test]
-fn start_future_is_send() {
-    fn assert_send_future<F: std::future::Future + Send + 'static>(_: F) {}
+fn run_handle_is_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<fast_down_api::RunHandle>();
     fn check(
         ready: fast_down_api::Ready,
         mode: StartMode,
         tx: fast_down_api::Tx,
-        token: tokio_util::sync::CancellationToken,
-    ) {
-        assert_send_future(async move {
-            ready.start(mode, tx, &token).await;
-        });
+        ctx: &fast_down_api::Ctx,
+    ) -> fast_down_api::RunHandle {
+        ready.start(mode, tx, ctx)
     }
     let _ = check;
 }
@@ -540,7 +538,7 @@ async fn start_policy_per_dimension_override() {
     drop(file);
 
     let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
+    let ctx = Ctx::new();
     let ready = State::load(&fd).await.unwrap().build(&tx).await.unwrap();
     assert!(
         matches!(&ready.outcome, ResumeOutcome::Mismatch(_)),
@@ -553,7 +551,7 @@ async fn start_policy_per_dimension_override() {
         ..StartPolicy::auto()
     };
     let drain = tokio::spawn(run_to_end(rx));
-    ready.start(policy, tx, &token).await;
+    let _handle = ready.start(policy, tx, &ctx);
     assert_eq!(
         drain.await.unwrap(),
         TerminationReason::Failed,

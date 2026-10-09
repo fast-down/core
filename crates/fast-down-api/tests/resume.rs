@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fast_down_api::{
-    Event, PartialConfig, PlanError, Record, Rx, StartMode, State, StateError, TerminationReason,
-    Tx, WriteMethod, create_cancellation_token, create_channel,
+    Ctx, Event, PartialConfig, PlanError, Record, Rx, StartMode, State, StateError,
+    TerminationReason, Tx, WriteMethod, create_cancellation_token, create_channel,
 };
 use futures::StreamExt;
 use futures::stream::unfold;
@@ -293,7 +293,9 @@ async fn drain(rx: Rx) -> Vec<Event> {
 fn download(url: Url, cfg: PartialConfig, tx: Tx, token: CancellationToken) {
     tokio::spawn(async move {
         match State::new(url, cfg).build(&tx).await {
-            Ok(ready) => ready.start(StartMode::Auto, tx, &token).await,
+            Ok(ready) => {
+                let _handle = ready.start(StartMode::Auto, tx, &Ctx::with_token(token));
+            }
             Err(e) => {
                 e.emit(&tx);
                 let _ = tx.send(Event::Terminated(TerminationReason::Failed));
@@ -403,7 +405,9 @@ async fn resolve_and_run(
     let mut state = loaded;
     state.record.merge_config(&cfg);
     match state.build(&tx).await {
-        Ok(ready) => ready.start(mode, tx, &token).await,
+        Ok(ready) => {
+            let _handle = ready.start(mode, tx, &Ctx::with_token(token));
+        }
         Err(e) => {
             e.emit(&tx);
             let _ = tx.send(Event::Terminated(TerminationReason::Failed));
@@ -1448,14 +1452,14 @@ async fn test_elapsed_persisted_on_kill() {
     let fd = final_path.with_added_extension("fd");
 
     let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
+    let ctx = Ctx::new();
     // Never cancel: the run must be aborted mid-flight, not ended gracefully.
     let handle = tokio::spawn(async move {
         if let Ok(ready) = State::new(Url::parse(&url).expect("valid url"), make_config(&dir))
             .build(&tx)
             .await
         {
-            ready.start(StartMode::Auto, tx, &token).await;
+            let _handle = ready.start(StartMode::Auto, tx, &ctx);
         }
     });
 

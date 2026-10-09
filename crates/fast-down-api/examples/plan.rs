@@ -7,8 +7,7 @@
 #![allow(clippy::pedantic)]
 
 use fast_down_api::{
-    Event, PartialConfig, ResumeOutcome, StartMode, State, TerminationReason,
-    create_cancellation_token, create_channel,
+    Ctx, Event, PartialConfig, ResumeOutcome, StartMode, State, create_channel,
 };
 use url::Url;
 
@@ -17,7 +16,7 @@ const URL: &str = "http://speedtest.tele2.net/10MB.zip";
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
+    let ctx = Ctx::new();
 
     let ready = State::new(
         Url::parse(URL)?,
@@ -45,25 +44,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ResumeOutcome::Mismatch(e) => println!("stale state; cannot resume: {e}"),
     }
 
-    let drain = tokio::spawn(async move {
-        let mut reason = TerminationReason::Failed;
-        while let Ok(ev) = rx.recv().await {
-            match ev {
-                Event::Progress(pr) => println!("{:5.1}%  {} B/s", pr.push.percent, pr.push.bps),
-                Event::Renamed(path) => println!("renamed -> {}", path.display()),
-                Event::Terminated(r) => {
-                    reason = r;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        reason
-    });
-
     // Start with `Auto`: resume when possible, otherwise download fresh.
-    ready.start(StartMode::Auto, tx, &token).await;
-    println!("ended: {:?}", drain.await?);
+    let handle = ready.start(StartMode::Auto, tx, &ctx);
+
+    // Drain until the terminal event, then take the outcome from the handle.
+    while let Ok(ev) = rx.recv().await {
+        match ev {
+            Event::Progress(pr) => println!("{:5.1}%  {} B/s", pr.push.percent, pr.push.bps),
+            Event::Renamed(path) => println!("renamed -> {}", path.display()),
+            Event::Terminated(_) => break,
+            other => println!("{other:?}"),
+        }
+    }
+    println!("ended: {:?}", handle.await);
 
     Ok(())
 }

@@ -4,7 +4,7 @@ pub mod state;
 pub use state::{PartState, PlanError, Ready, Record, ResumeOutcome, State, StateError};
 
 mod engine;
-pub use engine::{IdentityRecovery, PreparedRun, Recovery, StartMode, StartPolicy};
+pub use engine::{Ctx, IdentityRecovery, PreparedRun, Recovery, RunHandle, StartMode, StartPolicy};
 
 mod config;
 pub use config::*;

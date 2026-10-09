@@ -7,11 +7,7 @@
 
 #![allow(clippy::pedantic)]
 
-use fast_down_api::{
-    Event, PartialConfig, StartMode, State, TerminationReason, create_cancellation_token,
-    create_channel,
-};
-use std::time::Duration;
+use fast_down_api::{Ctx, Event, PartialConfig, StartMode, State, create_channel};
 use url::Url;
 
 const URL: &str = "http://speedtest.tele2.net/10MB.zip";
@@ -34,32 +30,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Start a download and cancel it once 30% has landed, leaving a
     //    `.part`/`.fd` pair behind.
     let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
+    let ctx = Ctx::new();
     let ready = State::new(url.clone(), config.clone()).build(&tx).await?;
     let fd_path = ready
         .fd_path
         .clone()
         .expect("a fresh build decides the .fd path when overwrite is set");
 
-    let run = ready.start(StartMode::Auto, tx, &token);
+    let handle = ready.start(StartMode::Auto, tx, &ctx);
     let mut cancelled = false;
-    tokio::pin!(run);
-    tokio::select! {
-        () = &mut run => {}
-        () = async {
-            while let Ok(ev) = rx.recv().await {
-                if let Event::Progress(pr) = ev
-                    && pr.push.percent > 30.0
-                {
-                    token.cancel();
-                    cancelled = true;
-                    break;
-                }
-            }
-        } => {}
+    // Drain events; cancel once enough has landed. `start` already runs the
+    // download in the background, so this is the foreground work.
+    while let Ok(ev) = rx.recv().await {
+        if let Event::Progress(pr) = ev
+            && pr.push.percent > 30.0
+        {
+            handle.abort();
+            cancelled = true;
+            break;
+        }
     }
     // Let the run finish unwinding after cancellation.
-    run.await;
+    handle.await;
     println!("interrupted at 30%: {cancelled}");
 
     // 2. Inspect the persisted state without touching the network. `State::load`
@@ -77,35 +69,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    the remote identity and the `.part`, so a changed remote is caught here
     //    rather than corrupting the output.
     let (tx, rx) = create_channel();
-    let token = create_cancellation_token();
+    let ctx = Ctx::new();
     let ready = State::load(&fd_path).await?.build(&tx).await?;
     println!("resuming: {:?}", ready.outcome);
 
-    let drain = tokio::spawn(async move {
-        let mut reason = TerminationReason::Failed;
-        while let Ok(ev) = rx.recv().await {
-            match ev {
-                Event::Resumed { progress, .. } => {
-                    let got: u64 = progress.iter().map(|r| r.end - r.start).sum();
-                    println!("resuming from {got} bytes");
-                }
-                Event::Progress(pr) => println!("{:5.1}%  {} B/s", pr.push.percent, pr.push.bps),
-                Event::Renamed(path) => println!("renamed -> {}", path.display()),
-                Event::Terminated(r) => {
-                    reason = r;
-                    break;
-                }
-                _ => {}
+    let handle = ready.start(StartMode::Resume, tx, &ctx);
+
+    // Drain until the terminal event, then take the outcome from the handle.
+    while let Ok(ev) = rx.recv().await {
+        match ev {
+            Event::Resumed { progress, .. } => {
+                let got: u64 = progress.iter().map(|r| r.end - r.start).sum();
+                println!("resuming from {got} bytes");
             }
+            Event::Progress(pr) => println!("{:5.1}%  {} B/s", pr.push.percent, pr.push.bps),
+            Event::Renamed(path) => println!("renamed -> {}", path.display()),
+            Event::Terminated(_) => break,
+            other => println!("{other:?}"),
         }
-        reason
-    });
-
-    // A short settle so the final `.part`/`.fd` flush from step 1 is complete.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    ready.start(StartMode::Resume, tx, &token).await;
-    println!("ended: {:?}", drain.await?);
+    }
+    println!("ended: {:?}", handle.await);
 
     Ok(())
 }

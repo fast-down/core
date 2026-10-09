@@ -12,7 +12,7 @@ mod stats;
 pub use pipeline::build_pipeline;
 pub use policy::{IdentityRecovery, Recovery, StartMode, StartPolicy};
 pub use runner::PreparedRun;
-pub use runner::run;
+pub use runner::{Ctx, RunHandle, run};
 
 mod prefetch;
 pub use prefetch::*;

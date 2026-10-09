@@ -21,12 +21,14 @@ use fast_down::{
     single::download_single,
 };
 use inherit_config::ConfigLayer;
+use parking_lot::Mutex;
 use reqwest::Response;
 use std::{
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::{fs, sync::mpsc, time::MissedTickBehavior};
+use tokio::{fs, sync::mpsc, task::JoinHandle, time::MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 /// How often the `.fd` state is persisted while a run is in flight.
@@ -88,19 +90,155 @@ fn decide(policy: StartPolicy, outcome: &ResumeOutcome) -> Fate {
     }
 }
 
-/// Run a resolved download to completion, emitting events and exactly one
-/// [`Event::Terminated`] as the last event.
+/// Live control for a run: the cancellation token plus a handle to resize the
+/// worker pool while the download is in flight.
 ///
-/// Claims a free `.fd`/`.part` pair when `fd_path` is `None`, or reuses the given
-/// one; `policy` decides what becomes of any recorded progress.
-pub async fn run(
-    prepared: PreparedRun,
-    policy: impl Into<StartPolicy>,
-    tx: Tx,
-    token: &CancellationToken,
-) {
-    let reason = drive(prepared, policy.into(), &tx, token).await;
-    let _ = tx.send(Event::Terminated(reason));
+/// The engine session does not exist until the pipeline is built, so a
+/// [`set_threads`](Self::set_threads) made before then is remembered and applied
+/// as soon as it does. [`RunHandle`] wraps a `Ctx`, so the two share one state.
+#[derive(Debug, Clone)]
+pub struct Ctx {
+    token: CancellationToken,
+    slot: Arc<Mutex<Slot>>,
+}
+
+#[derive(Debug, Default)]
+struct Slot {
+    session: Option<Session>,
+    /// Latest requested `(threads, min_chunk_size)` before the session existed.
+    pending: Option<(usize, u64)>,
+}
+
+impl Ctx {
+    /// Create a control handle with a fresh cancellation token.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_token(crate::create_cancellation_token())
+    }
+
+    /// Create a control handle around an existing cancellation token.
+    #[must_use]
+    pub fn with_token(token: CancellationToken) -> Self {
+        Self {
+            token,
+            slot: Arc::new(Mutex::new(Slot::default())),
+        }
+    }
+
+    /// The cancellation token this run observes.
+    #[must_use]
+    pub const fn token(&self) -> &CancellationToken {
+        &self.token
+    }
+
+    /// Cancel the run, leaving `.part`/`.fd` in place for a later resume.
+    pub fn cancel(&self) {
+        self.token.cancel();
+    }
+
+    /// Adjust the worker count and minimum chunk size of the running download.
+    ///
+    /// A no-op for single-threaded runs (unresumable or non-ranged downloads),
+    /// which have no worker pool. A request made before the pipeline is built is
+    /// remembered and applied as soon as it is.
+    pub fn set_threads(&self, threads: usize, min_chunk_size: u64) {
+        let mut slot = self.slot.lock();
+        match &slot.session {
+            Some(session) => {
+                session.set_threads(threads, min_chunk_size);
+                slot.pending = None;
+            }
+            None => slot.pending = Some((threads, min_chunk_size)),
+        }
+    }
+
+    /// Publish the freshly-built session, flushing any queued `set_threads`.
+    fn attach(&self, session: &Session) {
+        let mut slot = self.slot.lock();
+        if let Some((threads, min_chunk_size)) = slot.pending.take() {
+            session.set_threads(threads, min_chunk_size);
+        }
+        slot.session = Some(session.clone());
+    }
+}
+
+impl Default for Ctx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A handle to a running download, returned by [`crate::Ready::start`].
+///
+/// It owns the cancellation token and session slot through its [`Ctx`], so
+/// [`set_threads`](Self::set_threads) and [`abort`](Self::abort) delegate to it.
+/// Await it (it is a [`Future`](std::future::Future)) to get the
+/// [`TerminationReason`]; the run also reports on the event channel and ends with
+/// exactly one [`Event::Terminated`].
+#[derive(Debug)]
+pub struct RunHandle {
+    join: JoinHandle<TerminationReason>,
+    ctx: Ctx,
+}
+
+impl RunHandle {
+    /// The control handle, for e.g. sharing with another task.
+    #[must_use]
+    pub const fn ctx(&self) -> &Ctx {
+        &self.ctx
+    }
+
+    /// Adjust the worker count and minimum chunk size of the running download.
+    ///
+    /// Delegates to [`Ctx::set_threads`].
+    pub fn set_threads(&self, threads: usize, min_chunk_size: u64) {
+        self.ctx.set_threads(threads, min_chunk_size);
+    }
+
+    /// Cancel the run. Delegates to [`Ctx::cancel`].
+    pub fn abort(&self) {
+        self.ctx.cancel();
+    }
+}
+
+impl std::future::Future for RunHandle {
+    type Output = TerminationReason;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // `JoinHandle` is `Unpin`, so we can poll it through `Pin::get_mut`. The
+        // run always emits [`Event::Terminated`], but a panic (or abort) drops
+        // `tx` and closes the channel without one; report `Failed` for that case
+        // rather than propagating the foreign `JoinError` type.
+        std::pin::Pin::new(&mut self.get_mut().join)
+            .poll(cx)
+            .map(|res| res.unwrap_or(TerminationReason::Failed))
+    }
+}
+
+/// Spawn a resolved download on the ambient tokio runtime and return a
+/// [`RunHandle`] immediately.
+///
+/// `tx` is owned by the spawned run: sending on it reports events, and dropping
+/// it when the run ends disconnects the receiver. `ctx` carries the cancellation
+/// token and live worker-pool control, shared with the returned handle. Requires
+/// an active tokio runtime; panics otherwise.
+pub fn run(prepared: PreparedRun, policy: impl Into<StartPolicy>, tx: Tx, ctx: &Ctx) -> RunHandle {
+    let policy = policy.into();
+    let join = {
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            let reason = drive(prepared, policy, &tx, &ctx).await;
+            let _ = tx.send(Event::Terminated(reason));
+            reason
+        })
+    };
+    RunHandle {
+        join,
+        ctx: ctx.clone(),
+    }
 }
 
 /// Everything a resolved run needs before it starts. Currently assembled field
@@ -120,7 +258,7 @@ async fn drive(
     prepared: PreparedRun,
     policy: StartPolicy,
     tx: &Tx,
-    token: &CancellationToken,
+    ctx: &Ctx,
 ) -> TerminationReason {
     let PreparedRun {
         record,
@@ -131,6 +269,7 @@ async fn drive(
         resp,
         outcome,
     } = prepared;
+    let token = ctx.token();
 
     // Resolve the fate once: whether to resume, fresh-download, or fail.
     let resuming = match decide(policy, &outcome) {
@@ -187,6 +326,7 @@ async fn drive(
 
     // 4. Drive the engine session to completion.
     let session = start_session(&config, &info, puller, pusher);
+    ctx.attach(&session);
     let record = drive_session(record, &fd_path, &info, &config, session, tx, token).await;
 
     if token.is_cancelled() {

@@ -1,8 +1,11 @@
-use crate::{PartialConfig, StateError, Tx, engine::StartPolicy, state::Record};
+use crate::{
+    PartialConfig, StateError, Tx,
+    engine::{Ctx, RunHandle, StartPolicy},
+    state::Record,
+};
 use fast_down::{ProgressEntry, UrlInfo};
 use reqwest::Response;
 use std::path::PathBuf;
-use tokio_util::sync::CancellationToken;
 
 /// What a resolved download will do when started, reported by [`crate::State::build`].
 #[derive(Debug)]
@@ -46,22 +49,21 @@ pub struct Ready {
 }
 
 impl Ready {
-    /// Run this download to completion under the given start policy.
+    /// Start this download on the ambient tokio runtime and return a
+    /// [`RunHandle`] immediately.
     ///
     /// Accepts either a [`StartMode`](crate::StartMode) preset or a
-    /// fully-specified [`StartPolicy`] (both convert into `StartPolicy`).
-    /// Consumes the plan.
-    /// Emits events on the channel that produced it, and exactly one
-    /// [`crate::Event::Terminated`] as the last event. Cancelling the token stops
-    /// fetching and leaves `.part`/`.fd` in place.
+    /// fully-specified [`StartPolicy`] (both convert into `StartPolicy`), and
+    /// consumes the plan. `tx` is owned by the run: events (including exactly one
+    /// [`crate::Event::Terminated`] as the last) flow on it, and it is dropped
+    /// when the run ends, disconnecting the receiver. `ctx` carries the
+    /// cancellation token and the live worker-pool control, and is shared with
+    /// the returned handle.
     ///
-    /// The returned future is `Send`, so it can be `tokio::spawn`ed directly:
-    /// `fast-pull`'s `DownloadResult` is `Send` even when built inside an
-    /// `async` body (via its internal `ForceSend` wrapper), and its event stream
-    /// is awaited through the `Send`-typed `DownloadResult::recv` method. Both
-    /// work around rustc's `async fn` auto-trait leak check, not a real
-    /// `!Send`.
-    pub async fn start(self, policy: impl Into<StartPolicy>, tx: Tx, token: &CancellationToken) {
+    /// Cancelling the token stops fetching and leaves `.part`/`.fd` in place.
+    /// Requires an active tokio runtime; panics otherwise.
+    #[must_use]
+    pub fn start(self, policy: impl Into<StartPolicy>, tx: Tx, ctx: &Ctx) -> RunHandle {
         crate::engine::run(
             crate::engine::PreparedRun {
                 record: self.record,
@@ -74,9 +76,8 @@ impl Ready {
             },
             policy,
             tx,
-            token,
+            ctx,
         )
-        .await;
     }
 
     /// The `.part` file this run writes to, derived from the `.fd` path.

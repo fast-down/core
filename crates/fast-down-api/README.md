@@ -22,15 +22,17 @@ events, and cancel cooperatively.
 ## Quick start
 
 ```rust,no_run
-use fast_down_api::{PartialConfig, ResumeOutcome, State, create_cancellation_token, create_channel};
+use fast_down_api::{
+    Ctx, Event, PartialConfig, ResumeOutcome, StartMode, State, create_channel,
+};
 use std::path::PathBuf;
 use url::Url;
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-// 1. Channel for progress / lifecycle events, plus a cancellation token.
-let (tx, _rx) = create_channel();
-let token = create_cancellation_token();
+// 1. Event channel, plus the run's cancellation / control handle.
+let (tx, rx) = create_channel();
+let ctx = Ctx::new();
 
 // 2. Configure the download. Every field is optional; unset fields
 //    fall back to Config::default(). (save_dir is required at runtime.)
@@ -53,14 +55,28 @@ match &ready.outcome {
 }
 println!("final path: {:?}", ready.final_path);
 println!("already fetched: {} ranges", ready.progress().len());
-# let _ = token;
+
+// 5. Start it. `start` consumes the plan and returns at once; events flow on
+//    `rx` while the run proceeds.
+let handle = ready.start(StartMode::Auto, tx, &ctx);
+
+// 6. Drain until the terminal event. The contract guarantees exactly one
+//    `Event::Terminated`, as the last event on the channel.
+while let Ok(event) = rx.recv().await {
+    match event {
+        Event::Progress(p) => println!("{:5.1}%  {} B/s", p.push.percent, p.push.bps),
+        Event::Renamed(path) => println!("renamed -> {}", path.display()),
+        Event::Terminated(_) => break,
+        _ => {}
+    }
+}
+
+// 7. The outcome comes from the handle (a `Future<Output =
+//    TerminationReason>`), not from the event stream.
+println!("ended: {:?}", handle.await);
 # Ok(())
 # }
 ```
-
-Starting the resolved download, draining its events, and cancelling mid-flight
-are provided by `Ready` and the event stream; see the crate documentation for
-the run API.
 
 ### Loading an existing `.fd`
 
@@ -85,11 +101,14 @@ println!("resuming {:?}", ready.fd_path);
 ### Cancelling cooperatively
 
 ```rust,no_run
-use fast_down_api::create_cancellation_token;
+use fast_down_api::Ctx;
 
-let token = create_cancellation_token();
-token.cancel(); // stops fetching, keeps .part / .fd so you can resume later
+let ctx = Ctx::new();
+ctx.cancel(); // stops fetching, keeps .part / .fd so you can resume later
 ```
+
+`RunHandle::abort()` cancels the same token (`RunHandle` wraps its `Ctx`). A
+cancelled run resolves to `TerminationReason::Cancelled`.
 
 ### Choosing what `start` does
 
@@ -144,6 +163,8 @@ two versions together.
 | [`StartMode`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StartMode.html) | A preset for how to start: `Auto`, `Resume`, `Fresh`, `Forced`. Accepted by `Ready::start`. |
 | [`StartPolicy`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.StartPolicy.html) | Per-dimension start policy (what to do for each reason a resume might fail). Also accepted by `Ready::start`. |
 | [`ResumeOutcome`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.ResumeOutcome.html) | `Fresh` (nothing to continue), `Resumable`, or `Mismatch(StateError)`. |
+| [`Ctx`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Ctx.html) | The run's cancellation token + live worker-pool control, passed to `Ready::start`. `cancel` / `set_threads`. |
+| [`RunHandle`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.RunHandle.html) | Returned by `Ready::start`: delegates `set_threads` / `abort` to its `Ctx`, and `await`s to the `TerminationReason`. |
 | [`Record`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Record.html) | The `.fd` state file: URL, remote identity, elapsed time, and the merged config (which carries `downloaded_chunk`). |
 | [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html) | Create the `(Tx, Rx)` event channel. |
 | [`create_cancellation_token`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_cancellation_token.html) | Create a `CancellationToken` for cooperative cancellation. |
