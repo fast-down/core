@@ -491,7 +491,7 @@ mod tests {
         let download_chunks = eight_chunks(mock_data.len() as u64);
         let puller = SlowPuller {
             data: Arc::from(mock_data.as_slice()),
-            delay: Duration::from_millis(150),
+            delay: Duration::from_millis(80),
         };
         let pusher = MemPusher::with_capacity(mock_data.len());
         let receive = pusher.receive.clone();
@@ -512,7 +512,7 @@ mod tests {
         // Resize while the lone worker is still stalled on its first range.
         let grower = result.clone();
         tokio::spawn(async move {
-            sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(30)).await;
             grower.set_threads(8);
         });
 

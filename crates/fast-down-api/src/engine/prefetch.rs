@@ -74,11 +74,24 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn prefetch_gives_up_after_retries_on_unreachable() {
-        // Exercises the Err branch of prefetch: a connection that is refused
-        // must emit `Event::PrefetchError` for every attempt that still has a
-        // retry left, then return the final failure instead of emitting it.
-        let url = Url::parse("http://127.0.0.1:1/never").unwrap();
+    async fn prefetch_gives_up_after_retries_on_transport_error() {
+        // Exercises the Err branch of prefetch on a *transport* failure: a server
+        // that accepts the connection and then drops it mid-response must make
+        // `prefetch` emit `Event::PrefetchError` for every attempt that still has
+        // a retry left, then return the final failure instead of emitting it. A
+        // local accept-then-drop server is used instead of a refused/unreachable
+        // address because a refused loopback connect costs ~2s per attempt on
+        // some platforms, while this reproduces the same `Request` error in ~1ms.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                // Drop the socket without ever sending a response.
+                drop(stream);
+            }
+        });
+        let url = Url::parse(&format!("http://{addr}/never")).unwrap();
         let config = Config {
             retry_times: 2,
             retry_gap: Duration::ZERO,
@@ -86,10 +99,15 @@ mod tests {
         };
         let (tx, rx) = create_channel();
         let result = prefetch(&url, &config, &tx).await;
-        assert!(
-            matches!(result, Err(PlanError::Prefetch(_))),
-            "prefetch must return the last error after exhausting retries"
-        );
+        match result {
+            Err(PlanError::Prefetch(e)) => assert!(
+                matches!(e, fast_down::reqwest::ReqwestResponseError::Request(_)),
+                "a dropped connection must surface as a transport error, got {e:?}"
+            ),
+            other => panic!(
+                "prefetch must return the last error after exhausting retries, got {other:?}"
+            ),
+        }
         drop(tx);
         let mut errors = 0;
         while let Ok(e) = rx.recv().await {

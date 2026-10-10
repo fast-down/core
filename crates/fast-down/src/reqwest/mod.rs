@@ -445,7 +445,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_download() {
-        let mock_data = build_mock_data(300 * 1024 * 1024);
+        // 8 MiB is ample to exercise many concurrent range requests over a real
+        // socket; a larger payload only slows the test down (the server copies
+        // each requested slice) without covering more behavior.
+        let mock_data = build_mock_data(8 * 1024 * 1024);
         let mut server = mockito::Server::new_async().await;
         let client = Client::builder().no_proxy().build().unwrap();
         let _mock = mount_range_endpoint(&mut server, "/concurrent", mock_data.clone()).await;
@@ -581,7 +584,7 @@ mod tests {
         use std::collections::BTreeSet;
         use std::sync::atomic::{AtomicU64, Ordering};
 
-        let mock_data = build_mock_data(16 * 1024 * 1024);
+        let mock_data = build_mock_data(4 * 1024 * 1024);
         let mut server = mockito::Server::new_async().await;
         let client = Client::builder().no_proxy().build().unwrap();
         let _mock = mount_range_endpoint(&mut server, "/churn", mock_data.clone()).await;
@@ -691,7 +694,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_sequential_download() {
-        let mock_data = build_mock_data(300 * 1024 * 1024);
+        // 8 MiB is enough to stream a real response body end-to-end; the point
+        // is the single-stream path, not raw size.
+        let mock_data = build_mock_data(8 * 1024 * 1024);
         let mut server = mockito::Server::new_async().await;
         let client = Client::builder().no_proxy().build().unwrap();
         let _mock = server

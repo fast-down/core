@@ -49,7 +49,11 @@ const FILE_SIZE: usize = 5 * 1024 * 1024;
 /// Bytes served per throttled chunk, with a small sleep between chunks, so the
 /// download is slow enough for the cancel to land in the middle.
 const THROTTLE_CHUNK: usize = 64 * 1024;
-const THROTTLE_MS: u64 = 150;
+/// Delay between throttled chunks. Kept small so a full 5 MiB transfer still
+/// completes in well under a second: the throttle only needs to keep the
+/// in-flight window open long enough for a cancel to land (the first two
+/// chunks), not to make the whole download slow.
+const THROTTLE_MS: u64 = 2;
 
 type RespBody = BoxBody<Bytes, Infallible>;
 
@@ -59,6 +63,10 @@ struct FileData {
     etag: String,
     last_modified: String,
     supports_range: bool,
+    /// Delay between the throttled chunks a response body is streamed in. `None`
+    /// serves the body as fast as the socket allows; the throttled default keeps
+    /// an in-flight window open long enough for a cancel to land.
+    throttle: Option<Duration>,
 }
 
 #[derive(Clone)]
@@ -99,6 +107,11 @@ impl TestServer {
         data.etag = etag.to_string();
         data.last_modified = last_modified.to_string();
     }
+
+    /// Turn throttling on/off (or retune the gap) after the server is running.
+    async fn set_throttle(&self, throttle: Option<Duration>) {
+        self.data.write().await.throttle = throttle;
+    }
 }
 
 /// The hyper request handler: serves the current [`FileData`], honouring range
@@ -125,6 +138,7 @@ async fn handle(
     let etag = data.etag.clone();
     let last_modified = data.last_modified.clone();
     let body = data.body.clone();
+    let throttle = data.throttle;
     drop(data);
 
     let range = req
@@ -147,7 +161,7 @@ async fn handle(
             .header(CONTENT_LENGTH, chunk.len().to_string())
             .header(ETAG, etag.as_str())
             .header(LAST_MODIFIED, last_modified.as_str())
-            .body(throttled_stream(chunk))
+            .body(body_of(chunk, throttle))
             .expect("build 206 response"));
     }
 
@@ -160,7 +174,7 @@ async fn handle(
         .header(CONTENT_LENGTH, body.len().to_string())
         .header(ETAG, etag.as_str())
         .header(LAST_MODIFIED, last_modified.as_str())
-        .body(throttled_stream(body))
+        .body(body_of(body, throttle))
         .expect("build 200 response"))
 }
 
@@ -186,15 +200,19 @@ fn parse_range(header: &str, total: usize) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-/// Build a streaming body that emits `THROTTLE_CHUNK` slices of `data` with a
-/// small `sleep` between them, keeping the connection open long enough for a
-/// cancel to arrive mid-transfer.
-fn throttled_stream(data: Vec<u8>) -> RespBody {
-    let stream = unfold((0usize, data), |(pos, data)| async move {
+/// Build a response body for `data`: streamed in [`THROTTLE_CHUNK`] slices with
+/// the given inter-chunk `delay`, or served in one shot when `delay` is `None`.
+/// The throttle keeps the connection open long enough for a cancel to arrive
+/// mid-transfer; `None` is for tests that only need the bytes to land quickly.
+fn body_of(data: Vec<u8>, delay: Option<Duration>) -> RespBody {
+    let Some(delay) = delay else {
+        return http_body_util::Full::new(Bytes::from(data)).boxed();
+    };
+    let stream = unfold((0usize, data), move |(pos, data)| async move {
         if pos >= data.len() {
             return None;
         }
-        tokio::time::sleep(Duration::from_millis(THROTTLE_MS)).await;
+        tokio::time::sleep(delay).await;
         let end = (pos + THROTTLE_CHUNK).min(data.len());
         Some((
             Ok::<_, Infallible>(Bytes::copy_from_slice(&data[pos..end])),
@@ -205,12 +223,26 @@ fn throttled_stream(data: Vec<u8>) -> RespBody {
     BodyExt::boxed(StreamBody::new(framed))
 }
 
-/// Start a ranged server serving `body` under the given identity headers.
+/// Start a ranged server serving `body` under the given identity headers,
+/// throttled at [`THROTTLE_MS`] per chunk so a cancel can land mid-transfer.
 async fn start_server(
     body: Vec<u8>,
     etag: &str,
     last_modified: &str,
     supports_range: bool,
+) -> (TestServer, String) {
+    start_server_throttled(body, etag, last_modified, supports_range, Some(THROTTLE_MS)).await
+}
+
+/// Like [`start_server`] but with an explicit inter-chunk delay (`None` serves
+/// the body as fast as the socket allows), for tests that do not need a
+/// cancellation window and should not pay for the throttle.
+async fn start_server_throttled(
+    body: Vec<u8>,
+    etag: &str,
+    last_modified: &str,
+    supports_range: bool,
+    throttle_ms: Option<u64>,
 ) -> (TestServer, String) {
     let server = TestServer {
         data: Arc::new(RwLock::new(FileData {
@@ -218,6 +250,7 @@ async fn start_server(
             etag: etag.to_string(),
             last_modified: last_modified.to_string(),
             supports_range,
+            throttle: throttle_ms.map(Duration::from_millis),
         })),
     };
     let url = server.serve().await;
@@ -1447,7 +1480,11 @@ async fn test_progress_elapsed_persisted_across_resume() {
 #[tokio::test]
 async fn test_elapsed_persisted_on_kill() {
     let dir = temp_dir("elapsed_kill");
-    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
+    // Throttled enough that the 5 MiB transfer is still in flight (and thus
+    // partial) when the run is aborted below; it only needs to outlast the
+    // persist cadence, not to be slow.
+    let (_server, url) =
+        start_server_throttled(original_bytes(), "orig", "LM-A", true, Some(200)).await;
     let final_path = dir.join("out.bin");
     let fd = final_path.with_added_extension("fd");
 
@@ -1463,9 +1500,22 @@ async fn test_elapsed_persisted_on_kill() {
         }
     });
 
-    // Wait until at least two persist ticks (PERSIST_GAP = 1s) have had a chance
-    // to snapshot.
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    // Wait until a persist tick (PERSIST_GAP = 1s) past the initial immediate
+    // one has snapshot a non-zero elapsed. Poll instead of sleeping a fixed
+    // interval so concurrent test load cannot make the wait miss the tick.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(record) = Record::load(&fd).await
+            && record.elapsed >= Duration::from_secs(1)
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the periodic snapshot never recorded an advanced elapsed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     handle.abort();
     let _ = handle.await;
     drop(rx);
@@ -2672,7 +2722,7 @@ async fn test_download_from_fd_reuses_fd_when_part_missing() {
 #[tokio::test]
 async fn test_download_from_fd_reuses_fd_when_part_missing_non_range() {
     let dir = temp_dir("from_fd_missing_part_non_range");
-    let (_server, url) = start_server(original_bytes(), "orig", "LM-A", false).await;
+    let (server, url) = start_server(original_bytes(), "orig", "LM-A", false).await;
 
     let cancel = create_cancellation_token();
     partial_download_via_cancel(&url, &dir, cancel).await;
@@ -2682,6 +2732,10 @@ async fn test_download_from_fd_reuses_fd_when_part_missing_non_range() {
     let fd = final_path.with_added_extension("fd");
     assert!(fd.exists(), "precondition: .fd must exist");
     tokio::fs::remove_file(&part).await.expect("delete .part");
+
+    // The cancel window is no longer needed: this phase just needs the (full,
+    // unavoidable, non-range) re-download to finish, so drop the throttle.
+    server.set_throttle(None).await;
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();

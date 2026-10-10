@@ -432,7 +432,7 @@ async fn cancellation_keeps_state_and_resume_completes() {
     let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 251) as u8).collect();
     // Throttled so the run cannot finish before the cancel lands mid-transfer.
     let (_server, url) =
-        start_server_throttled(payload.clone(), "v1", true, Some(Duration::from_millis(80))).await;
+        start_server_throttled(payload.clone(), "v1", true, Some(Duration::from_millis(15))).await;
     let dir = temp_dir("cancel_resume");
     let (final_path, info) = probe(&url, &dir).await;
     // Seed a *complete* run's worth would finish too fast, so seed nothing and
@@ -449,7 +449,7 @@ async fn cancellation_keeps_state_and_resume_completes() {
     assert!(matches!(&ready.outcome, ResumeOutcome::Fresh));
     let drain = tokio::spawn(run_to_end(rx));
     let watcher = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         cancel.cancel();
     });
     let _handle = ready.start(StartMode::Auto, tx, &ctx);
@@ -659,12 +659,17 @@ async fn ctx_sets_min_chunk_size_midflight() {
 /// Drive both live setters at high frequency through [`RunHandle`] while a
 /// throttled download is in flight, re-pulling whenever a shrink aborts a
 /// worker. The download must still finish and land the exact payload.
+///
+/// The churn loop runs for as long as the transfer is *partial* (it stops once
+/// the sink has the whole payload), so every resize lands on a live pool. A
+/// fixed step count would silently degrade into resizing an already-finished
+/// session once the payload is small enough to outrun the loop.
 #[tokio::test(flavor = "multi_thread")]
 async fn handle_churns_both_setters_midflight() {
-    const SIZE: usize = 16 * 1024 * 1024;
+    const SIZE: usize = 2 * 1024 * 1024;
     let payload: Vec<u8> = (0..SIZE).map(|i| (i % 233) as u8).collect();
     let (_server, url) =
-        start_server_throttled(payload.clone(), "v1", true, Some(Duration::from_millis(5))).await;
+        start_server_throttled(payload.clone(), "v1", true, Some(Duration::from_millis(2))).await;
     let dir = temp_dir("ctx_churn");
 
     let mut cfg = make_config(&dir);
@@ -680,23 +685,51 @@ async fn handle_churns_both_setters_midflight() {
     let final_path = ready.final_path.clone();
 
     let handle = Arc::new(ready.start(StartMode::Auto, tx, &ctx));
-    let drain = tokio::spawn(run_to_end(rx));
+
+    // Drain while tracking how many bytes have reached the sink, so the churn
+    // loops below can tell whether the pool is still live.
+    let written = Arc::new(AtomicU64::new(0));
+    let w = written.clone();
+    let drain = tokio::spawn(async move {
+        while let Ok(event) = rx.recv().await {
+            match event {
+                Event::PushProgress(p) => {
+                    w.fetch_add(p.end - p.start, Ordering::Relaxed);
+                }
+                Event::Terminated(reason) => return reason,
+                _ => {}
+            }
+        }
+        panic!("channel closed without Terminated");
+    });
 
     // Two detached tasks, one per setter, so the two cell writes race the
     // workers independently instead of being serialized by a single churn loop.
     // The values vary so the granularity crosses the split boundary and re-pulls
-    // actually happen.
-    const STEPS: usize = 200;
+    // actually happen. Each task counts the resizes that landed while the
+    // transfer was still in flight; the assertions below require at least one.
+    let size = SIZE as u64;
     let t_handle = handle.clone();
+    let t_written = written.clone();
     let t_churn = tokio::spawn(async move {
-        for i in 0..STEPS {
+        let mut inflight = 0u64;
+        let mut i = 0usize;
+        while t_written.load(Ordering::Relaxed) < size {
             t_handle.set_threads(i % 8 + 1);
-            tokio::time::sleep(Duration::from_millis(3)).await;
+            if t_written.load(Ordering::Relaxed) < size {
+                inflight += 1;
+            }
+            i += 1;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
+        inflight
     });
     let m_handle = handle.clone();
+    let m_written = written.clone();
     let m_churn = tokio::spawn(async move {
-        for i in 0..STEPS {
+        let mut inflight = 0u64;
+        let mut i = 0usize;
+        while m_written.load(Ordering::Relaxed) < size {
             let min = match i % 4 {
                 0 => 1,
                 1 => 512,
@@ -704,13 +737,23 @@ async fn handle_churns_both_setters_midflight() {
                 _ => 64 * 1024,
             };
             m_handle.set_min_chunk_size(min);
-            tokio::time::sleep(Duration::from_millis(3)).await;
+            if m_written.load(Ordering::Relaxed) < size {
+                inflight += 1;
+            }
+            i += 1;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
+        inflight
     });
 
     assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
-    t_churn.await.unwrap();
-    m_churn.await.unwrap();
+    let threads_inflight = t_churn.await.unwrap();
+    let min_inflight = m_churn.await.unwrap();
+    assert!(
+        threads_inflight > 0 && min_inflight > 0,
+        "both setters must land at least one resize while the transfer is live \
+         (threads={threads_inflight}, min_chunk_size={min_inflight})"
+    );
 
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 }
