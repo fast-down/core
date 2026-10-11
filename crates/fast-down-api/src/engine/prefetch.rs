@@ -61,6 +61,7 @@ mod tests {
     use std::time::Duration;
 
     use bytes::Bytes;
+    use fast_down::Proxy;
     use http_body_util::Full;
     use hyper::body::Incoming;
     use hyper::header::{
@@ -93,6 +94,10 @@ mod tests {
         });
         let url = Url::parse(&format!("http://{addr}/never")).unwrap();
         let config = Config {
+            // Bind to the local listener directly: the host's system proxy (if
+            // any) must not intercept loopback traffic, or this would see a
+            // proxy-generated error instead of the dropped connection.
+            proxy: Proxy::No,
             retry_times: 2,
             retry_gap: Duration::ZERO,
             ..Default::default()
@@ -183,7 +188,12 @@ mod tests {
         });
 
         let url = Url::parse(&format!("http://{addr}/file.bin")).unwrap();
-        let config = Config::default();
+        let config = Config {
+            // Talk to the local listener directly; a host system proxy must not
+            // sit between the client and a loopback test server.
+            proxy: Proxy::No,
+            ..Config::default()
+        };
         let (tx, rx) = create_channel();
         let result = prefetch(&url, &config, &tx).await;
 
