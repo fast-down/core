@@ -504,6 +504,14 @@ fn start_session(
 /// Run the session to end: forward events, persist the state periodically, emit
 /// progress, and—once the engine stops—flush the final `.fd` and one terminal
 /// [`Event::Progress`]. Returns the record with its `elapsed` clock advanced.
+///
+/// On a cancel the loop does not break: it stops aborting and keeps draining
+/// events until `recv` sees the channel close, which happens only once every
+/// worker and the push thread have dropped their senders, i.e. once the sink
+/// (and any memory mapping or file handle it holds) is released. Only then does
+/// the run persist the final `.fd` and report `Terminated`, so a caller that
+/// immediately reopens the `.part` (to truncate it, or resume it) cannot race a
+/// still-live mapping — which on Windows fails with `ERROR_USER_MAPPED_FILE`.
 async fn drive_session(
     mut record: Record,
     fd_path: &Path,
@@ -536,10 +544,11 @@ async fn drive_session(
     loop {
         tokio::select! {
             biased;
-            () = token.cancelled() => {
-                res.abort();
-                break;
-            }
+            // Cancel once, then let the loop fall through to draining
+            // `res.recv()`. The guard is what makes this terminate: once fired,
+            // `token.cancelled()` is ready forever, and under `biased` an
+            // unguarded arm would win every poll and never reach `recv`.
+            () = token.cancelled(), if !res.is_aborted() => res.abort(),
             event = res.recv() => match event {
                 Ok(event) => {
                     tracker.observe(&event, Instant::now());
