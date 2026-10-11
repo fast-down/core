@@ -461,6 +461,9 @@ impl EmitPlanError for PlanError {
             Self::Prefetch(e) => tx.send(Event::PrefetchError(e)),
             Self::GenPath(e) => tx.send(Event::GenPathError(e)),
             Self::State(e) => tx.send(Event::ResumeError(e)),
+            // `PlanError` is `#[non_exhaustive]`; new variants must be mapped
+            // to an event here when they are added.
+            other => panic!("unhandled PlanError variant: {other:?}"),
         };
     }
 }

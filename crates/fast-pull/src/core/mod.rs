@@ -193,6 +193,11 @@ where
     ///
     /// `min_chunk_size` is the session's live steal-granularity cell, or `None`
     /// for a single-threaded session (see [`set_min_chunk_size`](Self::set_min_chunk_size)).
+    ///
+    /// Not part of the stable surface: kept reachable only so the allocation
+    /// tests can build a session without going through an entry point that
+    /// spawns tasks.
+    #[doc(hidden)]
     pub fn new(
         event_chain: MAsyncRx<mpmc::List<Event<PullError, PushError>>>,
         task_queue: Option<(E, TaskQueue<E::Handle>)>,

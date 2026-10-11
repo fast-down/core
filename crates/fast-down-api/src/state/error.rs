@@ -2,6 +2,7 @@ use fast_down::{FileId, reqwest::BuildClientError, reqwest::ReqwestResponseError
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StateError {
     #[error(".fd not found: {0}")]
     NotFound(PathBuf),
@@ -32,6 +33,7 @@ pub enum StateError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PlanError {
     #[error("failed to build HTTP client: {0}")]
     BuildClient(#[from] BuildClientError),
