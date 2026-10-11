@@ -10,6 +10,7 @@ use crate::{Task, TaskQueue};
 /// Implement this trait to integrate with any async runtime (e.g. tokio, smol).
 /// The associated [`Handle`] type is used for task cancellation and identification.
 pub trait Executor {
+    /// The runtime-specific handle returned for each spawned worker.
     type Handle: Handle;
     /// Spawns a worker that processes `task` and, once exhausted, refills it via
     /// [`TaskQueue::steal`].
@@ -33,6 +34,7 @@ pub trait Executor {
 
 /// Handle returned by [`Executor::execute`], used to abort or identify a running task.
 pub trait Handle {
+    /// The value that identifies a spawned worker (compared by [`Handle::is_self`]).
     type Id;
     /// Requests cancellation of the worker this handle was returned for.
     ///

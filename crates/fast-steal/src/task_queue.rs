@@ -10,7 +10,18 @@ extern crate alloc;
 use crate::{Executor, Handle, Task, WeakTask};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use core::ops::Range;
+// The queue's critical sections are short and synchronous (a few `VecDeque`
+// operations, never held across an await), so both locks are safe. With `std`
+// the queue uses `parking_lot` (parks waiting threads instead of spinning); on
+// `no_std` (the `spin` feature) it uses `spin`. Exactly one backend is required.
+#[cfg(feature = "std")]
 use parking_lot::Mutex;
+#[cfg(all(not(feature = "std"), feature = "spin"))]
+use spin::Mutex;
+#[cfg(not(any(feature = "std", feature = "spin")))]
+compile_error!(
+    "fast-steal needs a lock backend: enable the default `std` feature, or `spin` for `no_std`"
+);
 
 /// A concurrent work-stealing queue that manages a set of [`Task`]s.
 ///

@@ -3,6 +3,7 @@ name = "fast-steal"
 version = "7.0.0"
 authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "An ultra-fast multi-threaded task scheduler with fine-grained work stealing"
 documentation = "https://docs.rs/fast-steal"
 homepage.workspace = true
@@ -11,9 +12,30 @@ license.workspace = true
 keywords = ["concurrency", "no-std", "parallel", "performance", "thread"]
 categories = ["concurrency", "no-std"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
-parking_lot.workspace = true
+parking_lot = { workspace = true, optional = true }
 portable-atomic = "1.0"
+spin = { version = "0.12", default-features = false, features = [
+    "mutex",
+    "spin_mutex",
+], optional = true }
+
+[features]
+default = ["std"]
+# Exactly one lock backend must be selected (they are mutually exclusive; CI
+# passes `--mutually-exclusive-features std,spin --at-least-one-of std,spin`).
+#
+# `std` (default) backs the queue with `parking_lot::Mutex`, a blocking lock that
+# parks waiting threads. On `no_std`, disable default features and enable `spin`
+# to use `spin::Mutex` instead. `spin` cannot be an implicit always-on fallback:
+# cargo features are additive, so there is no way to say "enable spin when std is
+# off", and leaving `spin` non-optional makes cargo warn `unused dependency`
+# (and fails the udeps job) on every `std` build.
+std = ["dep:parking_lot"]
+spin = ["dep:spin"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
