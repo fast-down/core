@@ -434,6 +434,14 @@ async fn resolve_target(
         paths::claim_pair(final_path, tx).await?
     };
 
+    // Fold the configuration into a difference against the crate defaults before
+    // the first write: `build` restores those defaults on load, so the `.fd`
+    // keeps only the fields that differ from them. Done here once so the
+    // periodic saves in `drive_session` — which re-serialize this same record —
+    // stay lean too. `build` is unaffected: it maps every `None` back to the
+    // very default the field was compared against.
+    record.simplify_from(&PartialConfig::default());
+
     if let Err(e) = record.store(&fd_path).await {
         let _ = tx.send(Event::StateSaveError(e));
         return Err(TerminationReason::Failed);

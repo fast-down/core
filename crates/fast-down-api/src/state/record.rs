@@ -221,6 +221,21 @@ impl Record {
         merged.inherit_from(&self.config);
         self.config = merged;
     }
+
+    /// Fold this record's configuration into a difference against `parent`,
+    /// turning any field equal to `parent`'s value into `None`.
+    ///
+    /// `parent` must be the layer [`ConfigLayer::build`] falls back to — the
+    /// crate defaults ([`PartialConfig::default`]) — so the stripped fields are
+    /// exactly the ones `build` restores. This keeps the `.fd` lean: a caller
+    /// that hands in a fully-populated [`PartialConfig`] (the common case)
+    /// persists only the fields that differ from the defaults.
+    ///
+    /// Only `config` is touched: `url`, the identity headers, `size` and
+    /// `elapsed` stay as-is.
+    pub fn simplify_from(&mut self, parent: &PartialConfig) {
+        self.config.simplify_from(parent);
+    }
 }
 
 /// What the `.part` paired with a [`Record`] looks like on disk.
@@ -393,6 +408,30 @@ mod tests {
         record.merge_config(&caller);
 
         assert_eq!(record.config.threads, Some(9), "caller overrides must win");
+    }
+
+    #[test]
+    fn simplify_from_strips_defaults_and_keeps_differences() {
+        // A fully-populated caller config: only the fields that differ from the
+        // crate defaults must survive into the `.fd`.
+        let mut record = record_with(100, "e");
+        record.config = PartialConfig {
+            parse_filename: Some(false),         // == default -> stripped
+            filename: Some("custom.bin".into()), // differs    -> kept
+            ..Default::default()
+        };
+
+        record.simplify_from(&PartialConfig::default());
+
+        assert_eq!(
+            record.config.parse_filename, None,
+            "a field equal to the default must be dropped"
+        );
+        assert_eq!(
+            record.config.filename.as_deref(),
+            Some("custom.bin"),
+            "a field differing from the default must be kept"
+        );
     }
 
     #[tokio::test]
