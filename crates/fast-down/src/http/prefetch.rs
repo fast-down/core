@@ -26,6 +26,7 @@ pub type PrefetchResult<Client> =
 /// Implementors perform a GET request to gather [`UrlInfo`] and
 /// the initial response for subsequent downloading.
 pub trait Prefetch<Client: HttpClient> {
+    /// Fetch the resource metadata and the initial response for `url`.
     fn prefetch(&self, url: Url) -> impl Future<Output = PrefetchResult<Client>> + Send;
 }
 

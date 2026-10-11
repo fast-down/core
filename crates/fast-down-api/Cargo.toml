@@ -3,6 +3,7 @@ name = "fast-down-api"
 version = "0.1.1"
 authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "A convenient and easy-to-use FFI wrapper for fast-down"
 documentation = "https://docs.rs/fast-down-api"
 homepage.workspace = true
@@ -10,6 +11,9 @@ repository.workspace = true
 license.workspace = true
 keywords = ["concurrency", "downloader", "parallel", "performance", "thread"]
 categories = ["network-programming"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 fast-down = { workspace = true, features = [

@@ -13,9 +13,12 @@ use std::ops::Deref;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Proxy<T> {
+    /// Never use a proxy.
     No,
+    /// Use the platform-configured system proxy.
     #[default]
     System,
+    /// Use the given custom proxy URL.
     Custom(T),
 }
 

@@ -11,6 +11,7 @@ use url::Url;
 /// Errors that can occur when getting a header value from a reqwest response.
 #[derive(thiserror::Error, Debug)]
 pub enum ReqwestGetHeaderError {
+    /// The requested header is not present.
     #[error("Header not found")]
     NotFound,
 }

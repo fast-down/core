@@ -3,6 +3,7 @@ name = "fast-pull"
 version = "6.0.1"
 authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Pull everything fast"
 documentation = "https://docs.rs/fast-pull"
 homepage.workspace = true
@@ -10,6 +11,9 @@ repository.workspace = true
 license.workspace = true
 keywords = ["concurrency", "fast", "multiplex", "parallel", "performance"]
 categories = ["asynchronous", "concurrency"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 bytes.workspace = true

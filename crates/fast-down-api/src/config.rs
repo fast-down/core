@@ -9,8 +9,10 @@ use std::{collections::HashMap, net::IpAddr, path::PathBuf, time::Duration};
 /// - `Std`: buffered standard file I/O
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum WriteMethod {
+    /// Memory-mapped I/O (fastest, default).
     #[default]
     Mmap,
+    /// Buffered standard file I/O.
     Std,
 }
 
@@ -18,6 +20,9 @@ pub enum WriteMethod {
 ///
 /// All fields have sensible defaults; see [`Config::default`] for values.
 #[derive(Debug, Clone, Serialize, Deserialize, InheritConfig)]
+#[config(partial_attr(
+    doc = "Layered, optional configuration for a download.\n\nUnset fields fall back to [`Config::default`]."
+))]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     /// 保存的文件夹

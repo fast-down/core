@@ -34,6 +34,7 @@ pub fn build_mock_data(size: usize) -> Vec<u8> {
 #[derive(Debug, Clone)]
 pub struct MockPuller(pub Arc<[u8]>);
 impl MockPuller {
+    /// Wrap a byte slice as an in-memory puller.
     #[must_use]
     pub fn new(data: &[u8]) -> Self {
         Self(Arc::from(data))

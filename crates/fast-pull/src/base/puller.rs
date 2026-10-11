@@ -26,6 +26,7 @@ pub type PullResult<T, E> = Result<T, (E, Option<Duration>)>;
 /// Implementors produce a [`PullStream`] of bytes, optionally restricted to a
 /// specific byte range. Cloning is required for retry and work-stealing scenarios.
 pub trait Puller: Send + Sync + Clone + 'static {
+    /// Error produced while pulling.
     type Error: PullerError;
     /// Pull a (sub)range of the source as a stream of byte chunks.
     ///

@@ -25,7 +25,9 @@ use url::Url;
 /// whether the record already carries remote identity and progress.
 #[derive(Debug, Clone)]
 pub struct State {
+    /// The persisted record (identity, config, progress).
     pub record: Record,
+    /// The `.fd` location, pinned by [`State::load`]; `None` until resolved.
     pub fd_path: Option<PathBuf>,
 }
 

@@ -78,7 +78,9 @@ const fn is_link_local(ip: &IpAddr) -> bool {
 /// A network interface with its name and assigned IP address.
 #[derive(Debug)]
 pub struct InterfaceInfo {
+    /// The interface's OS name (e.g. `eth0`, `en0`).
     pub name: String,
+    /// The interface's assigned IP address.
     pub ip: IpAddr,
 }
 

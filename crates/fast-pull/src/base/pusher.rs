@@ -15,6 +15,7 @@ pub type ProgressListener = Box<dyn FnMut(ProgressEntry) + Send + 'static>;
 ///
 /// The pusher writes data to its destination and can optionally flush.
 pub trait Pusher: Send + 'static {
+    /// Error produced while pushing.
     type Error: std::error::Error + Send + Sync + Unpin + 'static;
     /// Write `content` covering the given `range` to the destination.
     ///
@@ -89,11 +90,13 @@ impl<P: Pusher> Pusher for PusherAdapter<P> {
 }
 
 impl BoxPusher {
+    /// Box a concrete [`Pusher`], erasing its error type.
     pub fn new<P: Pusher>(pusher: P) -> Self {
         Self {
             pusher: Box::new(PusherAdapter { inner: pusher }),
         }
     }
+    /// Box an error into the type-erased `AnyError` form used by [`BoxPusher`].
     pub fn upcast<E: AnyError>(e: E) -> Box<dyn AnyError> {
         Box::new(e)
     }

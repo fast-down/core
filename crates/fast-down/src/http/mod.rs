@@ -33,26 +33,39 @@ use url::Url;
 
 /// Abstraction over an HTTP client that can send GET requests with optional byte-range headers.
 pub trait HttpClient: Clone + Send + Sync + Unpin + 'static {
+    /// The request builder this client produces.
     type RequestBuilder: HttpRequestBuilder;
+    /// Start a GET request, optionally restricted to `range`.
     fn get(&self, url: Url, range: Option<ProgressEntry>) -> Self::RequestBuilder;
 }
 /// Abstraction over an HTTP request builder that can be sent to produce a response.
 pub trait HttpRequestBuilder {
+    /// The response type produced on success.
     type Response: HttpResponse;
+    /// The error type for a failed send.
     type RequestError: std::error::Error + Send + Sync + Unpin;
+    /// Send the request, producing a response or a retryable error.
     fn send(self) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> + Send;
 }
 /// Abstraction over an HTTP response that provides headers, final URL, and chunked body reading.
 pub trait HttpResponse: Send + Sync + Debug + Unpin {
+    /// The response's header map type.
     type Headers: HttpHeaders;
+    /// The error type produced while reading a body chunk.
     type ChunkError: std::error::Error + Send + Sync + Unpin;
+    /// The response headers.
     fn headers(&self) -> &Self::Headers;
+    /// The URL the response was served from, after redirects.
     fn url(&self) -> &Url;
+    /// Read the next body chunk, or `None` at end of body.
     fn chunk(&mut self) -> impl Future<Output = Result<Option<Bytes>, Self::ChunkError>> + Send;
 }
 /// Abstraction over HTTP response headers, providing typed get-by-name access.
 pub trait HttpHeaders {
+    /// The error type for a failed header lookup.
     type GetHeaderError: std::error::Error + Send + Sync + Unpin;
+    /// Get a header value by name.
+    ///
     /// # Errors
     /// Returns an error if the header cannot be retrieved
     fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError>;
@@ -77,12 +90,16 @@ pub type GetHeaderError<Client> = <GetHeader<Client> as HttpHeaders>::GetHeaderE
 /// detecting mismatched file identity, and irrecoverable failures.
 #[derive(thiserror::Error)]
 pub enum HttpError<Client: HttpClient> {
+    /// The HTTP request failed to send.
     #[error("HTTP request failed: {0:?}")]
     Request(GetRequestError<Client>),
+    /// Reading a response body chunk failed.
     #[error("HTTP chunk read failed: {0:?}\n  response: {1:?}")]
     Chunk(GetChunkError<Client>, GetResponse<Client>),
+    /// A pull failure the engine must not retry.
     #[error("irrecoverable pull error")]
     Irrecoverable,
+    /// The response's file identity did not match the expected one.
     #[error("body mismatch: expected file {0:?}, got different content\n  response: {1:?}")]
     MismatchedBody(FileId, GetResponse<Client>),
 }

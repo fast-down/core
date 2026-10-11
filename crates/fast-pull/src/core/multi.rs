@@ -17,15 +17,23 @@ use tokio_util::sync::CancellationToken;
 /// Controls chunk splitting, speculation, pull timeouts, and write queue capacity.
 #[derive(Debug, Clone)]
 pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
+    /// Initial byte ranges to download, each an independent unit of work.
     pub download_chunks: I,
+    /// Number of concurrent workers.
     pub concurrent: usize,
+    /// Delay before retrying a failed pull or push.
     pub retry_gap: Duration,
+    /// Maximum time to wait for bytes before aborting and re-pulling a range.
     pub pull_timeout: Duration,
+    /// Capacity of the bounded pull→push queue; backpressure when full.
     pub push_queue_cap: usize,
+    /// Minimum size (bytes) of a range handed to a worker when stealing.
     pub min_chunk_size: u64,
+    /// Maximum number of workers allowed to speculatively share one range.
     pub max_speculative: usize,
 }
 
+/// Start a multi-threaded concurrent download with work-stealing.
 pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     puller: R,
     mut pusher: W,

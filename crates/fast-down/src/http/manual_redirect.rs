@@ -26,17 +26,26 @@ fn referer_url(url: &Url) -> String {
 /// redirect following, in accordance with RFC 9110 §7.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReferrerPolicy {
+    /// Send no referrer at all.
     NoReferrer,
+    /// Send the referrer except when downgrading HTTPS to HTTP.
     NoReferrerWhenDowngrade,
+    /// Send only the origin (scheme, host, port).
     Origin,
+    /// Send the origin for cross-origin requests, the full URL otherwise.
     OriginWhenCrossOrigin,
+    /// Send the full URL for same-origin requests, nothing otherwise.
     SameOrigin,
+    /// Send only the origin, but never on downgrade.
     StrictOrigin,
+    /// Send the origin cross-origin, the full URL same-origin, never on downgrade.
     StrictOriginWhenCrossOrigin,
+    /// Always send the full URL, even on downgrade.
     UnsafeUrl,
 }
 
 impl ReferrerPolicy {
+    /// Parse a `Referrer-Policy` header value, returning the last valid token.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         let mut last = None;

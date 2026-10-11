@@ -23,7 +23,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use fast_down_api::{
     Ctx, Event, PartialConfig, PlanError, Record, Rx, StartMode, State, StateError,
-    TerminationReason, Tx, WriteMethod, create_cancellation_token, create_channel,
+    TerminationReason, Tx, WriteMethod, create_channel,
 };
 use futures::StreamExt;
 use futures::stream::unfold;
@@ -575,7 +575,7 @@ async fn test_resume_success() {
     let dir = temp_dir("resume_success");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -590,7 +590,7 @@ async fn test_resume_success() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let resume_cancel = create_cancellation_token();
+    let resume_cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -639,7 +639,7 @@ async fn test_file_changed_download_falls_back() {
     let dir = temp_dir("file_changed_download");
     let (server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
     // The `.fd` now records the ORIGINAL etag/size.
 
@@ -647,7 +647,7 @@ async fn test_file_changed_download_falls_back() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let dl_cancel = create_cancellation_token();
+    let dl_cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, dl_cancel);
     let events = drain(rx).await;
 
@@ -679,7 +679,7 @@ async fn test_file_changed_resume_reports_error() {
     let dir = temp_dir("file_changed_resume");
     let (server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
     server.set_content(new_bytes(), "new", "LM-B").await;
 
@@ -688,7 +688,7 @@ async fn test_file_changed_resume_reports_error() {
     let fd = final_path.with_added_extension("fd");
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let resume_cancel = create_cancellation_token();
+    let resume_cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -738,7 +738,7 @@ async fn test_resume_no_state_file() {
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -773,14 +773,14 @@ async fn test_resume_not_resumable() {
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", false).await;
     // A cancelled download leaves a valid `.fd` + `.part` for the non-range
     // server; `resume()` must then report `NotResumable` (server can't range).
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
     let part = final_path.with_added_extension("part");
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -810,7 +810,7 @@ async fn test_cancel_keeps_part_and_fd_then_resume() {
     let dir = temp_dir("cancel_keeps_state");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -836,7 +836,7 @@ async fn test_cancel_keeps_part_and_fd_then_resume() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let resume_cancel = create_cancellation_token();
+    let resume_cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -890,7 +890,7 @@ async fn test_concurrent_resume_with_fragmented_progress() {
     // 8 workers over 64 KiB chunks each start at a different offset, so the
     // persisted progress is non-contiguous. Cancelling only after six chunks'
     // worth of bytes have landed guarantees several distinct ranges.
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel_with(
         &url,
         make_config_with(&dir, 8, 64 * 1024),
@@ -918,7 +918,7 @@ async fn test_concurrent_resume_with_fragmented_progress() {
     );
 
     let (tx, rx) = create_channel();
-    let resume_cancel = create_cancellation_token();
+    let resume_cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -963,7 +963,7 @@ async fn test_resume_with_rotated_url_succeeds() {
     // Seed a real, interrupted concurrent download against the *initial* URL.
     // `DownloadState::new` records `state.url = initial_url`, so the `.fd` holds
     // the durable initial URL, never the resolved final URL.
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel_with(
         &initial_url,
         make_config(&dir),
@@ -1001,7 +1001,7 @@ async fn test_resume_with_rotated_url_succeeds() {
     // the design invariant.
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let resume_cancel = create_cancellation_token();
+    let resume_cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&initial_url).expect("valid url")),
@@ -1046,7 +1046,7 @@ async fn test_resume_with_rotated_url_succeeds() {
     // only redirects and would otherwise cost a redirect round-trip per range).
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let resume_cancel = create_cancellation_token();
+    let resume_cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&initial_url).expect("valid url")),
@@ -1099,7 +1099,7 @@ async fn test_resume_missing_tmp_path_falls_back_to_download() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -1143,7 +1143,7 @@ async fn test_fresh_download_writes_full_file() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = drain(rx).await;
 
@@ -1195,7 +1195,7 @@ async fn test_progress_event_emitted() {
     cfg.progress_emit_gap = Some(Duration::from_millis(30));
 
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = drain(rx).await;
 
@@ -1356,7 +1356,7 @@ async fn test_progress_disabled_still_emits_terminal() {
     cfg.progress_emit_gap = Some(Duration::ZERO);
 
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = drain(rx).await;
 
@@ -1395,7 +1395,7 @@ async fn test_progress_elapsed_persisted_across_resume() {
     let dir = temp_dir("progress_elapsed_resume");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     let partial_events = partial_download_via_cancel(&url, &dir, cancel).await;
 
     let partial_elapsed_max = partial_events
@@ -1417,7 +1417,7 @@ async fn test_progress_elapsed_persisted_across_resume() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let resume_cancel = create_cancellation_token();
+    let resume_cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -1548,7 +1548,7 @@ async fn test_download_join_resolves() {
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = drain(rx).await;
     assert!(
@@ -1582,7 +1582,7 @@ async fn test_handle_join_completes() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
 
     let events = timeout(Duration::from_secs(30), drain(rx))
@@ -1601,7 +1601,7 @@ async fn test_download_silent_resume_overwrite() {
     let dir = temp_dir("silent_resume_overwrite");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -1614,7 +1614,7 @@ async fn test_download_silent_resume_overwrite() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel2 = create_cancellation_token();
+    let cancel2 = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel2);
     let events = timeout(Duration::from_secs(30), drain(rx))
         .await
@@ -1643,7 +1643,7 @@ async fn test_download_resume_without_overwrite() {
     let dir = temp_dir("resume_no_overwrite");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     let cfg1 = make_config_no_overwrite(&dir);
     partial_download_via_cancel_with(&url, cfg1, cancel, CANCEL_AFTER_BYTES).await;
 
@@ -1657,7 +1657,7 @@ async fn test_download_resume_without_overwrite() {
 
     let cfg2 = make_config_no_overwrite(&dir);
     let (tx, rx) = create_channel();
-    let cancel2 = create_cancellation_token();
+    let cancel2 = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg2, tx, cancel2);
     let events = timeout(Duration::from_secs(30), drain(rx))
         .await
@@ -1689,7 +1689,7 @@ async fn test_resume_with_directory_part_fails_pipeline() {
     let dir = temp_dir("resume_dir_part");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
     let final_path = dir.join("out.bin");
     let part = final_path.with_added_extension("part");
@@ -1702,7 +1702,7 @@ async fn test_resume_with_directory_part_fails_pipeline() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel2 = create_cancellation_token();
+    let cancel2 = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -1769,7 +1769,7 @@ async fn test_prefetch_retries_then_gives_up() {
     cfg.retry_gap = Some(Duration::from_millis(10));
 
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = timeout(Duration::from_secs(20), drain(rx))
         .await
@@ -1803,7 +1803,7 @@ async fn test_progress_zero_total_file() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = timeout(Duration::from_secs(20), drain(rx))
         .await
@@ -1850,7 +1850,7 @@ async fn test_corrupt_fd_silently_redownloads() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = timeout(Duration::from_secs(30), drain(rx))
         .await
@@ -1880,7 +1880,7 @@ async fn test_missing_part_with_valid_fd_silently_redownloads() {
     let dir = temp_dir("missing_part");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -1891,7 +1891,7 @@ async fn test_missing_part_with_valid_fd_silently_redownloads() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel2 = create_cancellation_token();
+    let cancel2 = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel2);
     let events = timeout(Duration::from_secs(30), drain(rx))
         .await
@@ -1917,7 +1917,7 @@ async fn test_resume_disabled_ignores_valid_state() {
     let dir = temp_dir("resume_disabled");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -1927,7 +1927,7 @@ async fn test_resume_disabled_ignores_valid_state() {
     let mut cfg = make_config(&dir);
     cfg.resume = Some(false);
     let (tx, rx) = create_channel();
-    let cancel2 = create_cancellation_token();
+    let cancel2 = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel2);
     let events = timeout(Duration::from_secs(30), drain(rx))
         .await
@@ -1966,7 +1966,7 @@ async fn test_non_overwrite_stray_part_advances_iter_stem() {
 
     let cfg = make_config_no_overwrite(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = timeout(Duration::from_secs(30), drain(rx))
         .await
@@ -2015,7 +2015,7 @@ async fn test_resume_corrupt_fd_reports_decode_error() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -2054,7 +2054,7 @@ async fn test_resume_respects_overwrite_config() {
     let dir = temp_dir("resume_overwrite_config");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -2067,7 +2067,7 @@ async fn test_resume_respects_overwrite_config() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let resume_cancel = create_cancellation_token();
+    let resume_cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -2105,7 +2105,7 @@ async fn test_resume_overrides_user_resume_false() {
     let dir = temp_dir("resume_forces_true");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -2115,7 +2115,7 @@ async fn test_resume_overrides_user_resume_false() {
     let mut cfg = make_config(&dir);
     cfg.resume = Some(false);
     let (tx, rx) = create_channel();
-    let resume_cancel = create_cancellation_token();
+    let resume_cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -2153,7 +2153,7 @@ async fn test_rename_failed_when_final_path_is_directory() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = timeout(Duration::from_secs(60), drain(rx))
         .await
@@ -2191,7 +2191,7 @@ async fn test_overwrite_true_replaces_existing_final_file() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = timeout(Duration::from_secs(60), drain(rx))
         .await
@@ -2232,7 +2232,7 @@ async fn test_invalid_proxy_reports_build_client_error() {
         "not a valid url".to_string(),
     ));
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = timeout(Duration::from_secs(30), drain(rx))
         .await
@@ -2291,7 +2291,7 @@ async fn test_non_overwrite_create_new_fatal_error_reports_not_hangs() {
         ..Default::default()
     };
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
 
     // Guard against the pre-fix infinite loop: a hung task never closes the
@@ -2330,7 +2330,7 @@ async fn test_resume_without_url_uses_fd_url() {
     let dir = temp_dir("resume_no_url_fd");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -2344,7 +2344,7 @@ async fn test_resume_without_url_uses_fd_url() {
     // Resume with NO url: must auto-use the `.fd`'s stored initial URL.
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let resume_cancel = create_cancellation_token();
+    let resume_cancel = CancellationToken::new();
     resume(part.clone(), None, cfg, tx, resume_cancel);
     let events = drain(rx).await;
 
@@ -2378,7 +2378,7 @@ async fn test_resume_without_url_missing_tmp_path_errors() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     resume(part.clone(), None, cfg, tx, cancel);
     let events = drain(rx).await;
 
@@ -2419,7 +2419,7 @@ async fn test_resume_without_url_and_fd_has_no_url_errors() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     resume(part.clone(), None, cfg, tx, cancel);
     let events = drain(rx).await;
 
@@ -2449,7 +2449,7 @@ async fn test_resume_truncated_part_falls_back_to_fresh_download() {
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
     // Start a partial download
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -2482,7 +2482,7 @@ async fn test_resume_truncated_part_falls_back_to_fresh_download() {
     // is smaller than the recorded progress
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let resume_cancel = create_cancellation_token();
+    let resume_cancel = CancellationToken::new();
     resume(
         part.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -2526,7 +2526,7 @@ async fn test_resume_rejects_non_part_extension() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
 
     // This should return an error because tmp_path doesn't end with .part
     resume(
@@ -2591,7 +2591,7 @@ async fn download_creates_template_subdir() {
         ..Default::default()
     };
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download(Url::parse(&url).expect("valid url"), cfg, tx, cancel);
     let events = drain(rx).await;
 
@@ -2623,7 +2623,7 @@ async fn test_download_from_fd_resumes_when_part_present() {
     let dir = temp_dir("from_fd_resume");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -2636,7 +2636,7 @@ async fn test_download_from_fd_resumes_when_part_present() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel2 = create_cancellation_token();
+    let cancel2 = CancellationToken::new();
     download_from_fd(
         fd.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -2672,7 +2672,7 @@ async fn test_download_from_fd_reuses_fd_when_part_missing() {
     let dir = temp_dir("from_fd_missing_part");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -2685,7 +2685,7 @@ async fn test_download_from_fd_reuses_fd_when_part_missing() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel2 = create_cancellation_token();
+    let cancel2 = CancellationToken::new();
     download_from_fd(
         fd.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -2727,7 +2727,7 @@ async fn test_download_from_fd_reuses_fd_when_part_missing_non_range() {
     let dir = temp_dir("from_fd_missing_part_non_range");
     let (server, url) = start_server(original_bytes(), "orig", "LM-A", false).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -2742,7 +2742,7 @@ async fn test_download_from_fd_reuses_fd_when_part_missing_non_range() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel2 = create_cancellation_token();
+    let cancel2 = CancellationToken::new();
     download_from_fd(
         fd.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -2783,7 +2783,7 @@ async fn test_download_from_fd_missing_fd_reports_error() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     download_from_fd(
         fd.clone(),
         Some(Url::parse(&url).expect("valid url")),
@@ -2820,7 +2820,7 @@ async fn test_download_from_fd_uses_fd_url_when_none_given() {
     let dir = temp_dir("from_fd_url_none");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
 
-    let cancel = create_cancellation_token();
+    let cancel = CancellationToken::new();
     partial_download_via_cancel(&url, &dir, cancel).await;
 
     let final_path = dir.join("out.bin");
@@ -2830,7 +2830,7 @@ async fn test_download_from_fd_uses_fd_url_when_none_given() {
 
     let cfg = make_config(&dir);
     let (tx, rx) = create_channel();
-    let cancel2 = create_cancellation_token();
+    let cancel2 = CancellationToken::new();
     // No url: the `.fd` must supply the durable initial URL.
     download_from_fd(fd.clone(), None, cfg, tx, cancel2);
     let events = timeout(Duration::from_secs(30), drain(rx))

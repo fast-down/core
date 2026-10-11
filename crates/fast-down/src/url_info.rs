@@ -42,6 +42,7 @@ pub struct UrlInfo {
 
 #[cfg(feature = "sanitize-filename")]
 impl UrlInfo {
+    /// The suggested filename, sanitized for filesystem use and truncated to 255.
     #[must_use]
     pub fn filename(&self) -> String {
         path_helper::sanitize_filename(&self.raw_name, 255)

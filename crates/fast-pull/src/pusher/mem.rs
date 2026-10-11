@@ -11,6 +11,7 @@ use std::{sync::Arc, vec::Vec};
 /// Supports random-access writes via `copy_from_slice` for non-sequential ranges.
 #[derive(Default)]
 pub struct MemPusher {
+    /// The shared buffer the pusher writes into.
     pub receive: Arc<Mutex<Vec<u8>>>,
     listener: Option<ProgressListener>,
 }
@@ -23,6 +24,7 @@ impl Clone for MemPusher {
     }
 }
 impl MemPusher {
+    /// Create an empty in-memory pusher.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -30,6 +32,7 @@ impl MemPusher {
             listener: None,
         }
     }
+    /// Create an in-memory pusher with a pre-allocated buffer of `capacity` bytes.
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {

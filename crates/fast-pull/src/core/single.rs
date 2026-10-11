@@ -13,7 +13,9 @@ use tokio_util::sync::CancellationToken;
 /// Options for a single-threaded download.
 #[derive(Debug, Clone, Copy)]
 pub struct DownloadOptions {
+    /// Delay before retrying a failed pull or push.
     pub retry_gap: Duration,
+    /// Capacity of the bounded pull→push queue; backpressure when full.
     pub push_queue_cap: usize,
 }
 

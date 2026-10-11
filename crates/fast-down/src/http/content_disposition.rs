@@ -13,9 +13,11 @@ use std::{iter::Peekable, str::Chars};
 /// encoding. When both are present, `filename*` takes precedence.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ContentDisposition {
+    /// The filename parameter, if the header carried one.
     pub filename: Option<String>,
 }
 impl ContentDisposition {
+    /// Parse a `Content-Disposition` header value.
     #[must_use]
     pub fn parse(header_value: &str) -> Self {
         let mut filename = None;

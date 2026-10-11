@@ -43,7 +43,7 @@ jobs:
       - name: Run Clippy
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo hack clippy --all-targets --feature-powerset
+        run: cargo hack clippy --all-targets --feature-powerset --mutually-exclusive-features std,spin --at-least-one-of std,spin
 
   test:
     name: Test (${{ matrix.os }} - ${{ matrix.channel }})
@@ -71,7 +71,7 @@ jobs:
         with:
           tool: cargo-hack
       - name: Run Tests
-        run: cargo hack test --feature-powerset --depth 1 --verbose
+        run: cargo hack test --feature-powerset --depth 1 --verbose --mutually-exclusive-features std,spin --at-least-one-of std,spin
       - name: Run Tests (all features)
         run: cargo test --all-features --verbose
 
@@ -115,7 +115,7 @@ jobs:
         with:
           tool: cargo-hack,cargo-udeps
       - name: Run Udeps
-        run: cargo hack udeps --feature-powerset
+        run: cargo hack udeps --feature-powerset --mutually-exclusive-features std,spin --at-least-one-of std,spin
 
   docs:
     name: Doc Check
@@ -138,7 +138,7 @@ jobs:
       - name: Run Doc Check
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo hack doc --feature-powerset --depth 1 --no-deps
+        run: cargo hack doc --feature-powerset --depth 1 --no-deps --mutually-exclusive-features std,spin --at-least-one-of std,spin
       - name: Run Doc Check (all features)
         env:
           RUSTDOCFLAGS: "-D warnings"

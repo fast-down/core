@@ -17,12 +17,17 @@ use url::Url;
 pub struct Record {
     /// The durable initial URL (never a transient redirect target).
     pub url: Url,
+    /// The merged configuration, including the recorded progress.
     #[serde(default)]
     pub config: PartialConfig,
+    /// The remote file size recorded at the time of writing.
     #[serde(default)]
     pub size: u64,
+    /// The `ETag` recorded at the time of writing, if any.
     pub etag: Option<Arc<str>>,
+    /// The `Last-Modified` recorded at the time of writing, if any.
     pub last_modified: Option<Arc<str>>,
+    /// Active download time accumulated across runs.
     #[serde(default, with = "humantime_serde")]
     pub elapsed: Duration,
 }
@@ -244,7 +249,12 @@ pub enum PartState {
     /// No regular file at the derived path: nothing safe to continue from.
     Missing,
     /// The file exists but is shorter than the recorded progress.
-    Short { actual: u64, recorded: u64 },
+    Short {
+        /// Actual `.part` size on disk.
+        actual: u64,
+        /// Size implied by the recorded progress.
+        recorded: u64,
+    },
     /// The file exists and is at least as long as the recorded progress.
     Ready,
 }

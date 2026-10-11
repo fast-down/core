@@ -123,7 +123,7 @@ impl Ctx {
     /// Create a control handle with a fresh cancellation token.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_token(crate::create_cancellation_token())
+        Self::with_token(CancellationToken::new())
     }
 
     /// Create a control handle around an existing cancellation token.

@@ -95,16 +95,22 @@ pub enum Event {
     /// `PullProgress`/`PushProgress` hot path. `Start` fires once per run, so the
     /// one extra allocation is negligible next to shrinking `Event` by ~60%.
     Start {
+        /// The `.part` file being written.
         tmp_path: PathBuf,
+        /// The `.fd` state-file being written.
         config_path: PathBuf,
+        /// The resolved [`PartialConfig`] actually used for this run.
         parsed_config: Box<PartialConfig>,
     },
     /// Emitted when a download resumes from a previously-saved state, before
     /// [`Event::Start`]. Carries the progress that will be continued from and
     /// the total file size, so a UI can show e.g. "resuming from 42%".
     Resumed {
+        /// The `.fd` state file the resume continues from.
         config_path: PathBuf,
+        /// The byte ranges already recorded.
         progress: Vec<ProgressEntry>,
+        /// The remote file size.
         size: u64,
     },
     /// Emitted when an explicit `resume()` call cannot continue the download.
@@ -171,7 +177,7 @@ pub enum TerminationReason {
     /// Every byte was written and the `.part` file was renamed into place.
     /// [`Event::Renamed`] carries the path it landed on.
     Completed,
-    /// The [`CancellationToken`](crate::create_cancellation_token) was
+    /// The [`CancellationToken`](crate::CancellationToken) was
     /// triggered. The `.part` and `.fd` files are left on disk so a later
     /// resume can pick up where this run stopped.
     Cancelled,
