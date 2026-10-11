@@ -12,7 +12,7 @@ use crate::Proxy;
 use crate::{
     FileId, ProgressEntry, PullResult, PullStream,
     http::{HttpError, HttpPuller, ReferrerPolicy},
-    reqwest::SmartRedirectClient,
+    reqwest::{BuildClientError, SmartRedirectClient},
 };
 use fast_pull::Puller;
 use parking_lot::Mutex;
@@ -21,8 +21,8 @@ use std::sync::Arc;
 use url::Url;
 
 /// # Errors
-/// Returns an error if the HTTP client cannot be built (invalid proxy URL,
-/// TLS backend failure, or other `reqwest::ClientBuilder` errors).
+/// Returns [`BuildClientError`] if the HTTP client cannot be built (invalid
+/// proxy URL, TLS backend failure, or other `reqwest::ClientBuilder` errors).
 pub fn build_client(
     mut headers: HeaderMap,
     proxy: Proxy<&str>,
@@ -31,7 +31,7 @@ pub fn build_client(
     #[allow(unused)] cookie_store: bool,
     local_addr: Option<std::net::IpAddr>,
     max_redirects: usize,
-) -> Result<SmartRedirectClient, reqwest::Error> {
+) -> Result<SmartRedirectClient, BuildClientError> {
     let referer = headers.remove("referer");
     let referrer_policy = headers
         .remove("referrer-policy")
@@ -121,9 +121,9 @@ pub struct FastDownPullerOptions<'a> {
 
 impl FastDownPuller {
     /// # Errors
-    /// Returns an error if the underlying HTTP client cannot be built (invalid
-    /// proxy, TLS setup failure, etc.).
-    pub fn new(option: FastDownPullerOptions<'_>) -> Result<Self, reqwest::Error> {
+    /// Returns [`BuildClientError`] if the underlying HTTP client cannot be
+    /// built (invalid proxy, TLS setup failure, etc.).
+    pub fn new(option: FastDownPullerOptions<'_>) -> Result<Self, BuildClientError> {
         let turn = Arc::new(std::sync::atomic::AtomicUsize::new(1));
         let available_ips = option.available_ips;
         let client = build_client(

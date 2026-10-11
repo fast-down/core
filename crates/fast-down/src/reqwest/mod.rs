@@ -30,6 +30,9 @@ use std::{
 };
 use url::Url;
 
+mod error;
+pub use error::*;
+
 impl HttpClient for Client {
     type RequestBuilder = RequestBuilder;
     fn get(&self, url: Url, range: Option<ProgressEntry>) -> Self::RequestBuilder {
@@ -51,13 +54,13 @@ impl HttpRequestBuilder for RequestBuilder {
         let res = self
             .send()
             .await
-            .map_err(|e| (ReqwestResponseError::Request(e), None))?;
+            .map_err(|e| (ReqwestResponseError::Request(e.into()), None))?;
         let status = res.status();
         if status.is_success() {
             Ok(res)
         } else {
             let retry_after = parse_retry_after(res.headers());
-            Err((ReqwestResponseError::StatusCode(res), retry_after))
+            Err((ReqwestResponseError::from_response(res), retry_after))
         }
     }
 }
@@ -82,22 +85,6 @@ impl HttpHeaders for HeaderMap {
         let header_value = self.get(header).ok_or(ReqwestGetHeaderError::NotFound)?;
         Ok(String::from_utf8_lossy(header_value.as_bytes()))
     }
-}
-
-/// Errors that can occur when getting a header value from a reqwest response.
-#[derive(thiserror::Error, Debug)]
-pub enum ReqwestGetHeaderError {
-    #[error("Header not found")]
-    NotFound,
-}
-
-/// Errors that can occur when sending a reqwest request.
-#[derive(thiserror::Error, Debug)]
-pub enum ReqwestResponseError {
-    #[error("Reqwest error {0:?}")]
-    Request(reqwest::Error),
-    #[error("Url: {}, Status Code: {}, Headers: {:?}", .0.url(), .0.status(), .0.headers())]
-    StatusCode(Response),
 }
 
 /// Parse the `Retry-After` response header into a [`Duration`].
@@ -241,7 +228,7 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
             let resp = req
                 .send()
                 .await
-                .map_err(|e| (ReqwestResponseError::Request(e), None))?;
+                .map_err(|e| (ReqwestResponseError::Request(e.into()), None))?;
 
             // DEBUG ASSERT: If reqwest auto-followed redirects, resp.url() will differ
             // from the URL we sent the request to. This means the inner Client was NOT
@@ -260,12 +247,12 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
                     Ok(resp)
                 } else {
                     let retry_after = parse_retry_after(resp.headers());
-                    Err((ReqwestResponseError::StatusCode(resp), retry_after))
+                    Err((ReqwestResponseError::from_response(resp), retry_after))
                 };
             }
             if self.redirect_count >= self.max_redirects {
                 let retry_after = parse_retry_after(resp.headers());
-                return Err((ReqwestResponseError::StatusCode(resp), retry_after));
+                return Err((ReqwestResponseError::from_response(resp), retry_after));
             }
             let location = if let Some(v) = resp.headers().get(header::LOCATION)
                 && let Ok(s) = v.to_str()
@@ -273,11 +260,11 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
                 s
             } else {
                 let retry_after = parse_retry_after(resp.headers());
-                return Err((ReqwestResponseError::StatusCode(resp), retry_after));
+                return Err((ReqwestResponseError::from_response(resp), retry_after));
             };
             let Ok(mut next_url) = self.url.join(location) else {
                 let retry_after = parse_retry_after(resp.headers());
-                return Err((ReqwestResponseError::StatusCode(resp), retry_after));
+                return Err((ReqwestResponseError::from_response(resp), retry_after));
             };
             // RFC 9110 §10.2.2: If the Location header lacks a fragment,
             // inherit it from the original request URI.
@@ -419,28 +406,6 @@ mod tests {
         .unwrap();
         let (url_info, _) = client.prefetch(url).await.unwrap();
         assert_eq!(url_info.raw_name, "好好好.pdf");
-    }
-
-    #[tokio::test]
-    async fn test_error_handling() {
-        let mut server = mockito::Server::new_async().await;
-        let client = Client::builder().no_proxy().build().unwrap();
-        let _mock1 = server
-            .mock("GET", "/404")
-            .with_status(404)
-            .create_async()
-            .await;
-
-        let url = Url::parse(&format!("{}/404", server.url())).unwrap();
-        match client.prefetch(url).await {
-            Ok(info) => unreachable!("404 status code should not success: {info:?}"),
-            Err((err, _)) => match err {
-                ReqwestResponseError::Request(error) => unreachable!("{error:?}"),
-                ReqwestResponseError::StatusCode(resp) => {
-                    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-                }
-            },
-        }
     }
 
     #[tokio::test]

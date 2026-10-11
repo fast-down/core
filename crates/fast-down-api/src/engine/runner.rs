@@ -13,7 +13,7 @@ use super::{
     stats::StatsTracker,
 };
 use crate::{
-    Config, Event, PartialConfig, TerminationReason, Tx,
+    Config, Event, PartialConfig, TaskError, TerminationReason, Tx,
     state::{Record, ResumeOutcome, StateError},
 };
 use fast_down::{
@@ -632,16 +632,16 @@ where
 {
     let _ = match event {
         fast_down::Event::Pulling(id) => tx.send(Event::Pulling(id)),
-        fast_down::Event::PullError(id, e) => tx.send(Event::PullError(id, anyhow::Error::new(e))),
+        fast_down::Event::PullError(id, e) => tx.send(Event::PullError(id, TaskError::new(e))),
         fast_down::Event::PullTimeout(id) => tx.send(Event::PullTimeout(id)),
         fast_down::Event::PullProgress(id, range) => tx.send(Event::PullProgress(id, range)),
         fast_down::Event::Pushing(id, range) => tx.send(Event::Pushing(id, range)),
         fast_down::Event::PushError(id, range, e) => {
-            tx.send(Event::PushError(id, range, anyhow::Error::new(e)))
+            tx.send(Event::PushError(id, range, TaskError::new(e)))
         }
         fast_down::Event::PushProgress(range) => tx.send(Event::PushProgress(range)),
         fast_down::Event::Flushing => tx.send(Event::Flushing),
-        fast_down::Event::FlushError(e) => tx.send(Event::FlushError(anyhow::Error::new(e))),
+        fast_down::Event::FlushError(e) => tx.send(Event::FlushError(TaskError::new(e))),
         fast_down::Event::Finished(id) => tx.send(Event::Finished(id)),
     };
 }

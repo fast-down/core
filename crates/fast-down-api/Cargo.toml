@@ -38,7 +38,6 @@ reqwest = { version = "0.13.4", default-features = false, features = [
 ] }
 thiserror.workspace = true
 crossfire.workspace = true
-anyhow = "1.0.103"
 path_helper = { version = "0.1.11", features = [
     "auto_ext",
     "sanitize",

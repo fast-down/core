@@ -1,4 +1,4 @@
-use fast_down::{FileId, reqwest::ReqwestResponseError};
+use fast_down::{FileId, reqwest::BuildClientError, reqwest::ReqwestResponseError};
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -34,7 +34,7 @@ pub enum StateError {
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {
     #[error("failed to build HTTP client: {0}")]
-    BuildClient(#[from] reqwest::Error),
+    BuildClient(#[from] BuildClientError),
     #[error(transparent)]
     Prefetch(ReqwestResponseError),
     #[error(transparent)]

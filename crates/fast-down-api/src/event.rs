@@ -1,5 +1,7 @@
-use crate::{PartialConfig, StateError, WriteMethod};
-use fast_down::{ProgressEntry, UrlInfo, WorkerId, reqwest::ReqwestResponseError};
+use crate::{PartialConfig, StateError, TaskError, WriteMethod};
+use fast_down::{
+    ProgressEntry, UrlInfo, WorkerId, reqwest::BuildClientError, reqwest::ReqwestResponseError,
+};
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 /// Events emitted by a download run, consumed through the crossfire channel
@@ -39,7 +41,7 @@ pub enum Event {
     /// reliably if it is interrupted afterwards.
     StateSaveError(StateError),
     /// Building the HTTP client failed (TLS / backend initialization, etc.).
-    BuildClientError(reqwest::Error),
+    BuildClientError(BuildClientError),
     /// Creating the output sink — opening the `.part` file — failed.
     BuildPusherError(std::io::Error),
     /// Disk space for the whole file is about to be reserved, carrying the
@@ -113,7 +115,7 @@ pub enum Event {
     /// Worker `id` started fetching its assigned byte range from the network.
     Pulling(WorkerId),
     /// Worker `id` failed to fetch its assigned range (network / decode error).
-    PullError(WorkerId, anyhow::Error),
+    PullError(WorkerId, TaskError),
     /// Worker `id`'s fetch exceeded its time budget and was aborted.
     PullTimeout(WorkerId),
     /// Worker `id` pulled some bytes into memory.
@@ -126,7 +128,7 @@ pub enum Event {
     /// `ProgressEntry` is the range being written.
     Pushing(WorkerId, ProgressEntry),
     /// Worker `id` failed to write `ProgressEntry` to the sink.
-    PushError(WorkerId, ProgressEntry, anyhow::Error),
+    PushError(WorkerId, ProgressEntry, TaskError),
     /// A range was written to the sink.
     ///
     /// `ProgressEntry` is the range persisted (at least to the OS page cache) by
@@ -151,7 +153,7 @@ pub enum Event {
     /// The sink is being flushed and synced to the `.part` file.
     Flushing,
     /// Flushing / syncing the sink failed.
-    FlushError(anyhow::Error),
+    FlushError(TaskError),
     /// Worker `id` completed its assigned range and exited.
     Finished(WorkerId),
 

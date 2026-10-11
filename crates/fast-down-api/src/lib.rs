@@ -4,13 +4,16 @@ pub mod state;
 pub use state::{PartState, PlanError, Ready, Record, ResumeOutcome, State, StateError};
 
 mod engine;
-pub use engine::{Ctx, IdentityRecovery, PreparedRun, Recovery, RunHandle, StartMode, StartPolicy};
+pub use engine::{Ctx, IdentityRecovery, Recovery, RunHandle, StartMode, StartPolicy};
 
 mod config;
 pub use config::*;
 
 pub mod event;
 pub use event::*;
+
+mod error;
+pub use error::TaskError;
 
 pub(crate) mod utils;
 
