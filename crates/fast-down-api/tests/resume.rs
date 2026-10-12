@@ -476,12 +476,13 @@ impl EmitPlanError for PlanError {
 /// is still far from finishing when the cancel fires.
 const CANCEL_AFTER_BYTES: u64 = (THROTTLE_CHUNK * 2) as u64;
 
-/// Offset a `PushProgress` range must reach for the run to be considered to have
-/// a *far* worker in flight. Only used as a sanity floor: the definitive signal
-/// that the persisted progress is fragmented is the merged range count itself
-/// (see [`partial_download_via_cancel_with`]), because the workers own adjacent
-/// halves of the file and a far push can still be contiguous with the leading
-/// block.
+/// Offset a `PushProgress` range must reach before a concurrent run is
+/// cancelled. With the test's worker layout a worker starts at `2.5 MiB`, so a
+/// range beginning here sits well past the leading block, which biases the
+/// cancelled run toward leaving *fragmented* (multi-range) progress. It is only
+/// a bias, not a guarantee — the download can still fill every gap before the
+/// cancel is observed — so callers must not assert on the persisted shape from
+/// it alone.
 const MULTI_RANGE_GAP: u64 = 2 * 1024 * 1024;
 
 /// Start a normal `download()` and cancel it once at least [`CANCEL_AFTER_BYTES`]
@@ -496,44 +497,13 @@ async fn partial_download_via_cancel(
 }
 
 /// [`partial_download_via_cancel`] with an explicit config and cancel threshold,
-/// so a test can interrupt a concurrent run after a *far* worker — one whose
-/// `PushProgress` starts at or beyond [`MULTI_RANGE_GAP`] — has already flushed a
-/// range, alongside the byte-count floor. This is the general form; tests that
-/// specifically need fragmented progress use
-/// [`partial_download_via_cancel_fragmented`].
+/// so a test can interrupt a concurrent run after enough workers have written to
+/// leave real resume progress behind.
 async fn partial_download_via_cancel_with(
     url: &str,
     cfg: PartialConfig,
     cancel: CancellationToken,
     cancel_after: u64,
-) -> Vec<Event> {
-    partial_download_via_cancel_impl(url, cfg, cancel, cancel_after, false).await
-}
-
-/// [`partial_download_via_cancel_with`] but additionally refusing to cancel
-/// until the merged progress actually holds **two** ranges, for callers that
-/// then assert on the persisted `downloaded_chunk` being fragmented.
-///
-/// A fixed-offset precondition is not enough: the workers own adjacent halves of
-/// the file, so a push starting far from zero can still be contiguous with the
-/// leading block and merge back into a single range. Mirroring the run's own
-/// bookkeeping and gating on the merged range count is what makes the
-/// fragmented precondition sound.
-async fn partial_download_via_cancel_fragmented(
-    url: &str,
-    cfg: PartialConfig,
-    cancel: CancellationToken,
-    cancel_after: u64,
-) -> Vec<Event> {
-    partial_download_via_cancel_impl(url, cfg, cancel, cancel_after, true).await
-}
-
-async fn partial_download_via_cancel_impl(
-    url: &str,
-    cfg: PartialConfig,
-    cancel: CancellationToken,
-    cancel_after: u64,
-    require_fragmented: bool,
 ) -> Vec<Event> {
     let (tx, rx) = create_channel();
     download(Url::parse(url).expect("valid url"), cfg, tx, cancel.clone());
@@ -542,9 +512,10 @@ async fn partial_download_via_cancel_impl(
     let mut started = false;
     let mut written = 0u64;
     let mut cancelled_at = None;
-    // Mirror the run's own progress bookkeeping so a `require_fragmented` caller
-    // can gate on the merged range count (see this function's sibling above).
-    let mut merged = PartialConfig::default();
+    // A `PushProgress` whose `start` reaches past `MULTI_RANGE_GAP` can only come
+    // from a worker other than the leading one; waiting for it biases the cancel
+    // toward a genuinely concurrent layout instead of landing once only the
+    // leading worker's writes had been flushed.
     let mut seen_far = false;
     while let Ok(e) = rx.recv().await {
         if matches!(e, Event::Start { .. }) {
@@ -555,13 +526,7 @@ async fn partial_download_via_cancel_impl(
             if p.start >= MULTI_RANGE_GAP {
                 seen_far = true;
             }
-            merged.merge_progress(p.clone());
-            let fragmented = merged
-                .downloaded_chunk
-                .as_ref()
-                .is_some_and(|ranges| ranges.len() >= 2);
-            let ready = written >= cancel_after && seen_far && (!require_fragmented || fragmented);
-            if cancelled_at.is_none() && ready {
+            if cancelled_at.is_none() && written >= cancel_after && seen_far {
                 cancelled_at = Some(written);
                 cancel.cancel();
             }
@@ -909,50 +874,70 @@ async fn test_cancel_keeps_part_and_fd_then_resume() {
 /// test that exercises multi-range state on a real socket and a real file.
 /// Resuming from it must request exactly the gaps and reassemble the file byte
 /// for byte.
+///
+/// The fragmented state is **seeded** rather than produced by racing a cancel:
+/// progress merges monotonically, so on a loaded runner the workers can flush
+/// every gap before the cancel is observed and coalesce the ranges into one,
+/// which made a cancel-based version of this test flaky. Seeding pins the
+/// multi-range layout exactly and keeps the assertion meaningful. The `.part`'s
+/// gap regions are filled with a sentinel byte, so the final image only matches
+/// when the resume actually fetches those gaps.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_concurrent_resume_with_fragmented_progress() {
     let dir = temp_dir("concurrent_fragmented");
     let (_server, url) = start_server(original_bytes(), "orig", "LM-A", true).await;
-
-    // 8 workers over 64 KiB chunks each start at a different offset, so the
-    // persisted progress is non-contiguous. Cancelling only after six chunks'
-    // worth of bytes have landed guarantees several distinct ranges.
-    let cancel = CancellationToken::new();
-    partial_download_via_cancel_fragmented(
-        &url,
-        make_config_with(&dir, 8, 64 * 1024),
-        cancel,
-        (THROTTLE_CHUNK * 6) as u64,
-    )
-    .await;
+    let url = Url::parse(&url).expect("valid url");
 
     let final_path = dir.join("out.bin");
     let part = final_path.with_added_extension("part");
     let fd = final_path.with_added_extension("fd");
-    assert!(
-        part.exists() && fd.exists(),
-        "cancel must preserve both .part and .fd"
-    );
+    let cfg = make_config_with(&dir, 8, 64 * 1024);
 
+    // Resolve the remote identity so the seeded `.fd` validates against it on
+    // the resume that follows.
+    let (tx, _rx) = create_channel();
+    let info = State::new(url.clone(), cfg.clone())
+        .build(&tx)
+        .await
+        .expect("resolve remote")
+        .info;
+
+    // Two non-adjacent ranges: a leading block and one past the midpoint.
+    let size = FILE_SIZE as u64;
+    let progress = vec![size / 8..size / 4, size / 2..3 * size / 4];
+
+    let mut record = Record::new(url.clone(), cfg.clone());
+    record.refresh_identity(&info);
+    record.set_progress(progress.clone());
+    record.store(&fd).await.expect("seed .fd");
+
+    // The `.part` holds the real bytes inside the recorded ranges and a sentinel
+    // everywhere else, so the resumed download must refetch every gap for the
+    // final content to match.
+    let original = original_bytes();
+    let mut part_bytes = vec![0u8; FILE_SIZE];
+    for range in &progress {
+        part_bytes[range.start as usize..range.end as usize]
+            .copy_from_slice(&original[range.start as usize..range.end as usize]);
+    }
+    tokio::fs::write(&part, &part_bytes)
+        .await
+        .expect("seed .part");
+
+    // Precondition: the seeded state really is fragmented (multi-range).
     let fd_text = std::fs::read_to_string(&fd).expect("read .fd");
     let chunk_line = fd_text
         .lines()
         .find(|l| l.trim_start().starts_with("downloaded_chunk"))
-        .unwrap_or_else(|| panic!("concurrent .fd must carry progress, got:\n{fd_text}"));
+        .unwrap_or_else(|| panic!("seeded .fd must carry progress, got:\n{fd_text}"));
     assert!(
         chunk_line.contains(','),
-        "a cancelled concurrent run must persist multiple ranges, got: {chunk_line}"
+        "precondition: seeded progress must hold multiple ranges, got: {chunk_line}"
     );
 
     let (tx, rx) = create_channel();
     let resume_cancel = CancellationToken::new();
-    resume(
-        part.clone(),
-        Some(Url::parse(&url).expect("valid url")),
-        make_config_with(&dir, 8, 64 * 1024),
-        tx,
-        resume_cancel,
-    );
+    resume(part.clone(), Some(url), cfg, tx, resume_cancel);
     let events = drain(rx).await;
 
     assert!(
