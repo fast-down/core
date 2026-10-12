@@ -485,6 +485,11 @@ const CANCEL_AFTER_BYTES: u64 = (THROTTLE_CHUNK * 2) as u64;
 /// it alone.
 const MULTI_RANGE_GAP: u64 = 2 * 1024 * 1024;
 
+/// Byte the seeded `.part` holds in the ranges the state claims are already
+/// downloaded. Deliberately different from the served payload (`0xAA`), so the
+/// resume test can prove those ranges were left untouched rather than refetched.
+const RECORDED_SENTINEL: u8 = 0x55;
+
 /// Start a normal `download()` and cancel it once at least [`CANCEL_AFTER_BYTES`]
 /// have been written, leaving a real partial `.part`/`.fd` on disk with non-empty
 /// resume progress. Returns the collected events.
@@ -871,7 +876,7 @@ async fn test_cancel_keeps_part_and_fd_then_resume() {
 /// Several concurrent workers write ranges out of order, so an interrupted run
 /// persists a *fragmented* `downloaded_chunk` holding more than one range — the
 /// single-worker path can only ever leave one leading range, so this is the only
-/// test that exercises multi-range state on a real socket and a real file.
+/// test that exercises multi-range state against a real socket and a real file.
 /// Resuming from it must request exactly the gaps and reassemble the file byte
 /// for byte.
 ///
@@ -879,9 +884,16 @@ async fn test_cancel_keeps_part_and_fd_then_resume() {
 /// progress merges monotonically, so on a loaded runner the workers can flush
 /// every gap before the cancel is observed and coalesce the ranges into one,
 /// which made a cancel-based version of this test flaky. Seeding pins the
-/// multi-range layout exactly and keeps the assertion meaningful. The `.part`'s
-/// gap regions are filled with a sentinel byte, so the final image only matches
-/// when the resume actually fetches those gaps.
+/// multi-range layout exactly.
+///
+/// The assertion is deliberately discriminating rather than a plain byte-equality
+/// against the served file (which a full re-download would also satisfy): the
+/// seeded `.part` holds a **sentinel** byte in the ranges the state claims are
+/// already downloaded, while the server serves a different byte everywhere. A
+/// correct resume therefore leaves the sentinel intact in the recorded ranges and
+/// fills the gaps with the server's byte; a full re-download would overwrite the
+/// sentinel, and a resume that ignored the recorded ranges would leave the gaps
+/// zeroed. Both mistakes fail the final comparison.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_concurrent_resume_with_fragmented_progress() {
     let dir = temp_dir("concurrent_fragmented");
@@ -902,27 +914,32 @@ async fn test_concurrent_resume_with_fragmented_progress() {
         .expect("resolve remote")
         .info;
 
-    // Two non-adjacent ranges: a leading block and one past the midpoint.
+    // Two non-adjacent ranges, each several chunks wide, separated by a gap far
+    // larger than `chunk_window`, so the merge keeps them distinct.
     let size = FILE_SIZE as u64;
-    let progress = vec![size / 8..size / 4, size / 2..3 * size / 4];
+    let recorded = vec![size / 8..size / 4, size / 2..3 * size / 4];
 
     let mut record = Record::new(url.clone(), cfg.clone());
     record.refresh_identity(&info);
-    record.set_progress(progress.clone());
+    record.set_progress(recorded.clone());
     record.store(&fd).await.expect("seed .fd");
 
-    // The `.part` holds the real bytes inside the recorded ranges and a sentinel
-    // everywhere else, so the resumed download must refetch every gap for the
-    // final content to match.
-    let original = original_bytes();
-    let mut part_bytes = vec![0u8; FILE_SIZE];
-    for range in &progress {
-        part_bytes[range.start as usize..range.end as usize]
-            .copy_from_slice(&original[range.start as usize..range.end as usize]);
+    // Seed the `.part`: the sentinel in the ranges the state claims are done,
+    // zeros in the gaps. The server serves `0xAA` everywhere, so the expected
+    // post-resume image is server bytes in the gaps and the sentinel preserved
+    // in the recorded ranges.
+    let mut seed = vec![0u8; FILE_SIZE];
+    for range in &recorded {
+        seed[range.start as usize..range.end as usize].fill(RECORDED_SENTINEL);
     }
-    tokio::fs::write(&part, &part_bytes)
-        .await
-        .expect("seed .part");
+    tokio::fs::write(&part, &seed).await.expect("seed .part");
+    let expected = {
+        let mut e = original_bytes();
+        for range in &recorded {
+            e[range.start as usize..range.end as usize].fill(RECORDED_SENTINEL);
+        }
+        e
+    };
 
     // Precondition: the seeded state really is fragmented (multi-range).
     let fd_text = std::fs::read_to_string(&fd).expect("read .fd");
@@ -940,6 +957,19 @@ async fn test_concurrent_resume_with_fragmented_progress() {
     resume(part.clone(), Some(url), cfg, tx, resume_cancel);
     let events = drain(rx).await;
 
+    // The multi-range progress must be *adopted*, not silently dropped.
+    let resumed = events
+        .iter()
+        .find_map(|e| match e {
+            Event::Resumed { progress, .. } => Some(progress.clone()),
+            _ => None,
+        })
+        .expect("resume() must emit Event::Resumed");
+    assert_eq!(
+        resumed, recorded,
+        "the resume must adopt the recorded multi-range progress"
+    );
+
     assert!(
         events.iter().any(|e| matches!(e, Event::Renamed(_))),
         "resume() must complete with Renamed"
@@ -948,9 +978,9 @@ async fn test_concurrent_resume_with_fragmented_progress() {
         .await
         .expect("final file should exist after resume");
     assert_eq!(
-        got,
-        original_bytes(),
-        "resuming fragmented progress must reassemble the file exactly"
+        got, expected,
+        "resuming fragmented progress must fetch exactly the gaps and leave the \
+         recorded ranges untouched"
     );
 }
 
