@@ -75,6 +75,17 @@ impl State {
     /// Returns [`PlanError`] when the HTTP client cannot be built, the prefetch
     /// exhausts its retries, or the output path cannot be computed. A `.fd` that
     /// exists but cannot be read is reported rather than silently replaced.
+    ///
+    /// # Events
+    /// `build` publishes on `tx` as it resolves the remote: an
+    /// [`Event::Prefetch`](crate::Event::Prefetch) on success, and one
+    /// [`Event::PrefetchError`](crate::Event::PrefetchError) per **retryable**
+    /// prefetch attempt (the attempt that exhausts the budget is returned as
+    /// [`PlanError::Prefetch`] instead, since the error cannot be cloned into
+    /// both places). These are sent while `build` is still running, so a caller
+    /// that wants to observe the retries should drain `tx` concurrently; a caller
+    /// that only inspects the returned [`PlanError`] sees just the final failure.
+    /// Nothing else is published until `start`.
     #[allow(clippy::result_large_err)]
     pub async fn build(self, tx: &Tx) -> Result<Ready, PlanError> {
         let Self { record, fd_path } = self;

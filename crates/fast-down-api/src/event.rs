@@ -97,8 +97,8 @@ pub enum Event {
     Start {
         /// The `.part` file being written.
         tmp_path: PathBuf,
-        /// The `.fd` state-file being written.
-        config_path: PathBuf,
+        /// The `.fd` state file being written.
+        fd_path: PathBuf,
         /// The resolved [`PartialConfig`] actually used for this run.
         parsed_config: Box<PartialConfig>,
     },
@@ -107,7 +107,7 @@ pub enum Event {
     /// the total file size, so a UI can show e.g. "resuming from 42%".
     Resumed {
         /// The `.fd` state file the resume continues from.
-        config_path: PathBuf,
+        fd_path: PathBuf,
         /// The byte ranges already recorded.
         progress: Vec<ProgressEntry>,
         /// The remote file size.

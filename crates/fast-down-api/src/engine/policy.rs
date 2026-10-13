@@ -18,6 +18,11 @@ pub enum StartMode {
     /// Ignore any recorded progress and download the whole file.
     Fresh,
     /// Continue from a mismatched state when the size still matches.
+    ///
+    /// Soundness of a forced resume is decided by
+    /// [`StateError::force_safe`](crate::StateError::force_safe); when the
+    /// mismatch is not force-safe, `start` reports the failure instead of
+    /// continuing.
     Forced,
 }
 

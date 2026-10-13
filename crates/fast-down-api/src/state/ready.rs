@@ -38,7 +38,15 @@ pub struct Ready {
     /// `Some` when resuming a known `.fd` and its location should be reused;
     /// `None` when `start` must claim a free `.fd`/`.part` pair.
     pub fd_path: Option<PathBuf>,
-    /// The base output path from `gen_path`, before any final-name uniquification.
+    /// The base output path from `gen_path`, **before** the final-name
+    /// uniquification that [`Ready::start`] performs when `overwrite` is off.
+    ///
+    /// With `overwrite` on this is where the file lands. With `overwrite` off
+    /// and the target already occupied, the run renames the `.part` to a
+    /// uniquified sibling (`xxx (1).bin`, …) instead; only the terminal
+    /// [`Event::Renamed`](crate::Event::Renamed) then carries the real path. Use
+    /// this field to tell the caller *what* is being downloaded, not to predict
+    /// the exact file the run will leave behind.
     pub final_path: PathBuf,
     /// Prefetch metadata for the remote file.
     pub info: UrlInfo,

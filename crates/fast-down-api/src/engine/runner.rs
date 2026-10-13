@@ -343,7 +343,7 @@ async fn drive(
     // 2. Announce a resumed run.
     if resuming {
         let _ = tx.send(Event::Resumed {
-            config_path: fd_path.clone(),
+            fd_path: fd_path.clone(),
             progress: record.progress().to_vec(),
             size: info.size,
         });
@@ -363,7 +363,7 @@ async fn drive(
     };
     let _ = tx.send(Event::Start {
         tmp_path: tmp_path.clone(),
-        config_path: fd_path.clone(),
+        fd_path: fd_path.clone(),
         parsed_config: Box::new(record.config.clone()),
     });
 
