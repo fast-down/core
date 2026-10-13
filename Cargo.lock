@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "fast-steal"
-version = "7.0.0"
+version = "7.0.1"
 dependencies = [
  "parking_lot",
  "portable-atomic",
