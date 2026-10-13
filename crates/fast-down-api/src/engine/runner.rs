@@ -167,9 +167,9 @@ impl Ctx {
     /// Bounds how finely a range may be split to hand a worker its share: a range
     /// is only halved when at least `min_chunk_size * 2` bytes remain. Applied to
     /// the live pool immediately; a request made before the pipeline is built is
-    /// remembered and applied as soon as it is.
+    /// remembered and applied as soon as it is. A `0` is normalized to `1` by the
+    /// engine, so no clamping is needed here.
     pub fn set_min_chunk_size(&self, bytes: u64) {
-        let bytes = bytes.max(1);
         let mut slot = self.slot.lock();
         if let Some(session) = &slot.session {
             session.set_min_chunk_size(bytes);
