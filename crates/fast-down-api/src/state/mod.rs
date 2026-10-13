@@ -9,25 +9,30 @@ pub use record::*;
 use crate::utils::gen_path;
 use crate::{PartialConfig, Tx, engine::prefetch};
 use inherit_config::ConfigLayer;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use url::Url;
 
 /// A download that has not been resolved against the remote yet.
 ///
-/// This is the single input phase: it holds the persisted [`Record`] and,
-/// optionally, where its `.fd` lives. `fd_path = None` means "no state file
+/// This is the single input phase: it holds the URL and configuration and,
+/// optionally, where the `.fd` lives. `fd_path = None` means "no state file
 /// picked yet" — [`State::build`] probes the base `<final>.fd`, and [`Ready`]
 /// carries `None` through so `start` claims a free name. `fd_path = Some` pins
-/// the location, either because the caller loaded an existing `.fd` or chose
+/// the location, either because the caller located an existing `.fd` or chose
 /// one explicitly.
 ///
-/// [`State::new`] and [`State::load`] are the two ways in; both only differ in
-/// whether the record already carries remote identity and progress.
+/// **`State` never reads the disk.** Reading is the whole job of
+/// [`State::build`], which reads the pinned (or default) `.fd` exactly once and
+/// classifies it against the freshly prefetched remote. To *inspect* an existing
+/// `.fd` offline — list what is resumable, or validate a file you located
+/// yourself — use [`Record::load`], which decodes it without any network access.
 #[derive(Debug, Clone)]
 pub struct State {
-    /// The persisted record (identity, config, progress).
+    /// The persisted record. Until [`State::build`] runs it only carries the
+    /// URL and the caller's configuration; the identity and progress are read
+    /// from the `.fd` by `build`.
     pub record: Record,
-    /// The `.fd` location, pinned by [`State::load`]; `None` until resolved.
+    /// The `.fd` location pinned by [`State::at_path`]; `None` until resolved.
     pub fd_path: Option<PathBuf>,
 }
 
@@ -41,18 +46,19 @@ impl State {
         }
     }
 
-    /// Load an existing `.fd` state file, pinning its location.
+    /// Start from a URL, pinning the exact `.fd` to probe during [`build`].
     ///
-    /// # Errors
-    /// Returns [`StateError::NotFound`] when there is no `.fd` at `fd_path`,
-    /// [`StateError::Open`] for any other read failure, or
-    /// [`StateError::Decode`] when the contents are not valid TOML.
-    pub async fn load(fd_path: impl AsRef<Path>) -> Result<Self, StateError> {
-        let fd_path = fd_path.as_ref();
-        Ok(Self {
-            record: Record::load(fd_path).await?,
-            fd_path: Some(fd_path.to_path_buf()),
-        })
+    /// Nothing is read here: `build` reads that one file and classifies it
+    /// against the remote. Use this when the caller already knows the URL and
+    /// wants to resume from a specific state file it located itself.
+    ///
+    /// [`build`]: Self::build
+    #[must_use]
+    pub const fn at_path(url: Url, fd_path: PathBuf, config: PartialConfig) -> Self {
+        Self {
+            record: Record::new(url, config),
+            fd_path: Some(fd_path),
+        }
     }
 
     /// Resolve this download against the remote: prefetch, compute the output
@@ -102,7 +108,7 @@ impl State {
         let (info, resp) = prefetch(url, &config, tx).await?;
         let final_path = gen_path(url, &info, &config).map_err(PlanError::GenPath)?;
 
-        // Whether the caller pinned a specific `.fd` (via [`State::load`]). A
+        // Whether the caller pinned a specific `.fd` (via [`State::at_path`]). A
         // `Fresh` outcome keeps that pin; without one, `start` claims a free pair.
         let caller_pinned = fd_path.is_some();
         // The `.fd` to probe: the pinned one, or the default `<final>.fd`. No
@@ -153,8 +159,9 @@ impl State {
                             Some(probe_fd_path),
                         ),
                         // The `.part` is gone: nothing safe to continue. A pinned
-                        // `.fd` (from `State::load`) keeps its location so a later
-                        // start can reuse it; otherwise start claims a free pair.
+                        // `.fd` (from `State::at_path`) keeps its location so a
+                        // later start can reuse it; otherwise start claims a free
+                        // pair.
                         (Ok(()), PartState::Missing) => (
                             fresh_record(),
                             ResumeOutcome::Fresh,

@@ -381,13 +381,35 @@ fn resume(
             };
             cfg.resume = Some(false);
             let state = State::new(url, cfg.clone());
-            resolve_and_run(Ok(state), cfg, StartMode::Resume, tx, token).await;
+            resolve_and_run(state, cfg, StartMode::Resume, tx, token).await;
             return;
         }
 
         let fd_path = tmp_path.with_extension("fd");
+        // `resume` means "continue this exact state", so a missing state file is
+        // an error rather than a silent full download (which is what `build`
+        // alone would do: a pinned-but-absent `.fd` is a `Fresh` outcome).
+        if !fd_path.exists() {
+            let _ = tx.send(Event::ResumeError(StateError::NotFound(fd_path)));
+            let _ = tx.send(Event::Terminated(TerminationReason::Failed));
+            return;
+        }
+        // The old `resume(.., None, ..)` recovered the URL from the `.fd`; keep
+        // that by peeking when the caller supplied none. With a URL in hand we
+        // pin the path and let `build` do the single authoritative read.
+        let url = match url {
+            Some(url) => url,
+            None => match Record::load(&fd_path).await {
+                Ok(record) => record.url,
+                Err(e) => {
+                    let _ = tx.send(Event::ResumeError(e));
+                    let _ = tx.send(Event::Terminated(TerminationReason::Failed));
+                    return;
+                }
+            },
+        };
         resolve_and_run(
-            State::load(&fd_path).await,
+            State::at_path(url, fd_path, cfg.clone()),
             cfg,
             StartMode::Resume,
             tx,
@@ -400,7 +422,7 @@ fn resume(
 /// Old `download_from_fd(fd_path, url, cfg, tx, token)` semantics: reuse the
 /// resolved `.fd` as a manifest, resuming when the `.part` is still usable and
 /// otherwise downloading fresh into the same pair (`StartMode::Auto` — the
-/// pinned `.fd` from `State::load` carries the "reuse this pair" behavior).
+/// pinned `.fd` from `State::at_path` carries the "reuse this pair" behavior).
 fn download_from_fd(
     fd_path: impl AsRef<Path>,
     _url: Option<Url>,
@@ -410,7 +432,25 @@ fn download_from_fd(
 ) {
     let fd_path = fd_path.as_ref().to_path_buf();
     tokio::spawn(async move {
-        resolve_and_run(State::load(&fd_path).await, cfg, StartMode::Auto, tx, token).await;
+        // Manifest semantics: the `.fd` is the source of truth and must exist,
+        // so peek it for the URL (the old shim ignored the passed-in one) and to
+        // surface a missing/unreadable state as a `ResumeError`.
+        let url = match Record::load(&fd_path).await {
+            Ok(record) => record.url,
+            Err(e) => {
+                let _ = tx.send(Event::ResumeError(e));
+                let _ = tx.send(Event::Terminated(TerminationReason::Failed));
+                return;
+            }
+        };
+        resolve_and_run(
+            State::at_path(url, fd_path, cfg.clone()),
+            cfg,
+            StartMode::Auto,
+            tx,
+            token,
+        )
+        .await;
     });
 }
 
@@ -418,24 +458,16 @@ fn download_from_fd(
 /// config with the caller's, so a `resume=false` override can still be forced
 /// by `StartMode::Resume`), then run it.
 async fn resolve_and_run(
-    loaded: Result<State, StateError>,
+    state: State,
     cfg: PartialConfig,
     mode: StartMode,
     tx: Tx,
     token: CancellationToken,
 ) {
-    let loaded = match loaded {
-        Ok(state) => state,
-        Err(e) => {
-            let _ = tx.send(Event::ResumeError(e));
-            let _ = tx.send(Event::Terminated(TerminationReason::Failed));
-            return;
-        }
-    };
     // Layer the caller's overrides over the persisted config (caller wins on
     // set fields) while keeping the recorded progress, mirroring the old
     // `inherit_persisted_config` + caller-merge order.
-    let mut state = loaded;
+    let mut state = state;
     state.record.merge_config(&cfg);
     match state.build(&tx).await {
         Ok(ready) => {

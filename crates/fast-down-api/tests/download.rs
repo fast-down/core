@@ -564,7 +564,10 @@ async fn start_policy_per_dimension_override() {
 
     let (tx, rx) = create_channel();
     let ctx = Ctx::new();
-    let ready = State::load(&fd).await.unwrap().build(&tx).await.unwrap();
+    let ready = State::at_path(Url::parse(&url).unwrap(), fd, make_config(&dir))
+        .build(&tx)
+        .await
+        .unwrap();
     assert!(
         matches!(&ready.outcome, ResumeOutcome::Mismatch(_)),
         "precondition: the shrunk .part must be a mismatch"

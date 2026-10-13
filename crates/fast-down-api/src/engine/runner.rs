@@ -421,7 +421,7 @@ async fn resolve_target(
         (fd_path, tmp)
     } else if let Some(fd_path) = fd_path {
         // Fresh over an existing pair: reuse the location and the `.part`, but
-        // start from byte zero. This is how a pinned `.fd` (from `State::load`)
+        // start from byte zero. This is how a pinned `.fd` (from `State::at_path`)
         // is reused even when its `.part` is missing.
         let tmp = fd_path.with_extension("part");
         if let Err(e) = open_create().open(&tmp).await {

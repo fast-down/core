@@ -54,10 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     handle.await;
     println!("interrupted at 30%: {cancelled}");
 
-    // 2. Inspect the persisted state without touching the network. `State::load`
-    //    reads the `.fd`; `Record` is the file's in-memory form.
-    if let Ok(state) = State::load(&fd_path).await {
-        let record = &state.record;
+    // 2. Inspect the persisted state without touching the network. `Record::load`
+    //    decodes the `.fd`; `Record` is the file's in-memory form.
+    if let Ok(record) = fast_down_api::Record::load(&fd_path).await {
         println!(
             "on disk: {} byte-ranges, {} bytes fetched",
             record.progress().len(),
@@ -65,12 +64,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // 3. Resume: load the `.fd`, then start in `Resume` mode. `build` re-checks
-    //    the remote identity and the `.part`, so a changed remote is caught here
-    //    rather than corrupting the output.
+    // 3. Resume: pin the `.fd`, then start in `Resume` mode. `build` reads the
+    //    state and re-checks the remote identity and the `.part`, so a changed
+    //    remote is caught here rather than corrupting the output.
     let (tx, rx) = create_channel();
     let ctx = Ctx::new();
-    let ready = State::load(&fd_path).await?.build(&tx).await?;
+    let ready = State::at_path(url.clone(), fd_path.clone(), config.clone())
+        .build(&tx)
+        .await?;
     println!("resuming: {:?}", ready.outcome);
 
     let handle = ready.start(StartMode::Resume, tx, &ctx);

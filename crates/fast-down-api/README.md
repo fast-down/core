@@ -78,22 +78,42 @@ println!("ended: {:?}", handle.await);
 # }
 ```
 
-### Loading an existing `.fd`
+### Resuming a specific `.fd`
 
 When you already know where a state file lives — a UI rebuilding a list of
-paused downloads, or a caller resuming one specific file — load it directly.
-`State::load` pins the location, so `build` probes exactly that file instead of
-the default `<final>.fd`.
+paused downloads, or a caller resuming one specific file — pin it with
+`State::at_path`. Nothing is read there; `build` reads that one file and
+classifies it against the remote, instead of probing the default `<final>.fd`.
 
 ```rust,no_run
 use fast_down_api::{PartialConfig, State, create_channel};
+use std::path::PathBuf;
+use url::Url;
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 let (tx, _rx) = create_channel();
-let state = State::load("./downloads/large-file.bin.fd").await?;
-let ready = state.build(&tx).await?;
+let url = Url::parse("https://example.com/large-file.bin")?;
+let fd = PathBuf::from("./downloads/large-file.bin.fd");
+let ready = State::at_path(url, fd, PartialConfig::default())
+    .build(&tx)
+    .await?;
 println!("resuming {:?}", ready.fd_path);
+# Ok(())
+# }
+```
+
+To inspect a `.fd` **without any network access** — list what is resumable, or
+validate a file you located yourself — use `Record::load`, which decodes it and
+touches no HTTP:
+
+```rust,no_run
+use fast_down_api::Record;
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let record = Record::load("./downloads/large-file.bin.fd").await?;
+println!("{} bytes in {} ranges", record.downloaded(), record.progress().len());
 # Ok(())
 # }
 ```
@@ -157,7 +177,7 @@ two versions together.
 
 | Item | Purpose |
 | ---- | ------- |
-| [`State`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.State.html) | A download that has not been resolved yet. `State::new` starts from a URL; `State::load` reads an existing `.fd`. |
+| [`State`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.State.html) | A download that has not been resolved yet. `State::new` starts from a URL; `State::at_path` pins an existing `.fd`. Neither reads the disk. |
 | [`State::build`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.State.html) | Prefetch + resolve paths + probe the disk, returning a [`Ready`] **without writing anything**. |
 | [`Ready`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Ready.html) | A resolved download. Inspect its public fields (`outcome`, `final_path`, `fd_path`, `info`) plus `progress()` / `tmp_path()`, then run it. |
 | [`StartMode`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StartMode.html) | A preset for how to start: `Auto`, `Resume`, `Fresh`, `Forced`. Accepted by `Ready::start`. |
@@ -165,7 +185,7 @@ two versions together.
 | [`ResumeOutcome`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.ResumeOutcome.html) | `Fresh` (nothing to continue), `Resumable`, or `Mismatch(StateError)`. |
 | [`Ctx`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Ctx.html) | The run's cancellation token + live worker-pool control, passed to `Ready::start`: `cancel`, `set_threads`, `set_min_chunk_size`. |
 | [`RunHandle`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.RunHandle.html) | Returned by `Ready::start`: delegates `set_threads` / `set_min_chunk_size` / `abort` to its `Ctx`, and `await`s to the `TerminationReason`. |
-| [`Record`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Record.html) | The `.fd` state file: URL, remote identity, elapsed time, and the merged config (which carries `downloaded_chunk`). |
+| [`Record`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Record.html) | The `.fd` state file: URL, remote identity, elapsed time, and the merged config (which carries `downloaded_chunk`). `Record::load` reads it offline. |
 | [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html) | Create the `(Tx, Rx)` event channel. |
 | [`Event`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.Event.html) | The event enum delivered over the channel. |
 | [`PartialConfig`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.PartialConfig.html) | Layered, optional configuration for a download. |
@@ -183,7 +203,8 @@ together and no path can be hand-edited to redirect a write.
 Resolving a download against the remote:
 
 1. `State::build` prefetches the remote and computes the output path.
-2. It loads the candidate `.fd` (the pinned one, or the default `<final>.fd`).
+2. It reads the candidate `.fd` **once** (the pinned one, or the default
+   `<final>.fd`).
 3. The record is validated against the freshly fetched identity **before** it is
    refreshed, and the `.part` is measured against the recorded progress:
    - matching identity and a long-enough `.part` → `Resumable`,

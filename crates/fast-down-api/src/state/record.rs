@@ -197,7 +197,7 @@ impl Record {
     }
 
     /// Point the record at the URL this run resolved, keeping the initial URL
-    /// semantics (`url` is what a later `State::load` will re-resolve).
+    /// semantics (`url` is what a later resolve will re-resolve).
     pub fn set_url(&mut self, url: &Url) {
         self.url = url.clone();
     }
