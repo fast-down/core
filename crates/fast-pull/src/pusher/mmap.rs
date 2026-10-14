@@ -75,11 +75,17 @@ impl Pusher for MmapFilePusher {
         }
         Ok(())
     }
+    /// Data is already in the shared mapping, visible to any other reader.
+    ///
+    /// Only `sync_all` forces the dirty pages out; otherwise this is a no-op so
+    /// the writeback is left to the OS instead of blocking the download on
+    /// `msync`/`FlushViewOfFile`. The mapping keeps the pages reachable until the
+    /// pusher is dropped, so the data is never lost.
     fn flush(&mut self) -> Result<(), Self::Error> {
         if self.sync_all {
             self.mmap.flush()
         } else {
-            self.mmap.flush_async()
+            Ok(())
         }
     }
 }
