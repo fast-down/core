@@ -18,11 +18,13 @@ use fast_pull::Puller;
 use parking_lot::Mutex;
 use reqwest::{ClientBuilder, Response, header::HeaderMap, redirect::Policy};
 use std::sync::Arc;
+use std::time::Duration;
 use url::Url;
 
 /// # Errors
 /// Returns [`BuildClientError`] if the HTTP client cannot be built (invalid
 /// proxy URL, TLS backend failure, or other `reqwest::ClientBuilder` errors).
+#[allow(clippy::too_many_arguments)]
 pub fn build_client(
     mut headers: HeaderMap,
     proxy: Proxy<&str>,
@@ -31,6 +33,7 @@ pub fn build_client(
     #[allow(unused)] cookie_store: bool,
     local_addr: Option<std::net::IpAddr>,
     max_redirects: usize,
+    connect_timeout: Duration,
 ) -> Result<SmartRedirectClient, BuildClientError> {
     let referer = headers.remove("referer");
     let referrer_policy = headers
@@ -44,6 +47,7 @@ pub fn build_client(
     let mut client = ClientBuilder::new()
         .default_headers(headers)
         .local_address(local_addr)
+        .connect_timeout(connect_timeout)
         .redirect(Policy::none());
     client = match proxy {
         Proxy::No => client.no_proxy(),
@@ -90,6 +94,7 @@ pub struct FastDownPuller {
     available_ips: Arc<[std::net::IpAddr]>,
     turn: Arc<std::sync::atomic::AtomicUsize>,
     max_redirects: usize,
+    connect_timeout: Duration,
 }
 // Field-level docs live on [`FastDownPullerOptions`], the public construction
 // surface; the runtime struct mirrors those fields.
@@ -117,6 +122,8 @@ pub struct FastDownPullerOptions<'a> {
     pub available_ips: Arc<[std::net::IpAddr]>,
     /// Maximum number of redirects to follow before failing.
     pub max_redirects: usize,
+    /// Bounds one TCP connect (DNS + proxy tunnel + TLS handshake).
+    pub connect_timeout: Duration,
 }
 
 impl FastDownPuller {
@@ -143,6 +150,7 @@ impl FastDownPuller {
                     .copied()
             },
             option.max_redirects,
+            option.connect_timeout,
         )?;
         let url = Arc::new(option.url);
         Ok(Self {
@@ -163,6 +171,7 @@ impl FastDownPuller {
             available_ips,
             turn,
             max_redirects: option.max_redirects,
+            connect_timeout: option.connect_timeout,
         })
     }
 }
@@ -189,6 +198,7 @@ impl Clone for FastDownPuller {
                         .copied()
                 },
                 self.max_redirects,
+                self.connect_timeout,
             )
             .map_or_else(
                 |_| self.inner.clone(),
@@ -212,6 +222,7 @@ impl Clone for FastDownPuller {
             available_ips,
             turn,
             max_redirects: self.max_redirects,
+            connect_timeout: self.connect_timeout,
         }
     }
 }
@@ -243,6 +254,7 @@ mod tests {
             resp: None,
             available_ips: Arc::from(Vec::<std::net::IpAddr>::new()),
             max_redirects: 10,
+            connect_timeout: Duration::from_secs(10),
         }
     }
 
@@ -272,6 +284,7 @@ mod tests {
             false,
             None,
             10,
+            Duration::from_secs(10),
         )
         .expect("build_client with a custom proxy must succeed");
         let _ = client;
@@ -302,8 +315,17 @@ mod tests {
     #[test]
     fn build_client_system_proxy_succeeds() {
         let headers = HeaderMap::new();
-        let client = build_client(headers, Proxy::System, false, false, false, None, 10)
-            .expect("build_client with the system proxy must succeed");
+        let client = build_client(
+            headers,
+            Proxy::System,
+            false,
+            false,
+            false,
+            None,
+            10,
+            Duration::from_secs(10),
+        )
+        .expect("build_client with the system proxy must succeed");
         let _ = client;
     }
 

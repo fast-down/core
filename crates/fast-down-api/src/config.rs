@@ -123,6 +123,19 @@ pub struct Config {
     #[config(partial_attr(serde(default)))]
     pub pull_timeout: Duration,
 
+    /// Connect timeout. Recommended: `10s`
+    ///
+    /// Bounds one TCP connect, including DNS resolution, the proxy tunnel, and
+    /// the TLS handshake. Kept separate from [`Config::pull_timeout`] because
+    /// establishing a connection can legitimately take far longer than a read
+    /// stall: a distant CDN behind a proxy can need several seconds to hand
+    /// shake while still streaming at full speed afterwards. Capping connects
+    /// with the much shorter pull timeout would fail those requests outright.
+    #[config(default = Duration::from_secs(10))]
+    #[config(partial_attr(serde(with = "humantime_serde::option")))]
+    #[config(partial_attr(serde(default)))]
+    pub connect_timeout: Duration,
+
     /// Minimum interval between [`crate::Event::Progress`] emissions. Recommended: `500ms`
     ///
     /// The progress reporter runs on its own timer, so this cadence is driven
@@ -151,8 +164,8 @@ pub struct Config {
     ///     2. Mmap requires the file size to be known and byte-range support from
     ///        the server; when the `fast_download` flag (set during prefetch) is false,
     ///        it falls back to [`WriteMethod::Std`].
-    ///     3. In rare cases, the OS may cache all data in memory and flush it all
-    ///        at once after the download completes, causing a long post-download delay.
+    ///     3. Dirty pages are handed to the OS to write back lazily; only
+    ///        [`Config::sync_all`] forces them out at the end of the download.
     /// - [`WriteMethod::Std`] has the best compatibility. Out-of-order chunks are
     ///   re-ordered into sequential order by the cache layer before being written.
     pub write_method: WriteMethod,

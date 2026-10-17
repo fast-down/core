@@ -75,6 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         resp: None,
         available_ips: Arc::from(Vec::<std::net::IpAddr>::new()),
         max_redirects: 10,
+        connect_timeout: Duration::from_secs(10),
     })?;
 
     let result = download_multi(

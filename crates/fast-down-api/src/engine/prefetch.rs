@@ -32,6 +32,7 @@ pub async fn prefetch(
         config.cookie_store,
         config.local_address.first().copied(),
         config.max_redirects,
+        config.connect_timeout,
     )
     .map_err(PlanError::BuildClient)?;
     let mut retry_count = 0;

@@ -52,6 +52,7 @@ pub async fn build_pipeline(
                 resp,
                 available_ips: config.local_address.clone().into(),
                 max_redirects: config.max_redirects,
+                connect_timeout: config.connect_timeout,
             })
             .map_err(Event::BuildClientError)?;
 
