@@ -331,10 +331,29 @@ mod tests {
 
     #[tokio::test]
     async fn fast_down_puller_pull_forwards_to_inner() {
-        let opts = make_options(Url::parse("http://example.com/a.bin").unwrap());
+        // `pull` now issues the request before returning, so it needs a server that
+        // actually answers. Bind an ephemeral port and serve one ranged response.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 206 Partial Content\r\n\
+                          Content-Length: 4\r\n\
+                          Content-Range: bytes 0-3/4\r\n\
+                          Accept-Ranges: bytes\r\n\r\nbody",
+                    )
+                    .await;
+            }
+        });
+        let opts = make_options(Url::parse(&format!("http://{addr}/a.bin")).unwrap());
         let mut puller = FastDownPuller::new(opts).expect("FastDownPuller::new must succeed");
-        // `pull` simply forwards to the inner `HttpPuller`; driving the stream is
-        // not required to cover the forwarding body.
+        // `pull` forwards to the inner `HttpPuller`; a reachable server makes the
+        // forwarding observable as an `Ok`.
         let stream = FastDownPuller::pull(&mut puller, None).await;
         assert!(stream.is_ok());
     }

@@ -215,21 +215,50 @@ where
                 }
                 let _ = tx.send(Event::Pulling(id));
                 let download_range = start..task.end();
-                let mut stream = loop {
-                    let t = tokio::select! {
-                        () = worker_token.cancelled() => break 'task,
-                        t = puller.pull(Some(&download_range)) => t
-                    };
-                    match t {
-                        Ok(t) => break t,
-                        Err((e, retry_gap)) => {
-                            let _ = tx.send(Event::PullError(id, e));
-                            tokio::select! {
-                                () = worker_token.cancelled() => break 'task,
-                                () = tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)) => {}
-                            };
+                let mut stream = 'attempt: {
+                    // The `select!` result may borrow `puller` through the stream it
+                    // returns, so it lives in its own scope: that borrow ends here and
+                    // the retry below is free to rebind `puller`.
+                    let gap = {
+                        let t = tokio::select! {
+                            () = worker_token.cancelled() => break 'task,
+                            () = tokio::time::sleep(pull_timeout) => None,
+                            t = puller.pull(Some(&download_range)) => Some(t)
+                        };
+                        match t {
+                            Some(Ok(stream)) => break 'attempt stream,
+                            Some(Err((e, retry_gap))) => {
+                                let _ = tx.send(Event::PullError(id, e));
+                                retry_gap.unwrap_or(cfg_retry_gap)
+                            }
+                            None => {
+                                let _ = tx.send(Event::PullTimeout(id));
+                                // The stall already consumed `pull_timeout`; waiting
+                                // again would only double the gap.
+                                Duration::ZERO
+                            }
                         }
+                    };
+                    // Wait out the backoff first: cancelling during it must not
+                    // pay for building a client that will never be used. Rebuilding
+                    // after the wait also hands the next attempt a client that is
+                    // fresh at the moment it is needed, rather than one that has
+                    // been idle for the whole gap.
+                    tokio::select! {
+                        () = worker_token.cancelled() => break 'task,
+                        () = tokio::time::sleep(gap) => {}
                     }
+                    // A failed pull is retried the same way whether it errored or
+                    // stalled: rebuild the puller, which yields a fresh client and
+                    // the next local source IP, so a rejected or wedged path is left
+                    // behind instead of being retried on the same one.
+                    puller = puller.clone();
+                    // Retry from the top of the task loop instead of re-pulling this
+                    // range: a speculative twin shares the cursor and may have
+                    // advanced or drained it while this attempt was being rebuilt. The
+                    // top re-reads the cursor, steals fresh work or finishes when
+                    // nothing is left, and announces the request it is about to issue.
+                    continue 'task;
                 };
                 loop {
                     let t = tokio::select! {
@@ -275,6 +304,11 @@ where
                                 () = tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)) => {}
                             };
                             if is_irrecoverable {
+                                // Nothing left in this stream: the attempt is spent.
+                                // Rebuild the puller so the retry leaves the current
+                                // client and source IP behind.
+                                drop(stream);
+                                puller = puller.clone();
                                 continue 'task;
                             }
                         }
@@ -983,6 +1017,159 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A [`Puller`] whose first `pull` never resolves, modelling a server that
+    /// accepts the connection but never sends a response head. Later pulls serve
+    /// the data, so the worker recovers instead of parking forever.
+    #[derive(Debug, Clone)]
+    struct HeadStallOncePuller {
+        data: Arc<[u8]>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl crate::Puller for HeadStallOncePuller {
+        type Error = std::convert::Infallible;
+        fn pull(
+            &mut self,
+            range: Option<&crate::ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let data: Vec<u8> = match range {
+                Some(r) => self.data[r.start as usize..r.end as usize].to_vec(),
+                None => self.data.to_vec(),
+            };
+            async move {
+                type Item = crate::PullResult<Bytes, std::convert::Infallible>;
+                if call == 0 {
+                    std::future::pending::<crate::PullResult<_, std::convert::Infallible>>().await
+                } else {
+                    let items: Vec<Item> = data
+                        .chunks(2)
+                        .map(|c| Ok(Bytes::copy_from_slice(c)))
+                        .collect();
+                    Ok(Box::pin(stream::iter(items))
+                        as std::pin::Pin<
+                            Box<dyn futures::Stream<Item = Item> + Send>,
+                        >)
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_pull_timeout_covers_the_request() {
+        // A `pull` that never resolves (the response head never arrives) must be
+        // abandoned after `pull_timeout` and retried; a single worker leaves nothing
+        // else able to make progress.
+        let mock_data = build_mock_data(2 * 1024);
+        let puller = HeadStallOncePuller {
+            data: Arc::from(mock_data.as_slice()),
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 1,
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_millis(50),
+                min_chunk_size: 1,
+                max_speculative: 1,
+            },
+        );
+        timeout(Duration::from_secs(10), drain(&result))
+            .await
+            .expect("download must not hang when the response head never arrives");
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_pull_error_also_rebuilds_the_puller() {
+        // A failed pull is retried like a stalled one: the puller is rebuilt, not
+        // reused. The failure flag is shared, so only the first attempt errors and
+        // every clone serves the data. Reaching the full payload therefore proves the
+        // retry ran on a rebuilt puller.
+        #[derive(Debug)]
+        struct CloneCountingPuller {
+            data: Arc<[u8]>,
+            failed: Arc<AtomicBool>,
+            clones: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl Clone for CloneCountingPuller {
+            fn clone(&self) -> Self {
+                self.clones.fetch_add(1, Ordering::SeqCst);
+                Self {
+                    data: self.data.clone(),
+                    failed: self.failed.clone(),
+                    clones: self.clones.clone(),
+                }
+            }
+        }
+        impl crate::Puller for CloneCountingPuller {
+            type Error = RecoverableErr;
+            fn pull(
+                &mut self,
+                range: Option<&crate::ProgressEntry>,
+            ) -> impl Future<
+                Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+            > + Send {
+                if !self.failed.swap(true, Ordering::SeqCst) {
+                    return std::future::ready(Err((RecoverableErr, Some(Duration::ZERO))));
+                }
+                let data: Vec<u8> = match range {
+                    Some(r) => self.data[r.start as usize..r.end as usize].to_vec(),
+                    None => self.data.to_vec(),
+                };
+                let items: Vec<crate::PullResult<Bytes, RecoverableErr>> = data
+                    .chunks(2)
+                    .map(|c| Ok(Bytes::copy_from_slice(c)))
+                    .collect();
+                std::future::ready(Ok(stream::iter(items)))
+            }
+        }
+
+        let mock_data = build_mock_data(2 * 1024);
+        let clones = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let puller = CloneCountingPuller {
+            data: Arc::from(mock_data.as_slice()),
+            failed: Arc::new(AtomicBool::new(false)),
+            clones: clones.clone(),
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 1,
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::from_secs(5),
+                min_chunk_size: 1,
+                max_speculative: 1,
+            },
+        );
+        drain(&result).await;
+        assert_eq!(&**receive.lock(), mock_data);
+        // `execute` clones the puller once for its own worker, so a single retry
+        // raises the count to 2. Asserting on that offset keeps the test from
+        // passing on the initial clone alone.
+        assert!(
+            clones.load(Ordering::SeqCst) >= 2,
+            "retrying a failed pull must rebuild the puller instead of reusing it \
+             (one clone belongs to `execute`, the second to the retry)"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

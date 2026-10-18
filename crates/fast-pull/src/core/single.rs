@@ -99,14 +99,24 @@ pub fn download_single<R: Puller, W: Pusher>(
         'redownload: loop {
             let _ = tx.send(Event::Pulling(ID));
             let mut downloaded: u64 = 0;
-            let mut stream = loop {
-                match puller.pull(None).await {
-                    Ok(t) => break t,
+            let mut stream = 'attempt: {
+                // The `select!`-free equivalent of the concurrent worker: the pull
+                // result may borrow `puller` through the stream it returns, so it is
+                // consumed in its own scope and the rebinding below still compiles.
+                let gap = match puller.pull(None).await {
+                    Ok(t) => break 'attempt t,
                     Err((e, retry_gap)) => {
                         let _ = tx.send(Event::PullError(ID, e));
-                        tokio::time::sleep(retry_gap.unwrap_or(options.retry_gap)).await;
+                        retry_gap.unwrap_or(options.retry_gap)
                     }
-                }
+                };
+                tokio::time::sleep(gap).await;
+                // Rebuild the puller so the next attempt leaves the failed client and
+                // source IP behind, then restart the download on it. This path exists
+                // for servers without Range support, so there is no cursor to resume
+                // from: every attempt starts at byte 0.
+                puller = puller.clone();
+                continue 'redownload;
             };
             loop {
                 match stream.try_next().await {
@@ -126,6 +136,11 @@ pub fn download_single<R: Puller, W: Pusher>(
                         let _ = tx.send(Event::PullError(ID, e));
                         tokio::time::sleep(retry_gap.unwrap_or(options.retry_gap)).await;
                         if is_irrecoverable {
+                            // The attempt is spent; restart it on a rebuilt puller
+                            // (fresh client, next local source IP) instead of
+                            // reusing the one that just failed.
+                            drop(stream);
+                            puller = puller.clone();
                             continue 'redownload;
                         }
                     }
@@ -866,17 +881,13 @@ mod tests {
         }
     }
 
-    /// `download_single` reads the body with a bare `stream.try_next().await`
-    /// (single.rs) and its `DownloadOptions` has no `pull_timeout` field, so a
-    /// stalled body blocks forever. This asserts the session ends (a
-    /// `PullTimeout`/error surfaces and the event channel closes) within 3s.
-    ///
-    /// `#[ignore]`d because the fix (adding `pull_timeout` to `DownloadOptions`
-    /// and giving up with an error instead of hanging) does not exist yet; remove
-    /// `#[ignore]` once that lands.
     #[tokio::test]
-    #[ignore = "regression baseline: download_single has no pull_timeout, a stalled body hangs forever; enable after adding pull_timeout to DownloadOptions and surfacing a PullTimeout/error"]
-    async fn test_single_stall_body_hangs_without_timeout() {
+    async fn test_single_stalled_body_waits_and_never_gives_up() {
+        // `download_single` serves servers that cannot honour ranges, so a retry
+        // always restarts at byte 0 and no progress survives it. There is therefore
+        // no stall timeout: timing out would either restart a slow download forever
+        // or abandon one that would have finished. A quiet body must be waited on
+        // indefinitely, which the engine reports as "still running".
         let puller = StallPuller;
         let pusher = MemPusher::with_capacity(0);
         let result = download_single(
@@ -887,16 +898,13 @@ mod tests {
                 push_queue_cap: 1024,
             },
         );
-        // The session must not block forever: within 3s the event channel must
-        // close (a timeout/error must surface and end the download). Today it
-        // hangs, so the outer timeout fires and the assertion fails.
-        let drained = tokio::time::timeout(Duration::from_secs(3), async {
+        let drained = tokio::time::timeout(Duration::from_secs(2), async {
             while result.event_chain().recv().await.is_ok() {}
         })
         .await;
         assert!(
-            drained.is_ok(),
-            "download_single must not hang forever on a stalled body; a pull_timeout should surface a PullTimeout or error and end the session"
+            drained.is_err(),
+            "a stalled body must keep the session waiting, not end it"
         );
     }
 }

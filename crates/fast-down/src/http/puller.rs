@@ -12,7 +12,7 @@ use crate::http::{
 use async_stream::stream;
 use fast_pull::{ProgressEntry, PullResult, PullStream, Puller};
 use parking_lot::Mutex;
-use std::{fmt::Debug, future::Future, sync::Arc};
+use std::{fmt::Debug, sync::Arc};
 use url::Url;
 
 /// A [`Puller`] implementation that fetches data over HTTP.
@@ -72,13 +72,10 @@ impl<Client: HttpClient> Debug for HttpPuller<Client> {
 
 impl<Client: HttpClient> Puller for HttpPuller<Client> {
     type Error = HttpError<Client>;
-    fn pull(
+    async fn pull(
         &mut self,
         range: Option<&ProgressEntry>,
-    ) -> impl Future<Output = PullResult<impl PullStream<Self::Error>, Self::Error>> + Send {
-        let client = self.client.clone();
-        let url = self.url.clone();
-        let file_id = self.file_id.clone();
+    ) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
         // Reuse the prefetched whole-file response whenever the requested range
         // begins at offset 0. That covers both a whole-file request (`range ==
         // None`) and a finite ranged slice (`Some(0..end)`): the prefetched body
@@ -86,100 +83,70 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
         // `start > 0` cannot be served from a response rooted at 0, so it issues
         // its own ranged request. The download engine caps any overshoot to the
         // task's end, so no per-chunk slicing is needed here.
-        let mut reused = if range.is_none_or(|r| r.start == 0) {
+        let reused = if range.is_none_or(|r| r.start == 0) {
             self.resp.as_ref().and_then(|m| m.lock().take())
         } else {
             None
         };
-        // Keep the `Option`: `None` means a whole-file GET with no `Range` header
-        // (single-threaded, no known end), `Some(r)` means a ranged `Range:` request
-        // (multi-threaded slice, resumable). The two states are handled in distinct
-        // branches below — no `u64::MAX` sentinel.
-        let mut range = range.cloned();
 
-        std::future::ready(Ok(Box::pin(stream! {
+        // Obtain the response here, not inside the stream. The stream is lazy, so a
+        // request issued within it would not start until the first poll — `pull`
+        // would report success before a single byte was asked for, and a caller
+        // timing `pull` out would never see the wait. Awaiting here makes the request
+        // itself observable and cancellable.
+        let mut current: GetResponse<Client> = match reused {
+            Some(resp) => resp,
+            None => self
+                .client
+                .get((*self.url).clone(), range.cloned())
+                .send()
+                .await
+                .map_err(|(e, retry)| (HttpError::Request(e), retry))?,
+        };
+
+        // File identity is verified for every response — the reused one and every
+        // freshly requested one.
+        let new_file_id = FileId::new(
+            current.headers().get("etag").ok().as_deref(),
+            current.headers().get("last-modified").ok().as_deref(),
+        );
+        if new_file_id != self.file_id {
+            // Content changed underneath us. Surface it instead of streaming a body
+            // that belongs to a different resource.
+            return Err((HttpError::MismatchedBody(new_file_id, current), None));
+        }
+
+        Ok(Box::pin(stream! {
+            // One response per call. Retrying is the engine's job: a chunk error ends
+            // this attempt, the engine rebuilds the puller (new client, next local
+            // source IP) and calls `pull` again with its own advanced cursor.
+            // Re-requesting here would pin the retry to the same client and could
+            // never rotate away from a path the server keeps cutting.
+            //
             // Stream contract: `Ok(None)` (clean termination) is reached ONLY on a
-            // genuine EOF — when `current.chunk()` returns `Ok(None)`. After any
-            // error the stream stays alive and keeps yielding `Irrecoverable`
-            // (whose `is_irrecoverable()` is true), so the engine re-invokes
-            // `pull` to recover and can never mistake a failed pull for a finished
-            // one. A ranged read failure instead breaks back to the top to resume
-            // from the advanced offset (`range.start` is itself the cursor — it
-            // holds the number of bytes already yielded and advances across
-            // retries, so a resumed ranged request starts from it).
+            // genuine EOF — when `current.chunk()` returns `Ok(None)`. A failed read
+            // reports the failure and then keeps yielding `Irrecoverable`, so the
+            // engine can never mistake a failed pull for a finished one.
             loop {
-                // Obtain the response for this pass. The prefetched whole-file body
-                // is taken once (it is consumed on the first iteration and `reused`
-                // becomes `None`, so retries fall through to a fresh request). The
-                // request uses `range.clone()`: on the first pass `range.start` is
-                // the original start, and after yielding chunks it is the advanced
-                // offset, so a retry automatically resumes from where it stopped.
-                let mut current: GetResponse<Client>;
-                if let Some(resp) = reused.take() {
-                    current = resp;
-                } else {
-                    match client.get((*url).clone(), range.clone()).send().await {
-                        Ok(resp) => current = resp,
-                        Err((e, retry)) => {
-                            // The request itself failed: report it once, then keep
-                            // yielding `Irrecoverable` so the engine re-pulls. The
-                            // stream must never return `Ok(None)` here.
-                            yield Err((HttpError::Request(e), retry));
-                            loop {
-                                yield Err((HttpError::Irrecoverable, None));
-                            }
-                        }
-                    }
-                }
-
-                // File identity is verified for every response — the reused one and
-                // every retry — in a single, obvious place.
-                let new_file_id = FileId::new(
-                    current.headers().get("etag").ok().as_deref(),
-                    current.headers().get("last-modified").ok().as_deref(),
-                );
-                if new_file_id != file_id {
-                    // Content changed underneath us. Report the mismatch, then keep
-                    // yielding `Irrecoverable` until the engine re-pulls — the
-                    // stream never terminates with `Ok(None)` after an error.
-                    yield Err((HttpError::MismatchedBody(new_file_id, current), None));
-                    loop {
-                        yield Err((HttpError::Irrecoverable, None));
-                    }
-                }
-
-                loop {
-                    match current.chunk().await {
-                        Ok(Some(chunk)) => {
-                            if let Some(r) = &mut range {
-                                r.start += chunk.len() as u64;
-                            }
-                            yield Ok(chunk);
-                        }
-                        Ok(None) => return,
-                        Err(e) => {
-                            // Report the underlying read failure (carries `current`
-                            // for diagnostics), then decide whether it is recoverable.
-                            yield Err((HttpError::Chunk(e, current), None));
-                            match &range {
-                                // Whole-file: there is no known end to resume from,
-                                // so the failure is fatal; the engine re-calls
-                                // `pull(None)` from the start.
-                                // Whole-file: no known end to resume from, so the
-                                // failure is terminal. Keep yielding `Irrecoverable`
-                                // (never `Ok(None)`) until the engine re-pulls.
-                                None => loop {
-                                    yield Err((HttpError::Irrecoverable, None));
-                                },
-                                // Ranged slice: `break` back to the top of the loop to
-                                // obtain a fresh request from the advanced `range.start`.
-                                Some(_) => break,
-                            }
+                match current.chunk().await {
+                    Ok(Some(chunk)) => yield Ok(chunk),
+                    Ok(None) => return,
+                    Err(e) => {
+                        // Report the underlying read failure (carries `current` for
+                        // diagnostics). The response is spent, so there is nothing to
+                        // resume from: hand the range back to the engine, which
+                        // re-pulls from the bytes it has already accepted.
+                        yield Err((HttpError::Chunk(e, current), None));
+                        loop {
+                            // `Irrecoverable` is the engine's signal to drop this
+                            // stream and rebuild the puller. Any other error keeps it
+                            // polling — on a spent stream that never resolves again.
+                            yield Err((HttpError::Irrecoverable, None));
                         }
                     }
                 }
             }
-        })))
+        }))
     }
 }
 
@@ -187,6 +154,7 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use std::borrow::Cow;
+    use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll};
@@ -439,12 +407,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_http_puller_mismatched_body() {
+        // The identity check runs on the response head, so a changed resource is
+        // reported by `pull` itself rather than by the stream.
         let url = Url::parse("http://localhost").unwrap();
         let client = MismatchClient;
         let file_id = FileId::new(None, None);
         let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
-        let mut stream = Puller::pull(&mut puller, None).await.unwrap();
-        let result = stream.try_next().await;
+        let result = Puller::pull(&mut puller, None).await;
         assert!(matches!(
             result,
             Err((HttpError::MismatchedBody(_, _), None))
@@ -453,12 +422,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_http_puller_request_error() {
+        // A failed request is a failed `pull`, not a stream that reports the error
+        // on its first poll.
         let url = Url::parse("http://localhost").unwrap();
         let client = ReqErrClient;
         let file_id = FileId::new(None, None);
         let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
-        let mut stream = Puller::pull(&mut puller, None).await.unwrap();
-        let result = stream.try_next().await;
+        let result = Puller::pull(&mut puller, None).await;
         assert!(matches!(result, Err((HttpError::Request(_), None))));
     }
 
@@ -469,37 +439,36 @@ mod tests {
         let file_id = FileId::new(None, None);
         let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
         let mut stream = Puller::pull(&mut puller, None).await.unwrap();
-        // Full-file pull: Pending -> Ok(resp) -> file_id matches -> Streaming.
-        // The first poll of the stream yields the chunk error.
+        // The first poll reports the read failure, carrying the spent response.
         let first = stream.try_next().await;
         assert!(matches!(first, Err((HttpError::Chunk(_, _), None))));
-        // The chunk error leaves state == None with range.end == u64::MAX, so the
-        // next poll returns HttpError::Irrecoverable.
+        // The response is spent, so the stream reports `Irrecoverable` from then on.
+        // That is what makes the engine drop the stream and rebuild the puller; a
+        // recoverable error would leave it polling a stream that never yields again.
         let second = stream.try_next().await;
         assert!(matches!(second, Err((HttpError::Irrecoverable, None))));
     }
 
     #[tokio::test]
     async fn test_http_puller_error_stream_never_terminates() {
-        // After a whole-file error the stream must keep yielding `Irrecoverable`
-        // and never produce `Ok(None)`: `Ok(None)` is reserved for a genuine EOF,
-        // so the engine can never treat a failed pull as finished.
+        // After a read failure the stream must keep reporting `Irrecoverable` and
+        // never produce `Ok(None)`: `Ok(None)` is reserved for a genuine EOF, so the
+        // engine can never treat a failed pull as finished.
         let url = Url::parse("http://localhost").unwrap();
         let client = ChunkErrClient;
         let file_id = FileId::new(None, None);
         let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
         let mut stream = Puller::pull(&mut puller, None).await.unwrap();
-        // First poll: the chunk read error.
         assert!(matches!(
             stream.try_next().await,
             Err((HttpError::Chunk(_, _), None))
         ));
-        // Subsequent polls: always `Irrecoverable`, never `Ok(None)`.
         for _ in 0..5 {
-            assert!(matches!(
-                stream.try_next().await,
-                Err((HttpError::Irrecoverable, None))
-            ));
+            let polled = tokio::time::timeout(Duration::from_millis(50), stream.try_next()).await;
+            assert!(
+                matches!(polled, Ok(Err((HttpError::Irrecoverable, None)))),
+                "a spent stream must keep reporting Irrecoverable"
+            );
         }
     }
 
@@ -598,21 +567,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resume_range_advances_after_chunk_error() {
+    async fn test_chunk_error_hands_the_range_back_to_the_engine() {
+        // A chunk error ends the attempt: the stream must not re-request on its own
+        // (that would pin the retry to the same client). It reports the failure, then
+        // keeps yielding `Irrecoverable` so the engine rebuilds the puller and
+        // re-pulls from its own advanced cursor.
         let url = Url::parse("http://localhost").unwrap();
         let file_id = FileId::new(None, None);
         let mut puller = HttpPuller::new(Arc::new(url), ResumeClient, None, file_id);
         let range = 0..100;
         let mut stream = Puller::pull(&mut puller, Some(&range)).await.unwrap();
-        // First chunk succeeds ("success" = 7 bytes), advancing range.start to 7.
-        let first = stream.try_next().await;
-        assert!(matches!(first, Ok(Some(_))));
-        // Next poll: chunk error is returned, state resets to None.
-        let second = stream.try_next().await;
-        assert!(matches!(second, Err((HttpError::Chunk(_, _), None))));
-        // Third poll: state None -> retry request issued with advanced start == 7.
-        let third = stream.try_next().await;
-        assert!(matches!(third, Ok(Some(_))));
+        // First chunk succeeds ("success" = 7 bytes).
+        assert!(matches!(stream.try_next().await, Ok(Some(_))));
+        // Next poll reports the read failure, carrying the response for diagnostics.
+        assert!(matches!(
+            stream.try_next().await,
+            Err((HttpError::Chunk(_, _), None))
+        ));
+        // From there on the stream is spent: it issues no second request, and every
+        // later poll says `Irrecoverable` — the error that makes the engine drop it.
+        for _ in 0..3 {
+            let polled = tokio::time::timeout(Duration::from_millis(50), stream.try_next()).await;
+            assert!(
+                matches!(polled, Ok(Err((HttpError::Irrecoverable, None)))),
+                "a spent stream must report Irrecoverable, not go silent"
+            );
+        }
+        assert_eq!(
+            RESUME_RANGE_START.load(Ordering::SeqCst),
+            0,
+            "the stream must not issue a follow-up request of its own"
+        );
+        drop(stream);
+
+        // The engine's retry, expressed as a fresh pull from the advanced offset,
+        // does resume at 7.
+        let mut stream = Puller::pull(&mut puller, Some(&(7..100))).await.unwrap();
+        assert!(matches!(stream.try_next().await, Ok(Some(_))));
         assert_eq!(RESUME_RANGE_START.load(Ordering::SeqCst), 7);
     }
 }
