@@ -467,15 +467,31 @@ mod tests {
 
     /// Mount an endpoint that serves `body` and honours `Range` requests, as a
     /// server advertising `Accept-Ranges: bytes` would.
+    ///
+    /// A `206` reply must also carry the `Content-Range` of the slice it sends;
+    /// the puller rejects a body that does not start where it asked, so the
+    /// header is derived from the request like the body is.
     async fn mount_range_endpoint(
         server: &mut mockito::ServerGuard,
         path: &str,
         body: Vec<u8>,
     ) -> mockito::Mock {
+        let body_len = body.len();
         server
             .mock("GET", path)
             .with_status(206)
             .with_header("Accept-Ranges", "bytes")
+            .with_header_from_request("Content-Range", move |request| {
+                request.header("Range").first().map_or_else(
+                    // No Range header: the whole file, which any response may carry.
+                    || format!("bytes 0-{}/{}", body_len.saturating_sub(1), body_len),
+                    |value| {
+                        let spec = value.to_str().unwrap_or_default().to_string();
+                        let range = spec.rsplit('=').next().unwrap_or_default().trim();
+                        format!("bytes {range}/*")
+                    },
+                )
+            })
             .with_body_from_request(move |request| {
                 if !request.has_header("Range") {
                     return body.clone();

@@ -4,7 +4,9 @@
 //! trait and streams the response body back as a [`fast_pull::PullStream`]. It
 //! verifies the server's `ETag` / `Last-Modified` headers against the expected
 //! [`crate::FileId`] so that a changed file is reported as [`crate::http::HttpError::MismatchedBody`]
-//! rather than silently corrupting an incremental download.
+//! rather than silently corrupting an incremental download, and it verifies the
+//! `Content-Range` start of every mid-file request so a server that ignores
+//! `Range` cannot have its whole-file body written at the requested offset.
 
 use crate::http::{
     FileId, GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse,
@@ -59,6 +61,18 @@ impl<Client: HttpClient> HttpPuller<Client> {
         }
     }
 }
+
+/// The first byte offset a response body starts at, read from `Content-Range`.
+///
+/// Accepts `bytes <start>-<end>/<size>`; the `bytes */<size>` form (no body
+/// range) and any malformed value yield `None`.
+fn content_range_start(headers: &impl HttpHeaders) -> Option<u64> {
+    let raw = headers.get("content-range").ok()?;
+    let rest = raw.trim().strip_prefix("bytes")?.trim_start();
+    let (start, _) = rest.split_once('-')?;
+    start.trim().parse().ok()
+}
+
 impl<Client: HttpClient> Debug for HttpPuller<Client> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpPuller")
@@ -116,6 +130,24 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
             return Err((HttpError::MismatchedBody(new_file_id, current), None));
         }
 
+        // A ranged request must be answered with a body that starts where we asked.
+        // A server that ignores `Range` replies `200` with the whole file; the
+        // engine would write that body at `range.start`, silently corrupting the
+        // output. The `Content-Range` offset is the only proof of the body's
+        // position that reaches this layer.
+        if let Some(expected) = range
+            && expected.start > 0
+            && content_range_start(current.headers()) != Some(expected.start)
+        {
+            return Err((
+                HttpError::RangeIgnored {
+                    start: expected.start,
+                    resp: current,
+                },
+                None,
+            ));
+        }
+
         Ok(Box::pin(stream! {
             // One response per call. Retrying is the engine's job: a chunk error ends
             // this attempt, the engine rebuilds the puller (new client, next local
@@ -165,20 +197,22 @@ mod tests {
     use super::*;
     use futures::TryStreamExt;
 
+    /// A mock client whose single response carries a `Content-Range` starting at
+    /// the given offset (`None` = no such header, like a `200` reply).
     #[derive(Clone, Debug)]
-    struct MockClient;
+    struct MockClient(Option<u64>);
     impl HttpClient for MockClient {
         type RequestBuilder = MockRequestBuilder;
         fn get(&self, _url: Url, _range: Option<ProgressEntry>) -> Self::RequestBuilder {
-            MockRequestBuilder
+            MockRequestBuilder(self.0)
         }
     }
-    struct MockRequestBuilder;
+    struct MockRequestBuilder(Option<u64>);
     impl HttpRequestBuilder for MockRequestBuilder {
         type Response = MockResponse;
         type RequestError = MockError;
         fn send(self) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> {
-            std::future::ready(Ok(MockResponse::new()))
+            std::future::ready(Ok(MockResponse::new(self.0)))
         }
     }
     #[derive(Debug)]
@@ -187,9 +221,9 @@ mod tests {
         url: Url,
     }
     impl MockResponse {
-        fn new() -> Self {
+        fn new(content_range: Option<u64>) -> Self {
             Self {
-                headers: MockHeaders,
+                headers: MockHeaders(content_range),
                 url: Url::parse("http://mock-url").unwrap(),
             }
         }
@@ -207,12 +241,19 @@ mod tests {
             DelayChunk::new().await
         }
     }
+    /// Only `content-range` is ever present; every other header reads as absent.
+    /// The start offset is rendered in the `Content-Range` form the parser reads.
     #[derive(Debug)]
-    struct MockHeaders;
+    struct MockHeaders(Option<u64>);
     impl HttpHeaders for MockHeaders {
         type GetHeaderError = MockError;
-        fn get(&self, _header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
-            Err(MockError)
+        fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
+            match (header, self.0) {
+                ("content-range", Some(start)) => {
+                    Ok(Cow::Owned(format!("bytes {start}-{start}/1000")))
+                }
+                _ => Err(MockError),
+            }
         }
     }
     #[derive(Debug, thiserror::Error)]
@@ -244,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_puller_infinite_loop_fix() {
         let url = Url::parse("http://localhost").unwrap();
-        let client = MockClient;
+        let client = MockClient(None);
         let file_id = FileId::new(None, None);
         let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
         let range = 0..7;
@@ -378,7 +419,7 @@ mod tests {
         type Headers = MockHeaders;
         type ChunkError = MockError;
         fn headers(&self) -> &Self::Headers {
-            &MockHeaders
+            &MockHeaders(None)
         }
         fn url(&self) -> &Url {
             &self.url
@@ -393,7 +434,12 @@ mod tests {
     #[test]
     fn http_puller_debug_formats() {
         let url = Url::parse("http://localhost").unwrap();
-        let puller = HttpPuller::new(Arc::new(url), MockClient, None, FileId::new(None, None));
+        let puller = HttpPuller::new(
+            Arc::new(url),
+            MockClient(None),
+            None,
+            FileId::new(None, None),
+        );
         let s = format!("{puller:?}");
         assert!(s.contains("HttpPuller"));
         assert!(s.contains("url"));
@@ -401,7 +447,7 @@ mod tests {
 
     #[test]
     fn mock_response_url_is_accessible() {
-        let r = MockResponse::new();
+        let r = MockResponse::new(None);
         assert_eq!(r.url().as_str(), "http://mock-url/");
     }
 
@@ -475,7 +521,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_puller_partial_range_request() {
         let url = Url::parse("http://localhost").unwrap();
-        let client = MockClient;
+        let client = MockClient(Some(10));
         let file_id = FileId::new(None, None);
         let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
         let range = 10..100;
@@ -492,9 +538,11 @@ mod tests {
         let url = Url::parse("http://localhost").unwrap();
         // Hand a pre-opened response to the puller; a full-file pull should reuse
         // it directly (lines 119-123) instead of issuing a new request.
-        let resp = Some(Arc::new(parking_lot::Mutex::new(Some(MockResponse::new()))));
+        let resp = Some(Arc::new(parking_lot::Mutex::new(Some(MockResponse::new(
+            None,
+        )))));
         let file_id = FileId::new(None, None);
-        let mut puller = HttpPuller::new(Arc::new(url), MockClient, resp, file_id);
+        let mut puller = HttpPuller::new(Arc::new(url), MockClient(None), resp, file_id);
         let mut stream = Puller::pull(&mut puller, None).await.unwrap();
         let result = tokio::time::timeout(Duration::from_secs(1), stream.try_next()).await;
         match result {
@@ -512,32 +560,34 @@ mod tests {
     impl HttpClient for ResumeClient {
         type RequestBuilder = ResumeRequestBuilder;
         fn get(&self, _url: Url, range: Option<ProgressEntry>) -> Self::RequestBuilder {
-            if let Some(r) = range {
+            if let Some(r) = &range {
                 RESUME_RANGE_START.store(r.start, Ordering::SeqCst);
             }
-            ResumeRequestBuilder
+            ResumeRequestBuilder(range.map_or(0, |r| r.start))
         }
     }
-    struct ResumeRequestBuilder;
+    struct ResumeRequestBuilder(u64);
     impl HttpRequestBuilder for ResumeRequestBuilder {
         type Response = ResumeResponse;
         type RequestError = MockError;
         fn send(
             self,
         ) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> + Send {
-            std::future::ready(Ok(ResumeResponse::new()))
+            std::future::ready(Ok(ResumeResponse::new(self.0)))
         }
     }
     #[derive(Debug)]
     struct ResumeResponse {
         url: Url,
         calls: u32,
+        headers: MockHeaders,
     }
     impl ResumeResponse {
-        fn new() -> Self {
+        fn new(start: u64) -> Self {
             Self {
                 url: Url::parse("http://mock-url").unwrap(),
                 calls: 0,
+                headers: MockHeaders(Some(start)),
             }
         }
     }
@@ -545,7 +595,7 @@ mod tests {
         type Headers = MockHeaders;
         type ChunkError = MockError;
         fn headers(&self) -> &Self::Headers {
-            &MockHeaders
+            &self.headers
         }
         fn url(&self) -> &Url {
             &self.url
@@ -605,5 +655,96 @@ mod tests {
         let mut stream = Puller::pull(&mut puller, Some(&(7..100))).await.unwrap();
         assert!(matches!(stream.try_next().await, Ok(Some(_))));
         assert_eq!(RESUME_RANGE_START.load(Ordering::SeqCst), 7);
+    }
+
+    /// A raw `Content-Range` value, for the parser cases the mock client cannot
+    /// build from an offset alone.
+    struct RawHeaders(&'static str);
+    impl HttpHeaders for RawHeaders {
+        type GetHeaderError = MockError;
+        fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
+            if header == "content-range" {
+                Ok(Cow::Borrowed(self.0))
+            } else {
+                Err(MockError)
+            }
+        }
+    }
+
+    #[test]
+    fn content_range_start_parses_the_common_forms() {
+        assert_eq!(
+            content_range_start(&MockHeaders(Some(5))),
+            Some(5),
+            "the ranged form must yield its start offset"
+        );
+        assert_eq!(
+            content_range_start(&RawHeaders("bytes */20")),
+            None,
+            "an unsatisfied range carries no body offset"
+        );
+        assert_eq!(
+            content_range_start(&MockHeaders(None)),
+            None,
+            "a response without Content-Range has no offset"
+        );
+    }
+
+    /// The corruption case this guards: a server that ignores `Range` answers
+    /// `200` with the whole file. Streaming it at the requested offset would
+    /// overwrite the wrong bytes, so the pull must fail instead.
+    #[tokio::test]
+    async fn a_whole_file_answer_to_a_mid_file_range_is_rejected() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            MockClient(None),
+            None,
+            FileId::new(None, None),
+        );
+        let range = 5..10;
+        let err = Puller::pull(&mut puller, Some(&range))
+            .await
+            .err()
+            .expect("a body without Content-Range must not be streamed as a chunk")
+            .0;
+        assert!(
+            matches!(err, HttpError::RangeIgnored { start: 5, .. }),
+            "expected RangeIgnored at the requested offset, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_starting_at_the_requested_offset_is_accepted() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            MockClient(Some(5)),
+            None,
+            FileId::new(None, None),
+        );
+        let range = 5..10;
+        assert!(
+            Puller::pull(&mut puller, Some(&range)).await.is_ok(),
+            "a response whose Content-Range starts at the requested byte is a valid chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_offset_range_needs_no_content_range() {
+        // A whole-file pull legitimately starts at 0, and a `200` reply to it
+        // carries the right bytes, so the header is not required.
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            MockClient(None),
+            None,
+            FileId::new(None, None),
+        );
+        let range = 0..10;
+        assert!(
+            Puller::pull(&mut puller, Some(&range)).await.is_ok(),
+            "a range starting at 0 must not require Content-Range"
+        );
     }
 }

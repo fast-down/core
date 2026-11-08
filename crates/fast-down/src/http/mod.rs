@@ -102,6 +102,18 @@ pub enum HttpError<Client: HttpClient> {
     /// The response's file identity did not match the expected one.
     #[error("body mismatch: expected file {0:?}, got different content\n  response: {1:?}")]
     MismatchedBody(FileId, GetResponse<Client>),
+    /// The server answered a ranged request with a body that does not start at
+    /// the requested offset — typically a whole-file `200` reply to a `Range`
+    /// request. Writing it where the caller asked for would corrupt the output.
+    #[error(
+        "server ignored the range request: expected a body starting at byte {start}\n  response: {resp:?}"
+    )]
+    RangeIgnored {
+        /// The offset the request asked for.
+        start: u64,
+        /// The response that did not honour it.
+        resp: GetResponse<Client>,
+    },
 }
 
 impl<Client: HttpClient> std::fmt::Debug for HttpError<Client> {
@@ -113,6 +125,11 @@ impl<Client: HttpClient> std::fmt::Debug for HttpError<Client> {
             Self::MismatchedBody(id, r) => {
                 f.debug_tuple("MismatchedBody").field(id).field(r).finish()
             }
+            Self::RangeIgnored { start, resp } => f
+                .debug_struct("RangeIgnored")
+                .field("start", start)
+                .field("resp", resp)
+                .finish(),
         }
     }
 }
@@ -205,6 +222,12 @@ mod tests {
             MockResponse::new(),
         );
         assert!(format!("{mismatched:?}").contains("MismatchedBody"));
+
+        let range_ignored = HttpError::<MockClient>::RangeIgnored {
+            start: 5,
+            resp: MockResponse::new(),
+        };
+        assert!(format!("{range_ignored:?}").contains("RangeIgnored"));
     }
 
     #[test]
@@ -218,6 +241,14 @@ mod tests {
                 MockResponse::new()
             )
             .is_irrecoverable()
+        );
+        assert!(
+            !HttpError::<MockClient>::RangeIgnored {
+                start: 5,
+                resp: MockResponse::new()
+            }
+            .is_irrecoverable(),
+            "a range-ignoring server may answer correctly on the retry"
         );
     }
 }
