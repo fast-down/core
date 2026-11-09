@@ -86,6 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             concurrent: 8,
             retry_gap: Duration::from_secs(1),
             pull_timeout: Duration::from_secs(30),
+            stall_timeout: Duration::from_secs(60),
             push_queue_cap: 1024,
             min_chunk_size: 1 << 20,
             max_speculative: 3,
@@ -102,4 +103,4 @@ fn main() {}
 
 For a sequential, single-threaded download, swap `download_multi` for
 `fast_pull::single::download_single` and use `fast_pull::single::DownloadOptions`
-(which only has `retry_gap` and `push_queue_cap`).
+(which has `retry_gap`, `push_queue_cap`, and `stall_timeout`).

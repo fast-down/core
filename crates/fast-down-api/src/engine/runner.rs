@@ -370,13 +370,17 @@ async fn drive(
     // 4. Drive the engine session to completion.
     let session = start_session(&config, &info, puller, pusher);
     ctx.attach(&session);
-    let record = drive_session(record, &fd_path, &info, &config, session, tx, token).await;
+    let (record, engine_aborted) =
+        drive_session(record, &fd_path, &info, &config, session, tx, token).await;
 
     if token.is_cancelled() {
         return TerminationReason::Cancelled;
     }
     if !record.is_complete(info.size) {
         return TerminationReason::Incomplete;
+    }
+    if engine_aborted {
+        return TerminationReason::Failed;
     }
 
     // 5. Rename the finished `.part` into place and drop the `.fd`.
@@ -485,6 +489,7 @@ fn start_session(
                 retry_gap: config.retry_gap,
                 pull_timeout: config.pull_timeout,
                 push_queue_cap: config.write_queue_cap,
+                stall_timeout: config.stall_timeout,
                 min_chunk_size: config.min_chunk_size,
                 max_speculative: config.max_speculative,
             },
@@ -496,6 +501,7 @@ fn start_session(
             fast_down::single::DownloadOptions {
                 retry_gap: config.retry_gap,
                 push_queue_cap: config.write_queue_cap,
+                stall_timeout: config.stall_timeout,
             },
         )
     }
@@ -503,7 +509,9 @@ fn start_session(
 
 /// Run the session to end: forward events, persist the state periodically, emit
 /// progress, and—once the engine stops—flush the final `.fd` and one terminal
-/// [`Event::Progress`]. Returns the record with its `elapsed` clock advanced.
+/// [`Event::Progress`]. Returns the record with its `elapsed` clock advanced,
+/// plus whether the engine aborted itself (for example a final flush that kept
+/// failing) rather than the caller cancelling.
 ///
 /// On a cancel the loop does not break: it stops aborting and keeps draining
 /// events until `recv` sees the channel close, which happens only once every
@@ -520,7 +528,7 @@ async fn drive_session(
     res: Session,
     tx: &Tx,
     token: &CancellationToken,
-) -> Record {
+) -> (Record, bool) {
     let loaded_elapsed = record.elapsed;
     let start = Instant::now();
     let mut tracker = StatsTracker::new(info.size, loaded_elapsed, record.progress());
@@ -588,7 +596,8 @@ async fn drive_session(
     let sample = tracker.snapshot_terminal(elapsed);
     let _ = tx.send(Event::Progress(sample));
 
-    record
+    let engine_aborted = res.is_aborted() && !token.is_cancelled();
+    (record, engine_aborted)
 }
 
 /// Rename the finished `.part` into place and drop the `.fd`, honouring
@@ -643,6 +652,7 @@ where
         fast_down::Event::Pulling(id) => tx.send(Event::Pulling(id)),
         fast_down::Event::PullError(id, e) => tx.send(Event::PullError(id, TaskError::new(e))),
         fast_down::Event::PullTimeout(id) => tx.send(Event::PullTimeout(id)),
+        fast_down::Event::Stalled(timeout) => tx.send(Event::Stalled(timeout)),
         fast_down::Event::PullProgress(id, range) => tx.send(Event::PullProgress(id, range)),
         fast_down::Event::Pushing(id, range) => tx.send(Event::Pushing(id, range)),
         fast_down::Event::PushError(id, range, e) => {

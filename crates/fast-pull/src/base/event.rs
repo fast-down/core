@@ -35,4 +35,11 @@ pub enum Event<PullError, PushError> {
     FlushError(PushError),
     /// A worker completed its assigned range and exited.
     Finished(WorkerId),
+    /// No chunk arrived for the session's stall timeout, so the session was
+    /// cancelled. Carries the configured timeout.
+    ///
+    /// Emitted once, right before the session-wide cancellation token is
+    /// triggered; every worker and the write driver then wind down on their
+    /// next poll.
+    Stalled(core::time::Duration),
 }

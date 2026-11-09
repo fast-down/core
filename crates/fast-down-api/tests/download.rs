@@ -44,6 +44,8 @@ struct FileData {
     /// When set, the body is streamed in chunks with this delay between them, so
     /// a slow client-side action (like cancelling) can land mid-transfer.
     throttle: Option<Duration>,
+    /// When set, the response sends headers but the body never produces a byte.
+    stall: bool,
 }
 
 #[derive(Clone)]
@@ -82,6 +84,7 @@ async fn handle(
     let last_modified = data.last_modified.clone();
     let body = data.body.clone();
     let throttle = data.throttle;
+    let stall = data.stall;
     drop(data);
 
     let range = req
@@ -106,7 +109,7 @@ async fn handle(
             .header(CONTENT_LENGTH, chunk.len().to_string())
             .header(ETAG, etag.as_str())
             .header(LAST_MODIFIED, last_modified.as_str())
-            .body(body_of(chunk, throttle))
+            .body(body_of(chunk, throttle, stall))
             .expect("206"));
     }
 
@@ -115,13 +118,17 @@ async fn handle(
         .header(CONTENT_LENGTH, body.len().to_string())
         .header(ETAG, etag.as_str())
         .header(LAST_MODIFIED, last_modified.as_str())
-        .body(body_of(body, throttle))
+        .body(body_of(body, throttle, stall))
         .expect("200"))
 }
 
 /// A response body: the whole `data` at once, or streamed in chunks with a
 /// delay when `throttle` is set.
-fn body_of(data: Vec<u8>, throttle: Option<Duration>) -> RespBody {
+fn body_of(data: Vec<u8>, throttle: Option<Duration>, stall: bool) -> RespBody {
+    if stall {
+        let stream = futures::stream::pending::<Result<hyper::body::Frame<Bytes>, Infallible>>();
+        return BodyExt::boxed(http_body_util::StreamBody::new(stream));
+    }
     let Some(delay) = throttle else {
         return http_body_util::Full::new(Bytes::from(data)).boxed();
     };
@@ -193,6 +200,25 @@ async fn start_server_throttled(
     supports_range: bool,
     throttle: Option<Duration>,
 ) -> (TestServer, String) {
+    start_server_with(body, etag, supports_range, throttle, false).await
+}
+
+/// A server that answers with headers and then never sends a body byte.
+async fn start_server_stalled(
+    body: Vec<u8>,
+    etag: &str,
+    supports_range: bool,
+) -> (TestServer, String) {
+    start_server_with(body, etag, supports_range, None, true).await
+}
+
+async fn start_server_with(
+    body: Vec<u8>,
+    etag: &str,
+    supports_range: bool,
+    throttle: Option<Duration>,
+    stall: bool,
+) -> (TestServer, String) {
     let server = TestServer {
         data: Arc::new(RwLock::new(FileData {
             body,
@@ -200,6 +226,7 @@ async fn start_server_throttled(
             last_modified: "Wed, 21 Oct 2026 07:28:00 GMT".to_string(),
             supports_range,
             throttle,
+            stall,
         })),
     };
     let url = server.serve().await;
@@ -276,6 +303,47 @@ async fn fresh_download_completes_and_renames() {
         !final_path.with_added_extension("fd").exists(),
         "the .fd is removed once the file lands"
     );
+}
+
+/// A source that sends headers and then never delivers a body must end the run
+/// with [`Event::Stalled`] instead of retrying forever, and leave the `.part`
+/// resumable.
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_source_reports_stalled_and_ends() {
+    let payload = vec![0x5Au8; FILE_SIZE];
+    let (_server, url) = start_server_stalled(payload, "v1", true).await;
+    let dir = temp_dir("stalled");
+
+    let mut config = make_config(&dir);
+    config.stall_timeout = Some(Duration::from_millis(200));
+    config.pull_timeout = Some(Duration::from_millis(50));
+    config.threads = Some(2);
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::new(Url::parse(&url).unwrap(), config)
+        .build(&tx)
+        .await
+        .expect("build");
+    let drain = tokio::spawn(async move {
+        let mut stalled = false;
+        let mut reason = None;
+        while let Ok(event) = rx.recv().await {
+            match event {
+                Event::Stalled(_) => stalled = true,
+                Event::Terminated(r) => reason = Some(r),
+                _ => {}
+            }
+        }
+        (stalled, reason)
+    });
+    let _handle = ready.start(StartMode::Auto, tx, &ctx);
+    let (stalled, reason) = timeout(Duration::from_secs(10), drain)
+        .await
+        .expect("a stalled source must end")
+        .expect("drain task");
+    assert!(stalled, "the run must report Event::Stalled");
+    assert_eq!(reason, Some(TerminationReason::Incomplete));
 }
 
 /// The pipeline reports the actually-chosen writer and, with `pre_alloc` on, the

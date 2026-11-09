@@ -440,6 +440,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -592,6 +593,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(30),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -706,6 +708,7 @@ mod tests {
             single::DownloadOptions {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
 

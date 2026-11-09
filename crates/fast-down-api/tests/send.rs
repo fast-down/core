@@ -32,6 +32,7 @@ fn options(len: u64) -> DownloadOptions<std::iter::Once<std::ops::Range<u64>>> {
         retry_gap: Duration::from_secs(1),
         pull_timeout: Duration::from_secs(5),
         push_queue_cap: 16,
+        stall_timeout: Duration::from_secs(60),
         min_chunk_size: 1,
         max_speculative: 2,
     }

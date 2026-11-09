@@ -124,6 +124,12 @@ pub enum Event {
     PullError(WorkerId, TaskError),
     /// Worker `id`'s fetch exceeded its time budget and was aborted.
     PullTimeout(WorkerId),
+    /// No chunk arrived for [`crate::Config::stall_timeout`], so the run was
+    /// cancelled instead of retrying forever. Carries the configured timeout.
+    ///
+    /// The accepted bytes stay in the `.part`, so a later resume continues from
+    /// them.
+    Stalled(Duration),
     /// Worker `id` pulled some bytes into memory.
     ///
     /// `ProgressEntry` describes the contiguous range that just arrived from the

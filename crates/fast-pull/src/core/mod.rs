@@ -14,12 +14,112 @@ use force_send::ForceSend;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 mod force_send;
 pub mod mock;
 pub mod multi;
 pub mod single;
+
+/// How often a blocked write driver wakes up to observe cancellation.
+// `core` is glob-re-exported by `lib.rs`, so `pub` here would publish this
+// helper; keep it crate-local and silence the private-module lint.
+const PUSH_POLL: Duration = Duration::from_millis(500);
+
+/// Shared "last progress" clock, fed whenever a chunk is accepted.
+///
+/// The hot path is one relaxed store: a monotonic millisecond stamp is enough
+/// for a watchdog that only needs second-scale resolution.
+#[derive(Debug)]
+struct ProgressClock {
+    start: Instant,
+    last_ms: AtomicU64,
+}
+
+impl ProgressClock {
+    /// Create a clock whose idle time starts now.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            last_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// Record that a chunk just arrived.
+    pub fn beat(&self) {
+        self.last_ms
+            .store(millis(self.start.elapsed()), Ordering::Relaxed);
+    }
+
+    /// How long has passed since the last [`beat`](Self::beat).
+    pub fn idle(&self) -> Duration {
+        let now = millis(self.start.elapsed());
+        Duration::from_millis(now.saturating_sub(self.last_ms.load(Ordering::Relaxed)))
+    }
+}
+
+fn millis(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+impl Default for ProgressClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Spawn the session's stall watchdog.
+///
+/// Once `clock` has not been beaten for `timeout`, it reports
+/// [`Event::Stalled`] and cancels the session's root token, so every worker and
+/// the write driver wind down on their next poll. `stop` ends the watch without
+/// firing (the pull side is done and only the flush remains), and cancelling
+/// `abort` ends it too. The guard watches actual progress rather than error
+/// frequency: a burst of retries inside the window does not end a download that
+/// is still moving. A zero timeout disables it.
+fn spawn_stall_watch<PullError, PushError>(
+    tx: &crossfire::MTx<mpmc::List<Event<PullError, PushError>>>,
+    abort: CancellationToken,
+    stop: CancellationToken,
+    clock: Arc<ProgressClock>,
+    timeout: Duration,
+) where
+    PullError: Send + Unpin + 'static,
+    PushError: Send + Unpin + 'static,
+{
+    if timeout.is_zero() {
+        return;
+    }
+    // Hold only a weak sender: a strong one would keep the event channel open
+    // and make every consumer's final drain wait forever on a finished session.
+    let tx = tx.downgrade();
+    // Check several times per window so the session ends close to `timeout`
+    // without spinning on very short test timeouts.
+    let tick = (timeout / 4).clamp(Duration::from_millis(10), Duration::from_secs(1));
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                () = abort.cancelled() => return,
+                // The pull side is done; only the final flush is left, which the
+                // guard must not cut short.
+                () = stop.cancelled() => return,
+                () = tokio::time::sleep(tick) => {}
+            }
+            if clock.idle() >= timeout {
+                let upgraded: Option<crossfire::MTx<_>> = tx.upgrade();
+                // No strong sender left means the session already ended: there
+                // is no one to report to, and nothing left to cancel.
+                let Some(tx) = upgraded else { return };
+                let _ = tx.send(Event::Stalled(timeout));
+                abort.cancel();
+                return;
+            }
+        }
+    });
+}
 
 /// Shared state of an active download session.
 ///
@@ -413,6 +513,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -443,6 +544,7 @@ mod tests {
             crate::single::DownloadOptions {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
         // Lines 167-171: `DownloadResult` is `Clone`.
@@ -471,6 +573,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: std::iter::once(0..mock_data.len() as u64),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -509,6 +612,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 1,
             },
@@ -556,6 +660,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 1,
             },
@@ -603,6 +708,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -690,6 +796,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },

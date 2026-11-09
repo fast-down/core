@@ -123,6 +123,26 @@ pub struct Config {
     #[config(partial_attr(serde(default)))]
     pub pull_timeout: Duration,
 
+    /// Give up once no chunk has arrived for this long. Recommended: `60s`
+    ///
+    /// Counted from the last accepted chunk, not from the last failure: a burst
+    /// of retries inside the window keeps the download alive, while a source
+    /// that has stopped producing bytes ends the run with
+    /// [`Event::Stalled`](crate::Event::Stalled) and
+    /// [`TerminationReason::Incomplete`](crate::TerminationReason::Incomplete).
+    ///
+    /// The same window also bounds retrying a final flush that keeps failing.
+    /// That case ends with
+    /// [`TerminationReason::Failed`](crate::TerminationReason::Failed) when
+    /// every byte was already written, and with `Incomplete` otherwise (the
+    /// unflushed tail is re-fetched on resume). The `.part`/`.fd` pair is left
+    /// on disk either way, so a later resume continues from the accepted bytes.
+    /// [`Duration::ZERO`] disables the guard.
+    #[config(default = Duration::from_secs(60))]
+    #[config(partial_attr(serde(with = "humantime_serde::option")))]
+    #[config(partial_attr(serde(default)))]
+    pub stall_timeout: Duration,
+
     /// Connect timeout. Recommended: `10s`
     ///
     /// Bounds one TCP connect, including DNS resolution, the proxy tunnel, and

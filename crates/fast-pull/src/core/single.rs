@@ -1,13 +1,15 @@
 //! Single-threaded sequential download.
 
+use crate::core::{PUSH_POLL, ProgressClock, spawn_stall_watch};
 use crate::{
     DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, multi::TokioExecutor,
 };
 use bytes::Bytes;
 use core::time::Duration;
-use crossfire::{mpmc, spsc};
+use crossfire::{RecvTimeoutError, mpmc, spsc};
 use futures::TryStreamExt;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// Options for a single-threaded download.
@@ -17,6 +19,13 @@ pub struct DownloadOptions {
     pub retry_gap: Duration,
     /// Capacity of the bounded pull→push queue; backpressure when full.
     pub push_queue_cap: usize,
+    /// Give up once no chunk has arrived for this long.
+    ///
+    /// Measured from the last accepted chunk, not by error count: any number of
+    /// retries inside the window keeps the download alive. The same window
+    /// bounds retrying a final flush from its first failure. [`Duration::ZERO`]
+    /// disables the guard.
+    pub stall_timeout: Duration,
 }
 
 /// Start a single-threaded sequential download.
@@ -44,10 +53,15 @@ pub fn download_single<R: Puller, W: Pusher>(
     const ID: usize = 0;
     let token = CancellationToken::new();
     let (tx, event_chain) = mpmc::unbounded_async();
+    let clock = Arc::new(ProgressClock::new());
+    let watch_stop = CancellationToken::new();
     pusher.set_listener({
         let tx = tx.clone();
+        let clock = clock.clone();
         Box::new(move |p| {
             let _ = tx.send(Event::PushProgress(p));
+            // A slow-but-moving sink must not trip the stall guard.
+            clock.beat();
         })
     });
 
@@ -57,10 +71,22 @@ pub fn download_single<R: Puller, W: Pusher>(
     let push_handle = tokio::task::spawn_blocking({
         let push_thread = push_thread.clone();
         let token = token.clone();
+        let watch_stop = watch_stop.clone();
         let tx = tx.clone();
         move || {
             let _ = push_thread.set(std::thread::current());
-            while let Ok((mut spin, mut data)) = rx_push.recv() {
+            loop {
+                // Wake periodically instead of blocking in `recv()` forever:
+                // cancellation must not depend on the pull side dropping its
+                // sender before `recv` can observe the token.
+                if token.is_cancelled() {
+                    return;
+                }
+                let (mut spin, mut data) = match rx_push.recv_timeout(PUSH_POLL) {
+                    Ok(item) => item,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
                 loop {
                     if token.is_cancelled() {
                         return;
@@ -79,6 +105,10 @@ pub fn download_single<R: Puller, W: Pusher>(
                     std::thread::park_timeout(options.retry_gap);
                 }
             }
+            // Every pulled chunk has been handled; only the flush is left, and
+            // the stall guard must not cut that short.
+            watch_stop.cancel();
+            let mut first_failure: Option<Instant> = None;
             loop {
                 if token.is_cancelled() {
                     break;
@@ -88,6 +118,16 @@ pub fn download_single<R: Puller, W: Pusher>(
                     Ok(()) => break,
                     Err(err) => {
                         let _ = tx.send(Event::FlushError(err));
+                        // A flush error is normally permanent (full disk, EIO).
+                        // Retry for `stall_timeout` after the first failure, then
+                        // end the session instead of looping forever.
+                        let since = *first_failure.get_or_insert_with(Instant::now);
+                        if !options.stall_timeout.is_zero()
+                            && since.elapsed() >= options.stall_timeout
+                        {
+                            token.cancel();
+                            return;
+                        }
                     }
                 }
                 std::thread::park_timeout(options.retry_gap);
@@ -95,6 +135,8 @@ pub fn download_single<R: Puller, W: Pusher>(
         }
     });
 
+    let pull_clock = clock.clone();
+    let watch_tx = tx.clone();
     let pull_handle = tokio::spawn(async move {
         'redownload: loop {
             let _ = tx.send(Event::Pulling(ID));
@@ -127,6 +169,7 @@ pub fn download_single<R: Puller, W: Pusher>(
                         let len = chunk.len() as u64;
                         let span = downloaded..(downloaded + len);
                         let _ = tx.send(Event::PullProgress(ID, span.clone()));
+                        pull_clock.beat();
                         let _ = tx_push.send((span, chunk)).await;
                         downloaded += len;
                     }
@@ -164,6 +207,13 @@ pub fn download_single<R: Puller, W: Pusher>(
             }
         }
     });
+    spawn_stall_watch(
+        &watch_tx,
+        token.clone(),
+        watch_stop,
+        clock,
+        options.stall_timeout,
+    );
     DownloadResult::new(event_chain, None, token, None)
 }
 
@@ -199,6 +249,7 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
 
@@ -234,6 +285,7 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
 
@@ -325,6 +377,7 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
 
@@ -384,6 +437,7 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
 
@@ -456,10 +510,12 @@ mod tests {
     }
 
     /// In-memory sink that can be told to fail the next `push` (lines 54-59) or
-    /// `flush` (lines 69-73).
+    /// `flush` (lines 69-73), or every `flush`.
     struct FlakySink {
         fail_push: Arc<AtomicBool>,
         fail_flush: Arc<AtomicBool>,
+        /// When set, every `flush` fails instead of only the next one.
+        always_fail_flush: bool,
         receive: Arc<Mutex<Vec<u8>>>,
         listener: Option<crate::ProgressListener>,
     }
@@ -468,6 +524,7 @@ mod tests {
             Self {
                 fail_push: Arc::new(AtomicBool::new(false)),
                 fail_flush: Arc::new(AtomicBool::new(false)),
+                always_fail_flush: false,
                 receive: Arc::new(Mutex::new(Vec::new())),
                 listener: None,
             }
@@ -502,7 +559,7 @@ mod tests {
             Ok(())
         }
         fn flush(&mut self) -> Result<(), Self::Error> {
-            if self.fail_flush.swap(false, Ordering::SeqCst) {
+            if self.always_fail_flush || self.fail_flush.swap(false, Ordering::SeqCst) {
                 Err(std::io::Error::other("flush"))
             } else {
                 Ok(())
@@ -619,6 +676,7 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
         while result.event_chain().recv().await.is_ok() {}
@@ -639,10 +697,42 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
         while result.event_chain().recv().await.is_ok() {}
         assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test]
+    async fn test_single_failing_flush_gives_up() {
+        // A flush that keeps failing must end the session after the stall
+        // window instead of retrying forever.
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = MockPuller::new(&mock_data);
+        let mut sink = FlakySink::new();
+        sink.always_fail_flush = true;
+        let result = download_single(
+            puller,
+            sink,
+            DownloadOptions {
+                retry_gap: Duration::from_millis(10),
+                push_queue_cap: 1024,
+                stall_timeout: Duration::from_millis(100),
+            },
+        );
+        let mut flush_errors = 0;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(event) = result.event_chain().recv().await {
+                if matches!(event, Event::FlushError(_)) {
+                    flush_errors += 1;
+                }
+            }
+        })
+        .await
+        .expect("a failing flush must end after the stall window");
+        assert!(flush_errors > 0, "the failure must be reported");
+        assert!(result.is_aborted(), "the engine must abort the session");
     }
 
     #[tokio::test]
@@ -661,6 +751,7 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
         while result.event_chain().recv().await.is_ok() {}
@@ -684,6 +775,7 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
         while result.event_chain().recv().await.is_ok() {}
@@ -708,6 +800,7 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
         while result.event_chain().recv().await.is_ok() {}
@@ -781,6 +874,7 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
         // Drain events so `event_chain` does not pin the task open.
@@ -840,6 +934,7 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
             },
         );
         while result.event_chain().recv().await.is_ok() {}
@@ -847,7 +942,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Regression baseline for the stalled-body hang (FluxDown-style #545).
+    // The stall watchdog (FluxDown-style #545).
     // -------------------------------------------------------------------------
 
     use crate::{PullResult, PullStream};
@@ -882,12 +977,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_single_stalled_body_waits_and_never_gives_up() {
-        // `download_single` serves servers that cannot honour ranges, so a retry
-        // always restarts at byte 0 and no progress survives it. There is therefore
-        // no stall timeout: timing out would either restart a slow download forever
-        // or abandon one that would have finished. A quiet body must be waited on
-        // indefinitely, which the engine reports as "still running".
+    async fn test_single_stalled_body_gives_up_after_stall_timeout() {
+        // A server that answers with headers and then never sends a body must
+        // end the session once the stall window expires, instead of waiting
+        // forever. The event stream must carry `Stalled` so the caller can tell
+        // this apart from a clean end.
         let puller = StallPuller;
         let pusher = MemPusher::with_capacity(0);
         let result = download_single(
@@ -896,15 +990,44 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
+                stall_timeout: Duration::from_millis(100),
             },
         );
-        let drained = tokio::time::timeout(Duration::from_secs(2), async {
-            while result.event_chain().recv().await.is_ok() {}
+        let mut stalled = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(event) = result.event_chain().recv().await {
+                if matches!(event, Event::Stalled(_)) {
+                    stalled = true;
+                }
+            }
         })
-        .await;
+        .await
+        .expect("a stalled body must end after the stall timeout");
+        assert!(stalled, "the session must report Event::Stalled");
+    }
+
+    #[tokio::test]
+    async fn test_single_completed_session_is_not_stalled() {
+        // A finished session must not be marked aborted just because the caller
+        // keeps its handle alive past the stall window. The push driver cancels
+        // the watch when it reaches the flush phase.
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = MockPuller::new(&mock_data);
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let result = download_single(
+            puller,
+            pusher,
+            DownloadOptions {
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                stall_timeout: Duration::from_millis(50),
+            },
+        );
+        while result.event_chain().recv().await.is_ok() {}
+        tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
-            drained.is_err(),
-            "a stalled body must keep the session waiting, not end it"
+            !result.is_aborted(),
+            "a completed session must stay complete"
         );
     }
 }

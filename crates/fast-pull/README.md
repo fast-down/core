@@ -86,6 +86,7 @@ async fn main() {
         DownloadOptions {
             retry_gap: std::time::Duration::from_secs(1),
             push_queue_cap: 16,
+            stall_timeout: std::time::Duration::from_secs(60),
         },
     );
     while result.recv().await.is_ok() {}

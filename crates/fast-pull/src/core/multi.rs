@@ -1,15 +1,17 @@
 //! Multi-threaded concurrent download with work-stealing.
 
+use crate::core::{PUSH_POLL, ProgressClock, spawn_stall_watch};
 use crate::{DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, WorkerId};
 use bytes::Bytes;
 use core::{
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     time::Duration,
 };
-use crossfire::{MAsyncTx, MTx, WeakTx, mpmc, mpsc};
+use crossfire::{MAsyncTx, MTx, RecvTimeoutError, WeakTx, mpmc, mpsc};
 use fast_steal::{Executor, Handle, Task, TaskQueue};
 use futures::TryStreamExt;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// Options for a multi-threaded concurrent download.
@@ -27,6 +29,13 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
     pub pull_timeout: Duration,
     /// Capacity of the bounded pull→push queue; backpressure when full.
     pub push_queue_cap: usize,
+    /// Give up once no chunk has arrived for this long.
+    ///
+    /// Measured from the last accepted chunk, not by error count: any number of
+    /// retries inside the window keeps the download alive. The same window
+    /// bounds retrying a final flush from its first failure. [`Duration::ZERO`]
+    /// disables the guard.
+    pub stall_timeout: Duration,
     /// Minimum size (bytes) of a range handed to a worker when stealing.
     pub min_chunk_size: u64,
     /// Maximum number of workers allowed to speculatively share one range.
@@ -34,6 +43,7 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
 }
 
 /// Start a multi-threaded concurrent download with work-stealing.
+#[allow(clippy::too_many_lines)]
 pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     puller: R,
     mut pusher: W,
@@ -41,10 +51,15 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
 ) -> DownloadResult<TokioExecutor<R, W::Error>, R::Error, W::Error> {
     let token = CancellationToken::new();
     let (tx, event_chain) = mpmc::unbounded_async();
+    let clock = Arc::new(ProgressClock::new());
+    let watch_stop = CancellationToken::new();
     pusher.set_listener({
         let tx = tx.clone();
+        let clock = clock.clone();
         Box::new(move |p| {
             let _ = tx.send(Event::PushProgress(p));
+            // A slow-but-moving sink must not trip the stall guard.
+            clock.beat();
         })
     });
     let (tx_push, rx_push) =
@@ -54,10 +69,22 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     let push_handle = tokio::task::spawn_blocking({
         let push_thread = push_thread.clone();
         let token = token.clone();
+        let watch_stop = watch_stop.clone();
         let tx = tx.clone();
         move || {
             let _ = push_thread.set(std::thread::current());
-            while let Ok((id, mut spin, mut data)) = rx_push.recv() {
+            loop {
+                // Wake periodically instead of blocking in `recv()` forever:
+                // cancellation must not depend on the pull side dropping its
+                // sender before `recv` can observe the token.
+                if token.is_cancelled() {
+                    return;
+                }
+                let (id, mut spin, mut data) = match rx_push.recv_timeout(PUSH_POLL) {
+                    Ok(item) => item,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
                 loop {
                     if token.is_cancelled() {
                         return;
@@ -76,6 +103,10 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
                     std::thread::park_timeout(options.retry_gap);
                 }
             }
+            // Every pulled chunk has been handled; only the flush is left, and
+            // the stall guard must not cut that short.
+            watch_stop.cancel();
+            let mut first_failure: Option<Instant> = None;
             loop {
                 if token.is_cancelled() {
                     return;
@@ -85,6 +116,16 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
                     Ok(()) => break,
                     Err(err) => {
                         let _ = tx.send(Event::FlushError(err));
+                        // A flush error is normally permanent (full disk, EIO).
+                        // Retry for `stall_timeout` after the first failure, then
+                        // end the session instead of looping forever.
+                        let since = *first_failure.get_or_insert_with(Instant::now);
+                        if !options.stall_timeout.is_zero()
+                            && since.elapsed() >= options.stall_timeout
+                        {
+                            token.cancel();
+                            return;
+                        }
                     }
                 }
                 std::thread::park_timeout(options.retry_gap);
@@ -114,11 +155,13 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         id: AtomicUsize::new(0),
         retry_gap: options.retry_gap,
         pull_timeout: options.pull_timeout,
+        clock: clock.clone(),
         min_chunk_size: min_chunk_size.clone(),
         max_speculative: options.max_speculative,
     };
     let task_queue = TaskQueue::new(options.download_chunks);
     let _ = task_queue.set_threads(options.concurrent, options.min_chunk_size, Some(&executor));
+    spawn_stall_watch(&tx, token.clone(), watch_stop, clock, options.stall_timeout);
 
     DownloadResult::new(
         event_chain,
@@ -169,6 +212,9 @@ where
     puller: R,
     retry_gap: Duration,
     pull_timeout: Duration,
+    /// Fed by every worker when a chunk is accepted; read by the session's
+    /// stall watchdog (see [`spawn_stall_watch`]).
+    clock: Arc<ProgressClock>,
     id: AtomicUsize,
     /// Live lower bound on how finely a worker may split a range when it steals.
     /// Shared with the owning [`DownloadResult`], so
@@ -199,6 +245,7 @@ where
         let pull_timeout = self.pull_timeout;
         let cfg_retry_gap = self.retry_gap;
         let max_speculative = self.max_speculative;
+        let clock = self.clock.clone();
         let worker_token = token.clone();
         tokio::spawn(async move {
             'task: loop {
@@ -290,6 +337,7 @@ where
                             chunk = chunk.slice(slice_span);
                             start = span.end;
                             let _ = tx.send(Event::PullProgress(id, span.clone()));
+                            clock.beat();
                             let _ = tx_push.send((id, span, chunk)).await;
                             if start >= task.end() {
                                 continue 'task;
@@ -358,6 +406,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -402,6 +451,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -501,6 +551,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -766,6 +817,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -793,6 +845,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -822,6 +875,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -850,6 +904,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -880,6 +935,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -911,6 +967,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -1081,6 +1138,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_millis(50),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 1,
             },
@@ -1156,6 +1214,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 1,
             },
@@ -1195,6 +1254,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_millis(50),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -1221,6 +1281,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: std::iter::empty(),
                 pull_timeout: Duration::from_secs(5),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 3,
             },
@@ -1319,6 +1380,7 @@ mod tests {
                 push_queue_cap: 1024,
                 download_chunks: download_chunks.iter().cloned(),
                 pull_timeout: Duration::from_secs(10),
+                stall_timeout: Duration::from_secs(60),
                 min_chunk_size: 1,
                 max_speculative: 1,
             },
@@ -1387,5 +1449,54 @@ mod tests {
         );
         assert_eq!(spans.first().map(|r| r.start), Some(0));
         assert_eq!(spans.last().map(|r| r.end), Some(128));
+    }
+
+    /// A puller that answers every request with a body that never yields, so no
+    /// `PullProgress` can ever arrive.
+    #[derive(Debug, Clone)]
+    struct AlwaysStallPuller;
+    impl crate::Puller for AlwaysStallPuller {
+        type Error = std::convert::Infallible;
+        fn pull(
+            &mut self,
+            _range: Option<&crate::ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            std::future::ready(Ok(
+                stream::pending::<crate::PullResult<Bytes, Self::Error>>(),
+            ))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stall_timeout_ends_a_session_that_never_produces_bytes() {
+        // Retries alone never end a dead source: every attempt times out and is
+        // retried. The stall watchdog must cancel the session and report it.
+        let result = download_multi(
+            AlwaysStallPuller,
+            MemPusher::with_capacity(0),
+            DownloadOptions {
+                concurrent: 2,
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                download_chunks: std::iter::once(0..1024u64),
+                pull_timeout: Duration::from_millis(50),
+                stall_timeout: Duration::from_millis(100),
+                min_chunk_size: 1,
+                max_speculative: 1,
+            },
+        );
+        let mut stalled = false;
+        timeout(Duration::from_secs(5), async {
+            while let Ok(event) = result.event_chain().recv().await {
+                if matches!(event, Event::Stalled(_)) {
+                    stalled = true;
+                }
+            }
+        })
+        .await
+        .expect("a source that never yields must end after the stall timeout");
+        assert!(stalled, "the session must report Event::Stalled");
     }
 }
