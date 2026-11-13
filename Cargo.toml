@@ -19,7 +19,7 @@ license = "MIT"
 bytes = "1.7.1"
 crossfire = "3.0"
 fast-down = { path = "crates/fast-down", version = "8.0" }
-fast-pull = { path = "crates/fast-pull", version = "7.0" }
+fast-pull = { path = "crates/fast-pull", version = "8.0" }
 fast-steal = { path = "crates/fast-steal", version = "7.0" }
 futures = "0.3"
 parking_lot = "0.12"
