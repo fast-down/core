@@ -7,7 +7,7 @@ mod paths;
 mod pipeline;
 mod policy;
 mod runner;
-mod stats;
+pub mod stats;
 
 pub use pipeline::build_pipeline;
 pub use policy::{IdentityRecovery, Recovery, StartMode, StartPolicy};

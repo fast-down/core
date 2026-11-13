@@ -206,16 +206,17 @@ pub enum TerminationReason {
 #[derive(Debug, Clone)]
 pub struct DownloadStats {
     /// Already-written byte ranges — the **push** side, and the same source of
-    /// truth used for resume bookkeeping (normalized and de-duplicated).
+    /// truth used for resume bookkeeping in the `.fd` record (normalized and
+    /// de-duplicated).
     pub progress: Vec<ProgressEntry>,
     /// Remote file size in bytes.
     pub total: u64,
     /// Total active download time accumulated across all resume runs, persisted
     /// in the `.fd` state so a resume continues the clock.
     pub elapsed: Duration,
-    /// Aggregated pull-side stats (bytes fetched from the network).
+    /// Aggregated pull-side stats: deduplicated coverage of fetched ranges.
     pub pull: TransferStats,
-    /// Aggregated push-side stats (bytes written to disk).
+    /// Aggregated push-side stats: bytes written to disk.
     pub push: TransferStats,
     /// Per-worker pull stats, keyed by worker id (ordered).
     pub workers: BTreeMap<WorkerId, WorkerStats>,
@@ -227,8 +228,9 @@ pub struct TransferStats {
     /// Bytes covered by this direction. The pull side can run ahead of the push
     /// side while the write queue is buffering.
     pub downloaded: u64,
-    /// Smoothed recent rate in bytes/second (EMA, time constant ≈ 3s). `0` on
-    /// the first emit and on the final emit.
+    /// Smoothed recent rate in bytes/second (EMA, time constant ≈ 3s), sampled
+    /// once per progress report. `0` on the first emit and on the final emit; a
+    /// stalled transfer decays toward zero instead of freezing at its last value.
     pub bps: u64,
     /// Average rate in bytes/second over the whole download session (all resume
     /// runs combined): `downloaded / elapsed`. `0` while elapsed is too small.
@@ -245,6 +247,61 @@ pub struct TransferStats {
     pub eta: Option<Duration>,
 }
 
+impl TransferStats {
+    /// Build one direction's stats from its running counters.
+    ///
+    /// This is the single place that relates the four derived figures:
+    /// `avg_bps` is `downloaded / elapsed`, `percent` is `downloaded / total`,
+    /// and `eta` divides the remaining bytes by `bps`, falling back to
+    /// `avg_bps` until the smoothed rate warms up.
+    #[must_use]
+    pub fn new(downloaded: u64, bps: u64, total: u64, elapsed: Duration) -> Self {
+        let avg_bps = Self::avg_bps(downloaded, elapsed);
+        Self {
+            downloaded,
+            bps,
+            avg_bps,
+            percent: Self::percent(downloaded, total),
+            eta: Self::eta(total, downloaded, bps, avg_bps),
+        }
+    }
+
+    /// Percentage of `total` covered by `downloaded`; `0.0` for a zero-size file.
+    fn percent(downloaded: u64, total: u64) -> f64 {
+        if total == 0 {
+            0.0
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                downloaded as f64 / total as f64 * 100.0
+            }
+        }
+    }
+
+    /// Average rate in bytes/second over `elapsed`.
+    fn avg_bps(downloaded: u64, elapsed: Duration) -> u64 {
+        let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        downloaded
+            .saturating_mul(1000)
+            .checked_div(elapsed_ms)
+            .unwrap_or(0)
+    }
+
+    /// Remaining time at the recent rate, falling back to the average rate.
+    fn eta(total: u64, downloaded: u64, bps: u64, avg_bps: u64) -> Option<Duration> {
+        let remaining = total.saturating_sub(downloaded);
+        let rate = if bps > 0 { bps } else { avg_bps };
+        if rate == 0 {
+            None
+        } else {
+            remaining
+                .saturating_mul(1000)
+                .checked_div(rate)
+                .map(Duration::from_millis)
+        }
+    }
+}
+
 /// One worker's pull-side statistics.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkerStats {
@@ -253,7 +310,9 @@ pub struct WorkerStats {
     /// Total bytes this worker fetched from the network (raw, including any
     /// re-fetched ranges).
     pub pulled: u64,
-    /// Smoothed recent pull rate for this worker in bytes/second.
+    /// Smoothed recent pull rate for this worker in bytes/second. Not part of
+    /// the aggregate: [`DownloadStats::pull`] counts deduplicated coverage,
+    /// while this counts raw fetches, so the workers do not sum to it.
     pub bps: u64,
 }
 

@@ -1,3 +1,4 @@
+use crate::{Event, Tx};
 use fast_down::{FileId, reqwest::BuildClientError, reqwest::ReqwestResponseError};
 use std::path::PathBuf;
 
@@ -89,6 +90,23 @@ pub enum PlanError {
     /// Loading or probing the recorded state failed.
     #[error(transparent)]
     State(#[from] StateError),
+}
+
+impl PlanError {
+    /// Emit the [`Event`] that corresponds to this planning failure, so an
+    /// observer sees the same `*Error` event it would during a resolve.
+    ///
+    /// The match is exhaustive on purpose: `PlanError` is `#[non_exhaustive]`
+    /// only for downstream crates, so adding a variant fails to compile until it
+    /// is mapped to an event here.
+    pub fn emit(self, tx: &Tx) {
+        let _ = match self {
+            Self::BuildClient(e) => tx.send(Event::BuildClientError(e)),
+            Self::Prefetch(e) => tx.send(Event::PrefetchError(e)),
+            Self::GenPath(e) => tx.send(Event::GenPathError(e)),
+            Self::State(e) => tx.send(Event::ResumeError(e)),
+        };
+    }
 }
 
 #[cfg(test)]

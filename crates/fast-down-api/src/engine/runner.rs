@@ -559,9 +559,10 @@ async fn drive_session(
             () = token.cancelled(), if !res.is_aborted() => res.abort(),
             event = res.recv() => match event {
                 Ok(event) => {
-                    tracker.observe(&event, Instant::now());
+                    tracker.observe(&event);
                     if let fast_down::Event::PushProgress(range) = &event {
                         record.merge_progress(range.clone());
+                        tracker.set_written(record.downloaded());
                     }
                     forward(tx, event);
                 }
@@ -580,7 +581,9 @@ async fn drive_session(
                 }
             },
             _ = progress_tick.tick(), if progress_enabled => {
-                let _ = tx.send(Event::Progress(tracker.snapshot()));
+                let _ = tx.send(Event::Progress(
+                    tracker.snapshot(Instant::now(), record.progress()),
+                ));
             }
         }
     }
@@ -593,7 +596,7 @@ async fn drive_session(
     if let Err(e) = record.store(fd_path).await {
         let _ = tx.send(Event::StateSaveError(e));
     }
-    let sample = tracker.snapshot_terminal(elapsed);
+    let sample = tracker.snapshot_terminal(elapsed, record.progress());
     let _ = tx.send(Event::Progress(sample));
 
     let engine_aborted = res.is_aborted() && !token.is_cancelled();

@@ -18,6 +18,8 @@ events, and cancel cooperatively.
 - **Event stream**: a single channel carries prefetch, disk allocation, per-worker progress, resume, rename, and lifecycle events. Every run ends with exactly one `Event::Terminated(TerminationReason)`.
 - **Cooperative cancellation**: cancelling mid-flight preserves the `.part` / `.fd` files so you can resume later.
 - **Configurable**: threads, chunk size, write method (`Mmap` / `Std`), proxies, headers, retries, disk pre-allocation, and more via `PartialConfig`.
+- **Concurrency-limited queue**: a [`Queue`] runs many downloads with at most N in
+  flight, reporting every task on one key-tagged event stream.
 
 ## Quick start
 
@@ -173,6 +175,58 @@ let policy = StartPolicy {
 offered where the byte layout is known intact, so a forced resume cannot splice
 two versions together.
 
+### Running many downloads: the queue
+
+[`Queue`] runs many downloads with a bounded concurrency. Push a [`State`] (plus
+the [`StartMode`] / [`StartPolicy`] to start it with) under your own task key `K`
+(a download manager's task id, say) and the queue resolves and runs it as soon as
+a slot frees, so the limit also covers prefetching. Every task reports into one
+[`QueueEvent`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.QueueEvent.html)
+stream, tagged with its key. The queue only schedules: progress, speed and
+outcome are each task's own [`Event`]s on that stream.
+
+```rust,no_run
+use fast_down_api::{
+    Event, PartialConfig, Queue, QueueEvent, StartMode, State, create_queue_channel,
+};
+use url::Url;
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let (tx, rx) = create_queue_channel::<i32>();
+let queue = Queue::<i32>::new(3, tx); // at most three downloads in flight
+
+for (gid, url) in ["https://example.com/a.bin", "https://example.com/b.bin"]
+    .into_iter()
+    .enumerate()
+{
+    queue.push(gid as i32, State::new(Url::parse(url)?, PartialConfig::default()), StartMode::Auto)?;
+}
+
+// Drop the last handle and the stream ends once every task has.
+drop(queue);
+while let Ok(event) = rx.recv().await {
+    match event {
+        QueueEvent::Task(_, Event::Terminated(reason)) => println!("task ended: {reason:?}"),
+        _ => {}
+    }
+}
+# Ok(())
+# }
+```
+
+Every event carries the caller's key, so the queue needs no id mapping of its
+own. `push` requires its key to be unique while the task is alive: a re-used key
+is rejected with `QueueError::AlreadyQueued`, so it cannot clobber a still-running
+task.
+
+Every task is acknowledged with `Queued` when pushed; a task only publishes its
+run events once it has **started**: `Started` opens its run and its engine events
+follow, each ending with exactly one `Event::Terminated`. A task that never
+started — still waiting when every handle is dropped — emits only that `Queued`
+and leaves no files on disk, so a download manager can keep its own task manifest
+and re-adopt the waiting tasks on the next start.
+
 ## API overview
 
 | Item | Purpose |
@@ -189,6 +243,9 @@ two versions together.
 | [`create_channel`](https://docs.rs/fast-down-api/latest/fast_down_api/fn.create_channel.html) | Create the `(Tx, Rx)` event channel. |
 | [`Event`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.Event.html) | The event enum delivered over the channel. |
 | [`PartialConfig`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.PartialConfig.html) | Layered, optional configuration for a download. |
+| [`Queue`](https://docs.rs/fast-down-api/latest/fast_down_api/struct.Queue.html) | A bounded-concurrency queue of downloads keyed by your own id `K`: `push` a [`State`] under a key and it is resolved and run when a slot frees. |
+| [`QueueEvent`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.QueueEvent.html) | The queue's key-tagged per-task event stream. |
+| [`QueueError`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.QueueError.html) | What a queue operation refused (`NoRuntime`, `AlreadyQueued`). |
 | [`StateError`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.StateError.html) / [`PlanError`](https://docs.rs/fast-down-api/latest/fast_down_api/enum.PlanError.html) | Errors from loading/probing state and from resolving a plan. |
 
 ## How resume works

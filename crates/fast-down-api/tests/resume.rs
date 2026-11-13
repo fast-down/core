@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fast_down_api::{
-    Ctx, Event, PartialConfig, PlanError, Record, Rx, StartMode, State, StateError,
-    TerminationReason, Tx, WriteMethod, create_channel,
+    Ctx, Event, PartialConfig, Record, Rx, StartMode, State, StateError, TerminationReason, Tx,
+    WriteMethod, create_channel,
 };
 use futures::StreamExt;
 use futures::stream::unfold;
@@ -477,26 +477,6 @@ async fn resolve_and_run(
             e.emit(&tx);
             let _ = tx.send(Event::Terminated(TerminationReason::Failed));
         }
-    }
-}
-
-/// Emit the event that corresponds to a planning failure, so `drain` observers
-/// see the same `*Error` they did before.
-trait EmitPlanError {
-    fn emit(self, tx: &Tx);
-}
-
-impl EmitPlanError for PlanError {
-    fn emit(self, tx: &Tx) {
-        let _ = match self {
-            Self::BuildClient(e) => tx.send(Event::BuildClientError(e)),
-            Self::Prefetch(e) => tx.send(Event::PrefetchError(e)),
-            Self::GenPath(e) => tx.send(Event::GenPathError(e)),
-            Self::State(e) => tx.send(Event::ResumeError(e)),
-            // `PlanError` is `#[non_exhaustive]`; new variants must be mapped
-            // to an event here when they are added.
-            other => panic!("unhandled PlanError variant: {other:?}"),
-        };
     }
 }
 

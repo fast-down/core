@@ -7,12 +7,17 @@ pub use state::{PartState, PlanError, Ready, Record, ResumeOutcome, State, State
 mod engine;
 pub use engine::{Ctx, IdentityRecovery, Recovery, RunHandle, StartMode, StartPolicy};
 
+mod rate;
+
 mod config;
 pub use config::*;
 
 /// Download lifecycle events and aggregate statistics.
 pub mod event;
 pub use event::*;
+
+mod queue;
+pub use queue::{Queue, QueueError, QueueEvent, QueueRx, QueueTx, create_queue_channel};
 
 mod error;
 pub use error::TaskError;
