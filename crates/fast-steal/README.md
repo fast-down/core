@@ -108,14 +108,15 @@ fn fib_fast(n: u64) -> u64 {
 
 #[tokio::main]
 async fn main() {
-    {
+    // The second run sets `speculative = 2`, which lets one extra worker share
+    // a busy worker's range; the first keeps it at 1 (no sharing).
+    for (pre_data, speculative) in [([1..10, 13..19], 1), ([1..20, 41..48], 2)] {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let executor = TokioExecutor {
             tx,
-            speculative: 1,
+            speculative,
             next_id: AtomicUsize::new(0),
         };
-        let pre_data = [1..10, 13..19];
         let task_queue = TaskQueue::new(pre_data.iter().cloned());
         task_queue.set_threads(8, 1, Some(&executor)).unwrap();
         drop(executor);
@@ -127,36 +128,6 @@ async fn main() {
                 "number {i} with value {res} was computed twice"
             );
         }
-        dbg!(&data);
-        for range in pre_data {
-            for i in range {
-                assert_eq!((i, data.get(&i)), (i, Some(&fib_fast(i))));
-                data.remove(&i);
-            }
-        }
-        assert_eq!(data.len(), 0);
-    }
-
-    {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let executor = TokioExecutor {
-            tx,
-            speculative: 2,
-            next_id: AtomicUsize::new(0),
-        };
-        let pre_data = [1..20, 41..48];
-        let task_queue = TaskQueue::new(pre_data.iter().cloned());
-        task_queue.set_threads(8, 1, Some(&executor)).unwrap();
-        drop(executor);
-        let mut data = HashMap::new();
-        while let Some((i, res)) = rx.recv().await {
-            println!("main: {i} = {res}");
-            assert!(
-                data.insert(i, res).is_none(),
-                "number {i} with value {res} was computed twice"
-            );
-        }
-        dbg!(&data);
         for range in pre_data {
             for i in range {
                 assert_eq!((i, data.get(&i)), (i, Some(&fib_fast(i))));

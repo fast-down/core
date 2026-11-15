@@ -91,7 +91,10 @@ pub struct RangeError;
 
 impl fmt::Display for RangeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Range invariant violated: start > end")
+        write!(
+            f,
+            "range error: start > end, no forward progress, or a start ahead of the cursor"
+        )
     }
 }
 
@@ -187,9 +190,8 @@ impl Task {
     /// torn-snapshot caveat when combining the two.
     #[must_use]
     pub fn end(&self) -> u64 {
-        let state = self.0.state.load(Ordering::Acquire);
         #[allow(clippy::cast_possible_truncation)]
-        let end = state as u64;
+        let end = self.0.state.load(Ordering::Acquire) as u64;
         end
     }
     /// Returns `end - start` (saturating), i.e. how much work is left.
@@ -236,7 +238,7 @@ impl Task {
         }
     }
     /// Atomically claims and returns the entire remaining range `start..end`,
-    /// emptying this task (sets `start = end`).
+    /// emptying this task by moving `end` back to `start`.
     ///
     /// Shares its error contract with [`split_two`](Task::split_two): both
     /// consume remaining work, so both report a violated range invariant instead
@@ -474,8 +476,7 @@ mod tests {
 
     #[test]
     fn weak_task_reports_strong_and_weak_counts() {
-        // Covers WeakTask::strong_count (task.rs 51-52) and WeakTask::weak_count
-        // (task.rs 55-56).
+        // `WeakTask` mirrors the counts of the identity it points at.
         let task = Task::new(1..10);
         let weak = task.downgrade();
         assert_eq!(weak.strong_count(), 1);
@@ -489,8 +490,7 @@ mod tests {
 
     #[test]
     fn task_weak_count_reflects_weak_refs() {
-        // Covers Task::weak_count: it counts weak refs to the worker identity (the
-        // WeakTasks spawned by `downgrade`), not cursor weak refs.
+        // Weak refs come from `downgrade`, so they target the identity, not the cursor.
         let task = Task::new(1..10);
         assert_eq!(task.weak_count(), 0);
         let _w1 = task.downgrade();
@@ -501,9 +501,7 @@ mod tests {
 
     #[test]
     fn safe_add_start_survives_contention() {
-        // Many threads advancing the same task forces the CAS in
-        // `safe_add_start` to fail and retry, exercising the `Err(x) => old_state = x`
-        // branch (`task.rs` line 135).
+        // Contention forces the CAS in `safe_add_start` to fail and retry.
         let task = Arc::new(Task::new(0..2_000));
         let mut handles = Vec::new();
         for _ in 0..4 {
@@ -529,7 +527,7 @@ mod tests {
 
     #[test]
     fn split_two_survives_contention() {
-        // Contended `split_two` exercises its CAS-failure branch (`task.rs` line 176).
+        // Contention exercises `split_two`'s CAS-failure branch.
         let task = Arc::new(Task::new(0..2_000));
         let mut handles = Vec::new();
         for _ in 0..4 {
@@ -549,7 +547,7 @@ mod tests {
 
     #[test]
     fn take_survives_contention() {
-        // Contended `take` exercises its CAS-failure branch (`task.rs` line 200).
+        // Contention exercises `take`'s CAS-failure branch.
         let task = Arc::new(Task::new(0..2_000));
         let mut handles = Vec::new();
         for _ in 0..4 {
@@ -568,47 +566,48 @@ mod tests {
 
     #[test]
     fn split_two_reports_invariant_violation_when_start_gt_end() {
-        // `Task::new` panics on start > end, so a corrupted/invalid state can
-        // only be built through the `from_raw_state` test helper. This pins the
-        // `range.start > range.end` guard in `split_two`.
+        // Only `from_raw_state` can build the inverted state `new` refuses;
+        // `split_two` reports it instead of normalising it away.
         let bad = Task::from_raw_state(std::sync::Arc::new(portable_atomic::AtomicU128::new(
             (20u128 << 64) | 0xA,
         )));
         assert_eq!(bad.split_two(1), Err(RangeError));
     }
 
-    /// `RangeError`'s rendered text is part of the public API (it surfaces in
-    /// `?`-propagated error chains), yet nothing pinned it. Also checks the
-    /// `core::error::Error` impl resolves and reports no source.
+    /// `RangeError`'s rendered text and its `Error` impl (no source).
     #[test]
     fn range_error_display_and_error_impl() {
         use std::{error::Error, format, string::ToString};
         let e = RangeError;
-        assert_eq!(e.to_string(), "Range invariant violated: start > end");
-        assert_eq!(format!("{e}"), "Range invariant violated: start > end");
+        assert_eq!(
+            e.to_string(),
+            "range error: start > end, no forward progress, or a start ahead of the cursor"
+        );
+        assert_eq!(
+            format!("{e}"),
+            "range error: start > end, no forward progress, or a start ahead of the cursor"
+        );
         let as_dyn: &dyn Error = &e;
         assert!(as_dyn.source().is_none());
     }
 
-    /// `Task::new` documents a panic on `start > end` but no test pinned it.
+    /// `Task::new` panics on an inverted range.
     #[test]
     #[should_panic(expected = "assertion failed")]
     fn new_panics_when_start_gt_end() {
-        // Struct literal: an inline `10..5` trips `clippy::reversed_empty_ranges`
-        // (a correctness lint), which is exactly the input under test here.
+        // Inline `10..5` would trip `clippy::reversed_empty_ranges`.
         let _ = Task::new(core::ops::Range { start: 10, end: 5 });
     }
 
-    /// The `From` impl inherits `new`'s panic contract; pinned separately
-    /// because `TaskQueue::new` funnels user ranges through this path.
+    /// `From` inherits `new`'s panic contract; `TaskQueue::new` funnels user
+    /// ranges through it.
     #[test]
     #[should_panic(expected = "assertion failed")]
     fn from_range_panics_when_start_gt_end() {
         let _ = Task::from(core::ops::Range { start: 10, end: 5 });
     }
 
-    /// `From<Range<u64>>` was only ever exercised indirectly via
-    /// `TaskQueue::new`; pin the happy path directly.
+    /// The `From<Range<u64>>` happy path.
     #[test]
     fn from_range_builds_equivalent_task() {
         let t = Task::from(3..9);
@@ -618,9 +617,8 @@ mod tests {
         assert_eq!(t2.remain(), 0);
     }
 
-    /// The whole crate rests on packing two `u64`s into one `AtomicU128`.
-    /// Nothing tested the extremes, where a sloppy shift/truncate would
-    /// silently corrupt the range.
+    /// Packing round-trips at the `u64` bounds, where a sloppy shift or truncate
+    /// would corrupt the range.
     #[test]
     fn pack_unpack_round_trips_at_u64_bounds() {
         for range in [
@@ -637,9 +635,8 @@ mod tests {
         assert_eq!(Task::new(0..u64::MAX).remain(), u64::MAX);
     }
 
-    /// `start + bias` overflow no longer errors: it saturates to `u64::MAX` and
-    /// the claim is clamped by `min(end)`, so an overflowing bias claims the
-    /// entire remaining range instead of failing.
+    /// An overflowing bias saturates to `u64::MAX` and is clamped by `min(end)`,
+    /// so it claims the whole remaining range.
     #[test]
     fn safe_add_start_saturates_on_u64_overflow() {
         let task = Task::new(0..u64::MAX);
@@ -655,19 +652,12 @@ mod tests {
         assert_eq!(task.remain(), 0);
     }
 
-    /// `safe_add_start` never verifies that the caller-supplied `start` matches
-    /// the task's real cursor. It only rejects a *stale* start
-    /// (via `new_start <= range.start`); a start that runs *ahead* of reality
-    /// is trusted blindly, jumping the cursor over work nobody executed and
-    /// returning a span far wider than `bias`.
-    ///
-    /// This test pins the hardening: the ahead-of-cursor start is now rejected
-    /// and the task is left completely untouched.
+    /// A `start` ahead of the real cursor is rejected and leaves the task
+    /// untouched, so no work is silently skipped.
     #[test]
     fn safe_add_start_rejects_caller_start_ahead_of_cursor() {
         let task = Task::new(0..100);
         // Caller asks to advance 1 step "from 50", but the cursor is at 0.
-        // Before hardening this returned `Ok(0..51)`, skipping items 0..50.
         assert_eq!(task.safe_add_start(50, 1), Err(RangeError));
         assert_eq!(task.get(), 0..100, "a rejected call must not mutate state");
         // Even a start beyond `end` is refused rather than clamped by `min`.
@@ -699,34 +689,28 @@ mod tests {
         assert_eq!(task.start(), 8);
     }
 
-    /// `take` used to guard with `start == end` while
-    /// `split_two` used `start > end -> Err`, so a corrupted (inverted) state
-    /// made `take` hand back a *reversed* Range that iterates as empty -- work
-    /// silently dropped, evidence erased by the normalising CAS. Both methods
-    /// now share the `start > end -> Err` contract.
+    /// `take` shares `split_two`'s `start > end -> Err` contract, so a corrupted
+    /// state is reported rather than normalised into a silently empty range.
     #[test]
     fn take_reports_invariant_violation_on_corrupted_state() {
         let bad = Task::from_raw_state(Arc::new(portable_atomic::AtomicU128::new(
             (20u128 << 64) | 0xA,
         )));
-        // Built via the raw-state helper on purpose: writing `20..10` inline trips
-        // `clippy::reversed_empty_ranges`, yet a reversed range is precisely
-        // what the corrupted state yields.
+        // Inline `20..10` would trip `clippy::reversed_empty_ranges`.
         let inverted = core::ops::Range {
             start: 20u64,
             end: 10u64,
         };
         assert_eq!(bad.get(), inverted);
         assert_eq!(bad.take(), Err(RangeError));
-        // The corrupted state is preserved, not normalised away, so it stays
-        // diagnosable -- and `take` agrees with `split_two` on the same input.
+        // Preserved, not normalised away: still diagnosable, and `take` agrees
+        // with `split_two` on the same input.
         assert_eq!(bad.get(), inverted);
         assert_eq!(bad.split_two(1), Err(RangeError));
     }
 
-    /// `remain` uses `saturating_sub`, so an inverted range reports 0 instead
-    /// of underflowing. Pinned because it is the reason a corrupted task looks
-    /// "finished" rather than "broken" to `TaskQueue::steal`'s `max_by_key`.
+    /// `remain` saturates to 0 on an inverted range, which is why a corrupted
+    /// task looks "finished" to `steal`'s `max_by_key`.
     #[test]
     fn remain_saturates_to_zero_on_corrupted_state() {
         let bad = Task::from_raw_state(Arc::new(portable_atomic::AtomicU128::new(
@@ -735,11 +719,8 @@ mod tests {
         assert_eq!(bad.remain(), 0);
     }
 
-    /// `WeakTask::weak_count` delegates to `Weak::weak_count`, which collapses to
-    /// 0 once the last strong ref to the identity dies -- it does NOT report
-    /// surviving weak refs. The paired [`Task::weak_count`] behaves identically
-    /// (both are scoped to the worker identity), so `Task`/`WeakTask` stay a
-    /// consistent strong/weak pair.
+    /// `weak_count` collapses to 0 once the last strong ref dies: it does not
+    /// report surviving weak refs. `Task`'s paired accessor behaves identically.
     #[test]
     fn weak_task_weak_count_collapses_to_zero_without_strong_refs() {
         let task = Task::new(0..10);
@@ -757,10 +738,8 @@ mod tests {
         assert!(w1.upgrade().is_none());
     }
 
-    /// `Task::sharer_count` had no direct test, yet `TaskQueue::steal` gates
-    /// speculative sharing on it (the sharer cap). It counts strong references to
-    /// the *shared cursor*, so a speculative sharer (via `share_state`) bumps it
-    /// while a plain `clone` — which only shares the worker identity — does not.
+    /// `sharer_count` counts strong refs to the *shared cursor*: a speculative
+    /// sharer (`share_state`) bumps it, a plain `clone` does not.
     #[test]
     fn task_sharer_count_tracks_cursor_sharers() {
         let task = Task::new(0..10);
@@ -803,10 +782,8 @@ mod tests {
         );
     }
 
-    /// Pins the post-cleanup invariant: `Task::strong_count` counts *worker
-    /// identity* (like `WeakTask::strong_count`), NOT the shared cursor -- and the
-    /// two paired accessors stay equal. This guards against the count-API
-    /// inconsistency introduced when identity was split from the shared cursor.
+    /// `strong_count` counts *worker identity* (like `WeakTask::strong_count`),
+    /// never the shared cursor, and the paired accessors stay equal.
     #[test]
     fn task_strong_count_counts_identity_not_cursor() {
         let task = Task::new(0..10);

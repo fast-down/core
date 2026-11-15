@@ -44,9 +44,23 @@ struct TaskQueueInner<H: Handle> {
     running: VecDeque<(WeakTask, H)>,
     waiting: VecDeque<Task>,
 }
+
+impl<H: Handle> TaskQueueInner<H> {
+    /// The running task with the most work left, optionally excluding `exclude`.
+    fn fattest(&self, exclude: Option<&Task>) -> Option<Task> {
+        self.running
+            .iter()
+            .filter_map(|w| w.0.upgrade())
+            .filter(|w| exclude.is_none_or(|e| w != e))
+            .max_by_key(Task::remain)
+    }
+}
 impl<H: Handle> TaskQueue<H> {
     /// Creates a queue from an iterator of `start..end` ranges, each wrapped in its
     /// own [`Task`].
+    ///
+    /// # Panics
+    /// Panics if any range is inverted (`start > end`), via [`Task::new`].
     pub fn new(tasks: impl Iterator<Item = Range<u64>>) -> Self {
         let waiting: VecDeque<_> = tasks.map(Task::new).collect();
         Self {
@@ -83,7 +97,9 @@ impl<H: Handle> TaskQueue<H> {
     /// speculatively.
     ///
     /// Returns `true` if `task` was refilled, or `false` if the worker is not
-    /// registered or no work could be found.
+    /// registered or no work could be found. A worker that finds no work is
+    /// deregistered as a side effect; only
+    /// [`set_threads`](TaskQueue::set_threads) registers it again.
     pub fn steal(
         &self,
         id: &H::Id,
@@ -105,25 +121,15 @@ impl<H: Handle> TaskQueue<H> {
         };
         let mut found = false;
         while let Some(new_task) = guard.waiting.pop_front() {
-            // A task whose range invariant is broken (`start > end`) yields
-            // `Err` and is skipped, never handed to a worker. This keeps steal's
-            // policy toward corrupted tasks uniform with the speculative branch
-            // below, which likewise discards `split_two`'s `Err`. Whether steal
-            // should instead surface such corruption is deliberately left open.
+            // Exhausted (`Ok(None)`) and corrupted (`Err`) tasks are skipped,
+            // never handed to a worker.
             if let Ok(Some(range)) = new_task.take() {
                 *task = Task::new(range);
                 found = true;
                 break;
             }
         }
-        if !found
-            && let Some(steal_task) = guard
-                .running
-                .iter()
-                .filter_map(|w| w.0.upgrade())
-                .filter(|w| w != task)
-                .max_by_key(Task::remain)
-        {
+        if !found && let Some(steal_task) = guard.fattest(Some(task)) {
             if let Ok(Some(range)) = steal_task.split_two(min_chunk_size) {
                 *task = Task::new(range);
                 found = true;
@@ -144,7 +150,6 @@ impl<H: Handle> TaskQueue<H> {
     }
     /// Returns `None` when threads need to be increased but the executor is `None`
     #[must_use]
-    #[allow(clippy::significant_drop_tightening)]
     pub fn set_threads<E: Executor<Handle = H>>(
         &self,
         threads: usize,
@@ -168,11 +173,7 @@ impl<H: Handle> TaskQueue<H> {
             }
             guard.running.extend(temp);
             while guard.running.len() < threads
-                && let Some(steal_task) = guard
-                    .running
-                    .iter()
-                    .filter_map(|w| w.0.upgrade())
-                    .max_by_key(Task::remain)
+                && let Some(steal_task) = guard.fattest(None)
                 && let Ok(Some(range)) = steal_task.split_two(min_chunk_size)
             {
                 let task = Task::new(range);
@@ -206,7 +207,6 @@ impl<H: Handle> TaskQueue<H> {
     where
         F: FnOnce(&mut dyn Iterator<Item = &mut H>) -> R,
     {
-        #![allow(clippy::significant_drop_tightening)]
         let mut guard = self.inner.lock();
         let mut iter = guard.running.iter_mut().map(|w| &mut w.1);
         f(&mut iter)
@@ -237,25 +237,20 @@ impl<H: Handle> TaskQueue<H> {
     /// carry the work to completion.
     pub fn cancel_task(&self, task: &Task, id: &H::Id) {
         let mut guard = self.inner.lock();
-        // Abort every twin whose task matches but is not the caller's own, then
-        // *deregister* it (drop it from `running`). We rebuild `running` from the
-        // survivors because removing in place would require mutating through a
-        // shared `&` handed to `retain`'s closure.
         if !guard.running.iter().any(|(_, h)| h.is_self(id)) {
             return;
         }
-        let mut kept: VecDeque<(WeakTask, H)> = VecDeque::with_capacity(guard.running.len());
-        for (weak, mut handle) in guard.running.drain(..) {
+        // Abort every twin whose task matches but is not the caller's own, and
+        // deregister it so a later liveness sweep does not count it as live.
+        guard.running.retain_mut(|(weak, handle)| {
             let is_twin = weak
                 .upgrade()
                 .is_some_and(|t| t == *task && !handle.is_self(id));
             if is_twin {
                 handle.abort();
-            } else {
-                kept.push_back((weak, handle));
             }
-        }
-        guard.running = kept;
+            !is_twin
+        });
     }
 }
 
@@ -266,7 +261,6 @@ mod tests {
     use crate::{Executor, Handle, Task, TaskQueue};
     use std::{
         collections::{HashMap, HashSet},
-        dbg, println,
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
@@ -295,7 +289,6 @@ mod tests {
     impl Executor for TokioExecutor {
         type Handle = TokioHandle;
         fn execute(&self, mut task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
-            println!("execute");
             let tx = self.tx.clone();
             let speculative = self.speculative;
             let handle = tokio::spawn(async move {
@@ -307,10 +300,8 @@ mod tests {
                         let i = task.start();
                         let res = fib_fast(i);
                         let Ok(_) = task.safe_add_start(i, 1) else {
-                            println!("task-failed: {i} = {res}");
                             continue;
                         };
-                        println!("task: {i} = {res}");
                         tx.send((i, res)).unwrap();
                     }
                     if !task_queue.steal(&(), &mut task, 1, speculative) {
@@ -342,39 +333,11 @@ mod tests {
         drop(executor);
         let mut data = HashMap::new();
         while let Some((i, res)) = rx.recv().await {
-            println!("main: {i} = {res}");
             assert!(
                 data.insert(i, res).is_none(),
                 "number {i} with value {res} was computed twice"
             );
         }
-        dbg!(&data);
-        for range in pre_data {
-            for i in range {
-                assert_eq!((i, data.get(&i)), (i, Some(&fib_fast(i))));
-                data.remove(&i);
-            }
-        }
-        assert_eq!(data.len(), 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_task_queue2() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let executor = TokioExecutor { tx, speculative: 2 };
-        let pre_data = [1..20, 41..48];
-        let task_queue = TaskQueue::new(pre_data.iter().cloned());
-        task_queue.set_threads(8, 1, Some(&executor)).unwrap();
-        drop(executor);
-        let mut data = HashMap::new();
-        while let Some((i, res)) = rx.recv().await {
-            println!("main: {i} = {res}");
-            assert!(
-                data.insert(i, res).is_none(),
-                "number {i} with value {res} was computed twice"
-            );
-        }
-        dbg!(&data);
         for range in pre_data {
             for i in range {
                 assert_eq!((i, data.get(&i)), (i, Some(&fib_fast(i))));
@@ -773,9 +736,8 @@ mod tests {
         drop(guard);
     }
 
-    /// `add` pushes onto the waiting queue (`task_queue.rs` 50-53) and a live worker's
-    /// `steal` then pulls that freshly-added task off `waiting` (the `found = true;
-    /// break` branch, `task_queue.rs` line 91) before falling back to stealing from a
+    /// `add` pushes onto the waiting queue, and a live worker's `steal` then pulls
+    /// that freshly-added task off `waiting` before falling back to stealing from a
     /// busy peer.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_add_then_steal_pulls_from_waiting() {
@@ -792,7 +754,7 @@ mod tests {
         // waiting queue starts empty.
         let q = TaskQueue::new(std::iter::once(0..1));
         q.set_threads(1, 1, Some(&executor)).unwrap();
-        // `add` lands a brand-new task in `waiting` (covers 50-53). A live worker
+        // `add` lands a brand-new task in `waiting`. A live worker
         // exists, so `add` reports `true`.
         assert!(
             q.add(Task::new(100..110)),
@@ -809,7 +771,7 @@ mod tests {
         }
         // The initial task ran...
         assert!(seen.contains(&0), "initial task was not executed");
-        // ...and the `add`ed task was pulled from `waiting` via `steal` (line 91).
+        // ...and the `add`ed task was pulled from `waiting` via `steal`.
         for i in 100..110 {
             assert!(
                 seen.contains(&i),
@@ -911,14 +873,11 @@ mod tests {
         assert!(Arc::ptr_eq(&q.inner, &q2.inner));
     }
 
-    /// `TaskQueue::new` funnels every range through `Task::from`, so it inherits
-    /// that function's panic contract -- yet its own doc comment never mentions
-    /// it, and clippy's `missing_panics_doc` cannot see across the call.
+    /// `TaskQueue::new` inherits `Task::from`'s panic contract.
     #[test]
     #[should_panic(expected = "range.start <= range.end")]
     fn new_inherits_the_reversed_range_panic() {
-        // Struct literal on purpose: an inline `10..5` trips
-        // `clippy::reversed_empty_ranges`.
+        // Inline `10..5` would trip `clippy::reversed_empty_ranges`.
         let bad = core::ops::Range {
             start: 10u64,
             end: 5u64,
@@ -926,13 +885,9 @@ mod tests {
         let _: TaskQueue<SyncHandle> = TaskQueue::new(core::iter::once(bad));
     }
 
-    /// `add` used to only append to `waiting`. It woke nobody and
-    /// returns `()`, so once every worker has exited (each one's `steal` returned
-    /// `false` and it left its loop) an added task is stranded forever with no
-    /// signal to the caller.
-    ///
-    /// The same test pins a related surprise: `set_threads` reports success even
-    /// when it spawned nothing at all because there was no work to hand out.
+    /// `add` only appends, so with no live worker the task is stranded until an
+    /// explicit `set_threads` runs. The same test pins that `set_threads` reports
+    /// success even when it spawned nothing because there was no work to hand out.
     #[test]
     fn add_is_inert_without_a_live_worker() {
         let ex = SyncExecutor::new();
@@ -1007,10 +962,6 @@ mod tests {
     /// The waiting drain loop pops until it finds *usable* work: an exhausted task
     /// yields `Ok(None)` and a corrupted one yields `Err`; both are discarded
     /// rather than handed to a worker.
-    ///
-    /// Note this path only became safe with the `take` hardening: while `take`
-    /// still returned `Some(20..10)` for a corrupted task, `Task::new(range)`
-    /// below would have tripped its `start <= end` assertion instead.
     #[test]
     fn steal_skips_exhausted_and_corrupted_waiting_tasks() {
         let ex = SyncExecutor::new();
@@ -1109,12 +1060,9 @@ mod tests {
         assert_eq!(t1.get(), 1..2, "the refused worker keeps its own range");
     }
 
-    /// `min_chunk_size * 2` used to be an unchecked
-    /// multiplication on a caller-supplied `u64` — `fast-pull` forwards a
-    /// user-configurable `options.min_chunk_size` straight into it, so a large
-    /// value panicked in debug and silently wrapped (disabling split) in release.
-    /// It now uses `saturating_mul`, so an overflowing value simply caps at
-    /// `u64::MAX` and the split branch is skipped gracefully instead of panicking.
+    /// `min_chunk_size * 2` saturates, so a huge caller-supplied value (forwarded
+    /// by `fast-pull` from `options.min_chunk_size`) skips the split instead of
+    /// panicking or wrapping.
     #[test]
     fn steal_skips_split_on_a_huge_min_chunk_size() {
         let ex = SyncExecutor::new();
@@ -1131,9 +1079,8 @@ mod tests {
         );
     }
 
-    /// The identical `min_chunk_size * 2` in `set_threads`'s split-to-grow loop is
-    /// now `saturating_mul` too: an overflowing value no longer
-    /// panics, the split-to-grow branch is just skipped.
+    /// The identical `min_chunk_size * 2` in `set_threads`'s split-to-grow loop
+    /// saturates too, so the branch is skipped rather than panicking.
     #[test]
     fn set_threads_skips_split_on_a_huge_min_chunk_size() {
         let ex = SyncExecutor::new();
@@ -1157,12 +1104,8 @@ mod tests {
         assert_eq!(q.inner.lock().running.len(), 1, "the dead slot is swept");
     }
 
-    /// The liveness sweep used to key off the *cursor*
-    /// refcount, which speculative sharing defeats — a dead worker's slot stayed
-    /// propped up by its surviving twin and `set_threads` never refilled the pool.
-    /// `WeakTask` now points at the worker's own identity (`TaskInner`), so the
-    /// sweep reclaims a dead worker's slot regardless of how many twins share its
-    /// cursor.
+    /// The liveness sweep keys off worker identity (`WeakTask` -> `TaskInner`), so
+    /// a dead worker is reclaimed even while a twin still shares its cursor.
     #[test]
     fn speculative_sharing_no_longer_defeats_liveness_sweep() {
         let ex = SyncExecutor::new();
@@ -1196,9 +1139,8 @@ mod tests {
         );
     }
 
-    /// `handles` had no coverage inside `fast-steal` at all -- its only consumer
-    /// lives in `fast-pull`. It must expose every running handle by mutable
-    /// reference and hand the closure's return value back out.
+    /// `handles` exposes every running handle by mutable reference and hands the
+    /// closure's return value back out.
     #[test]
     fn handles_exposes_every_running_worker() {
         let ex = SyncExecutor::new();
@@ -1215,7 +1157,7 @@ mod tests {
     }
 
     /// `cancel_task` is the speculation cleanup path: when one sharer finishes the
-    /// shared range it aborts the others. It had no coverage in `fast-steal`.
+    /// shared range it aborts the others, sparing the caller.
     #[test]
     fn cancel_task_aborts_twins_but_spares_the_caller() {
         let ex = SyncExecutor::new();
@@ -1237,13 +1179,10 @@ mod tests {
         );
     }
 
-    /// `cancel_task` aborts and deregisters the twin, but
-    /// does **not** reclaim the remaining range into `waiting`. That is
-    /// deliberate: reclaiming would race with the caller's own still-live `task`
-    /// over the same range and cause duplicate execution. The soundness therefore
-    /// depends on the caller invoking this only after the shared range is
-    /// finished (as `fast-pull` does). Aimed at live work it silently strands the
-    /// remainder — by design, not by accident.
+    /// `cancel_task` aborts and deregisters the twin but does **not** reclaim the
+    /// remaining range into `waiting`: the caller's still-live task already owns
+    /// that cursor, so reclaiming would double-execute. Called before the shared
+    /// range is finished (i.e. on live work) it strands the remainder by design.
     #[test]
     fn cancel_task_does_not_reclaim_unfinished_work() {
         let ex = SyncExecutor::new();
@@ -1267,10 +1206,9 @@ mod tests {
 
     /// An unregistered caller must not abort anyone via `cancel_task`.
     ///
-    /// Without the registration guard a caller that was deregistered by a
-    /// shrink (but is still running cooperatively) makes `is_self` vacuous —
-    /// `false` for every entry — and aborts *all* twins, including the only
-    /// worker that was supposed to pick up work from `waiting`.
+    /// Without the registration guard a caller deregistered by a shrink (but still
+    /// running cooperatively) makes `is_self` vacuous -- `false` for every entry --
+    /// and aborts *all* twins, including the worker meant to drain `waiting`.
     #[test]
     fn cancel_task_unregistered_caller_is_a_noop() {
         let ex = SyncExecutor::new();
@@ -1285,14 +1223,9 @@ mod tests {
         assert_eq!(q.inner.lock().running.len(), 2, "no worker deregistered");
     }
 
-    // -----------------------------------------------------------------
-    // Audit verification tests.
-    // -----------------------------------------------------------------
-
-    /// Verifies that `retain` at the top of `set_threads` removes ALL dead
-    /// entries before the shrink path runs, so the survivors are always alive
-    /// and the decrease branch can proceed to reclaim their overflow peers
-    /// without a separate liveness guard.
+    /// `retain` at the top of `set_threads` removes every dead entry first, so the
+    /// shrink path always operates on live survivors and needs no separate
+    /// liveness guard.
     #[test]
     fn set_threads_shrink_guard_never_fires_after_retain() {
         let ex = SyncExecutor::new();
