@@ -110,8 +110,8 @@ pub struct SmartRedirectClient {
     client: Client,
     initial_referer: Option<HeaderValue>,
     referrer_policy: Option<ReferrerPolicy>,
-    /// Per RFC 9110 §15.4 item 2.5, resource-specific headers that are
-    /// stripped on redirect and injected only on the first request hop.
+    /// Per RFC 9110 §15.4 item 2.5, resource-specific headers that are dropped
+    /// as soon as the redirect chain leaves the origin they were configured for.
     origin: Option<HeaderValue>,
     authorization: Option<HeaderValue>,
     cookie: Option<HeaderValue>,
@@ -127,8 +127,9 @@ impl SmartRedirectClient {
     /// * `initial_referer` — the `Referer` sent on the first request.
     /// * `referrer_policy` — the policy applied when no `Referrer-Policy`
     ///   header is present on a response; per-hop headers override it.
-    /// * `origin` / `authorization` / `cookie` — resource-specific headers
-    ///   injected only on the first hop and stripped on redirect (RFC 9110 §15.4).
+    /// * `origin` / `authorization` / `cookie` — resource-specific headers sent
+    ///   while the redirect chain stays on the initial origin; the first hop to
+    ///   another origin drops them (RFC 9110 §15.4).
     /// * `max_redirects` — the maximum number of redirects to follow before
     ///   failing with a `StatusCode` error.
     #[must_use]
@@ -168,6 +169,7 @@ impl HttpClient for SmartRedirectClient {
             cookie: self.cookie.clone(),
             max_redirects: self.max_redirects,
             redirect_count: 0,
+            send_credentials: true,
         }
     }
 }
@@ -188,12 +190,18 @@ pub struct ManualRedirectRequestBuilder {
     range: Option<ProgressEntry>,
     next_referer: Option<HeaderValue>,
     referrer_policy: Option<ReferrerPolicy>,
-    /// Resource-specific headers injected only on the first hop.
+    /// Resource-specific headers injected on the first hop and dropped as soon
+    /// as a redirect leaves the initial origin.
     origin: Option<HeaderValue>,
     authorization: Option<HeaderValue>,
     cookie: Option<HeaderValue>,
     max_redirects: usize,
     redirect_count: usize,
+    /// Whether `origin`/`authorization`/`cookie` may still be sent. Cleared
+    /// permanently by the first cross-origin redirect: the credentials belong to
+    /// the origin they were configured for, so a later hop back to it must not
+    /// resurrect them mid-chain.
+    send_credentials: bool,
 }
 
 impl HttpRequestBuilder for ManualRedirectRequestBuilder {
@@ -212,9 +220,10 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
             if let Some(ref referer) = self.next_referer {
                 req = req.header(header::REFERER, referer);
             }
-            // Per RFC 9110 §15.4 item 2.5, resource-specific headers are
-            // only sent on the first hop and stripped on redirect.
-            if self.redirect_count == 0 {
+            // Per RFC 9110 §15.4 item 2.5, resource-specific headers follow the
+            // origin they were configured for: a same-origin redirect keeps them,
+            // the first cross-origin one strips them for the rest of the chain.
+            if self.send_credentials {
                 if let Some(ref origin) = self.origin {
                     req = req.header(header::ORIGIN, origin);
                 }
@@ -281,6 +290,13 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
             }
             self.next_referer = compute_referer(self.referrer_policy, &self.url, &next_url)
                 .and_then(|s| HeaderValue::from_str(&s).ok());
+            // The configured Origin/Authorization/Cookie belong to the origin
+            // this request started on, so the first hop to another origin ends
+            // their use for the whole chain -- a later hop back must not
+            // resurrect them.
+            if self.send_credentials && self.url.origin() != next_url.origin() {
+                self.send_credentials = false;
+            }
             self.url = next_url;
             self.redirect_count += 1;
         }
@@ -458,8 +474,6 @@ mod tests {
                 _ => {}
             }
         }
-        dbg!(&pull_progress);
-        dbg!(&push_progress);
         assert_eq!(pull_progress, download_chunks);
         assert_eq!(push_progress, download_chunks);
 
@@ -724,8 +738,6 @@ mod tests {
                 _ => {}
             }
         }
-        dbg!(&pull_progress);
-        dbg!(&push_progress);
         assert_eq!(pull_progress, download_chunks);
         assert_eq!(push_progress, download_chunks);
 
@@ -969,7 +981,7 @@ mod tests {
             .with_body("hello")
             .create_async()
             .await;
-        // First-hop resource-specific headers are injected only on redirect_count == 0.
+        // Resource headers are attached to the request; this mock matches any.
         let redirect_client = SmartRedirectClient::new(
             client,
             None,
@@ -986,6 +998,105 @@ mod tests {
             .await
             .expect("request with resource headers should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// RFC 9110 §15.4: a redirect that stays on the same origin keeps the
+    /// resource-specific headers. The destination mock only matches when they
+    /// arrive, so its status reports what was actually sent.
+    #[tokio::test]
+    async fn test_smart_redirect_keeps_resource_headers_on_same_origin() {
+        let mut server = mockito::Server::new_async().await;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let _redirect = server
+            .mock("GET", "/a")
+            .with_status(302)
+            .with_header("Location", "/b")
+            .create_async()
+            .await;
+        let _dst = server
+            .mock("GET", "/b")
+            .match_header("authorization", "secret-token")
+            .match_header("cookie", "cookie-value")
+            .with_status(200)
+            .with_body("ok")
+            .create_async()
+            .await;
+        let redirect_client = SmartRedirectClient::new(
+            client,
+            None,
+            Some(ReferrerPolicy::NoReferrer),
+            None,
+            Some(HeaderValue::from_static("secret-token")),
+            Some(HeaderValue::from_static("cookie-value")),
+            10,
+        );
+        let url = Url::parse(&format!("{}/a", server.url())).unwrap();
+        let resp = redirect_client
+            .get(url, None)
+            .send()
+            .await
+            .expect("same-origin redirect should succeed");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a same-origin redirect must keep Authorization/Cookie"
+        );
+    }
+
+    /// RFC 9110 §15.4: once the chain leaves the origin, the resource-specific
+    /// headers are not sent again. Two `mockito` servers differ in port, hence in
+    /// origin; the destination mock only matches when the headers are absent.
+    #[tokio::test]
+    async fn test_smart_redirect_strips_resource_headers_cross_origin() {
+        let mut first = mockito::Server::new_async().await;
+        let mut second = mockito::Server::new_async().await;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let target = format!("{}/b", second.url());
+        let _redirect = first
+            .mock("GET", "/a")
+            .with_status(302)
+            .with_header("Location", &target)
+            .create_async()
+            .await;
+        // Matches only when the credentials are (wrongly) forwarded, so a reply
+        // of 200 means a leak and mockito's 501 "no match" means they were
+        // stripped.
+        let _dst = second
+            .mock("GET", "/b")
+            .match_header("authorization", "secret-token")
+            .with_status(200)
+            .with_body("ok")
+            .create_async()
+            .await;
+        let redirect_client = SmartRedirectClient::new(
+            client,
+            None,
+            Some(ReferrerPolicy::NoReferrer),
+            None,
+            Some(HeaderValue::from_static("secret-token")),
+            Some(HeaderValue::from_static("cookie-value")),
+            10,
+        );
+        let url = Url::parse(&format!("{}/a", first.url())).unwrap();
+        let (err, _) = redirect_client
+            .get(url, None)
+            .send()
+            .await
+            .expect_err("a cross-origin redirect must not forward Authorization/Cookie");
+        assert_eq!(
+            err.status_code(),
+            Some(501),
+            "the destination only answers when Authorization arrives, and mockito \
+             replies 501 when nothing matches"
+        );
     }
 
     #[tokio::test]
@@ -1006,7 +1117,7 @@ mod tests {
         let redirect_client = SmartRedirectClient::new(client, None, None, None, None, None, 10);
         let url = Url::parse(&format!("{}/range", server.url())).unwrap();
         // A ranged request exercises the `if let Some(ref range)` branch that
-        // attaches the `Range` header (lines 219-224).
+        // attaches the `Range` header.
         let resp = redirect_client
             .get(url, Some(0..3))
             .send()
@@ -1061,7 +1172,7 @@ mod range_underflow_tests {
 
     #[test]
     fn client_get_empty_range_does_not_underflow() {
-        // Regression for hypothesis D: `range.end.saturating_sub(1)` must not
+        // Regression guard: `range.end.saturating_sub(1)` must not
         // underflow u64 when `range.end == 0`. Building the Range header for an
         // empty range (`0..0`) must construct a request without panicking.
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
