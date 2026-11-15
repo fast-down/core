@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn get_filename_filename_star_not_double_decoded() {
-        // Hypothesis A: `ContentDisposition::parse` already percent-decodes
+        // `ContentDisposition::parse` already percent-decodes
         // `filename*` ("%25100" -> "%100"). `get_filename` then calls
         // `urlencoding::decode_binary` on the decoded string, double-decoding
         // it. A server that intends the literal filename "%100" (sent as

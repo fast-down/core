@@ -91,10 +91,10 @@ pub type GetHeaderError<Client> = <GetHeader<Client> as HttpHeaders>::GetHeaderE
 #[derive(thiserror::Error)]
 pub enum HttpError<Client: HttpClient> {
     /// The HTTP request failed to send.
-    #[error("HTTP request failed: {0:?}")]
+    #[error("HTTP request failed: {0}")]
     Request(GetRequestError<Client>),
     /// Reading a response body chunk failed.
-    #[error("HTTP chunk read failed: {0:?}\n  response: {1:?}")]
+    #[error("HTTP chunk read failed: {0}\n  response: {1:?}")]
     Chunk(GetChunkError<Client>, GetResponse<Client>),
     /// A pull failure the engine must not retry.
     #[error("irrecoverable pull error")]

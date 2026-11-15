@@ -131,24 +131,16 @@ impl FastDownPuller {
     /// Returns [`BuildClientError`] if the underlying HTTP client cannot be
     /// built (invalid proxy, TLS setup failure, etc.).
     pub fn new(option: FastDownPullerOptions<'_>) -> Result<Self, BuildClientError> {
-        let turn = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let turn = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let available_ips = option.available_ips;
+        let local_addr = next_local_addr(&available_ips, &turn);
         let client = build_client(
             option.headers.as_ref().clone(),
             option.proxy,
             option.accept_invalid_certs,
             option.accept_invalid_hostnames,
             option.cookie_store,
-            if available_ips.is_empty() {
-                None
-            } else {
-                available_ips
-                    .get(
-                        turn.fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-                            % available_ips.len(),
-                    )
-                    .copied()
-            },
+            local_addr,
             option.max_redirects,
             option.connect_timeout,
         )?;
@@ -176,10 +168,27 @@ impl FastDownPuller {
     }
 }
 
+/// The next local source address in the rotation, or `None` when the caller
+/// configured no addresses.
+fn next_local_addr(
+    available: &[std::net::IpAddr],
+    turn: &std::sync::atomic::AtomicUsize,
+) -> Option<std::net::IpAddr> {
+    if available.is_empty() {
+        return None;
+    }
+    let index = turn.fetch_add(1, std::sync::atomic::Ordering::AcqRel) % available.len();
+    available.get(index).copied()
+}
+
 impl Clone for FastDownPuller {
+    /// Rebuilds the HTTP client so a retry can leave the previous client and
+    /// local source address behind. If rebuilding fails, the previous client is
+    /// kept: `Clone` cannot report the failure and a download must not panic.
     fn clone(&self) -> Self {
         let available_ips = self.available_ips.clone();
         let turn = self.turn.clone();
+        let local_addr = next_local_addr(&available_ips, &turn);
         Self {
             inner: build_client(
                 self.headers.as_ref().clone(),
@@ -187,16 +196,7 @@ impl Clone for FastDownPuller {
                 self.accept_invalid_certs,
                 self.accept_invalid_hostnames,
                 self.cookie_store,
-                if available_ips.is_empty() {
-                    None
-                } else {
-                    available_ips
-                        .get(
-                            turn.fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-                                % available_ips.len(),
-                        )
-                        .copied()
-                },
+                local_addr,
                 self.max_redirects,
                 self.connect_timeout,
             )
@@ -359,20 +359,16 @@ mod tests {
     }
 
     #[test]
-    fn clone_swallows_build_client_error() {
-        // Hypothesis C: `FastDownPuller::clone` rebuilds the client via
-        // `build_client`, but on failure it silently falls back to
-        // `self.inner.clone()` (the `map_or_else` Err branch). Because
-        // `Clone::clone` cannot return a `Result`, the build error is swallowed
-        // and the clone keeps the stale client instead of surfacing the failure.
+    fn clone_falls_back_to_the_existing_client_when_the_rebuild_fails() {
+        // `Clone` cannot return an error. A rebuild that fails (here: a proxy
+        // edited into an unparseable value) keeps the previous client rather than
+        // panicking; the proxy field is still reproduced for the next clone.
         let mut puller = FastDownPuller::new(make_options(
             Url::parse("http://example.com/a.bin").unwrap(),
         ))
         .expect("new must succeed");
         // Inject an invalid custom proxy that makes `build_client` fail on clone.
         puller.proxy = Proxy::Custom(Arc::from("not a valid proxy url"));
-        // Clone must still succeed (the error is swallowed via `map_or_else`,
-        // not propagated) and reproduce the proxy config.
         let cloned = puller.clone();
         assert_eq!(
             cloned.proxy, puller.proxy,
@@ -381,11 +377,25 @@ mod tests {
     }
 
     #[test]
-    fn turn_counter_starts_at_one_offsetting_first_ip_index() {
-        // `turn` is initialized to 1, so the first `fetch_add` in `new` returns 1
-        // and the first instance picks IP index `1 % len` rather than `0`. The
-        // rotation is still complete (every IP is eventually reached); only the
-        // starting point is offset by one. This locks in the counter behavior.
+    fn next_local_addr_starts_at_the_first_configured_ip() {
+        let ips: Vec<std::net::IpAddr> = vec![
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.2".parse().unwrap(),
+            "127.0.0.3".parse().unwrap(),
+        ];
+        let turn = std::sync::atomic::AtomicUsize::new(0);
+        assert_eq!(next_local_addr(&ips, &turn), Some(ips[0]));
+        assert_eq!(next_local_addr(&ips, &turn), Some(ips[1]));
+        assert_eq!(next_local_addr(&ips, &turn), Some(ips[2]));
+        assert_eq!(next_local_addr(&ips, &turn), Some(ips[0]));
+        assert_eq!(next_local_addr(&[], &turn), None);
+    }
+
+    #[test]
+    fn turn_counter_advances_once_per_client() {
+        // `turn` starts at 0, so the first instance uses IP index 0 and every
+        // clone advances to the next address. The counter is shared through the
+        // `Arc`, so both handles observe the same value.
         let ips: Vec<std::net::IpAddr> = vec![
             "127.0.0.1".parse().unwrap(),
             "127.0.0.2".parse().unwrap(),
@@ -394,12 +404,11 @@ mod tests {
         let mut opts = make_options(Url::parse("http://example.com/a.bin").unwrap());
         opts.available_ips = Arc::from(ips);
         let puller = FastDownPuller::new(opts).expect("new with ips must succeed");
-        // new() consumed the initial value 1 and advanced the counter to 2.
-        assert_eq!(puller.turn.load(std::sync::atomic::Ordering::Acquire), 2);
+        // new() consumed 0 and advanced the counter to 1.
+        assert_eq!(puller.turn.load(std::sync::atomic::Ordering::Acquire), 1);
         let cloned = puller.clone();
-        // clone() consumed 2 and advanced the counter to 3. The counter is a
-        // shared `Arc`, so both handles observe the same advanced value.
-        assert_eq!(cloned.turn.load(std::sync::atomic::Ordering::Acquire), 3);
-        assert_eq!(puller.turn.load(std::sync::atomic::Ordering::Acquire), 3);
+        // clone() consumed 1 and advanced the counter to 2.
+        assert_eq!(cloned.turn.load(std::sync::atomic::Ordering::Acquire), 2);
+        assert_eq!(puller.turn.load(std::sync::atomic::Ordering::Acquire), 2);
     }
 }

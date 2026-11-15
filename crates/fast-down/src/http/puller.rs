@@ -65,11 +65,15 @@ impl<Client: HttpClient> HttpPuller<Client> {
 /// The first byte offset a response body starts at, read from `Content-Range`.
 ///
 /// Accepts `bytes <start>-<end>/<size>`; the `bytes */<size>` form (no body
-/// range) and any malformed value yield `None`.
+/// range) and any malformed value yield `None`. The range unit is a
+/// case-insensitive token, so `Bytes 0-` is accepted too.
 fn content_range_start(headers: &impl HttpHeaders) -> Option<u64> {
     let raw = headers.get("content-range").ok()?;
-    let rest = raw.trim().strip_prefix("bytes")?.trim_start();
-    let (start, _) = rest.split_once('-')?;
+    let trimmed = raw.trim();
+    if !trimmed.as_bytes().get(..5)?.eq_ignore_ascii_case(b"bytes") {
+        return None;
+    }
+    let (start, _) = trimmed[5..].trim_start().split_once('-')?;
     start.trim().parse().ok()
 }
 
@@ -272,12 +276,10 @@ mod tests {
         type Output = Result<Option<Bytes>, MockError>;
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             if !self.polled_once {
-                println!("Wait... [Mock: simulating network delay with Pending]");
                 self.polled_once = true;
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            println!("Done! [Mock: data arrived, Ready]");
             Poll::Ready(Ok(Some(Bytes::from_static(b"success"))))
         }
     }
@@ -292,14 +294,11 @@ mod tests {
         let mut stream = Puller::pull(&mut puller, Some(&range))
             .await
             .expect("Failed to create stream");
-        println!("--- Starting HttpPuller test ---");
         let result =
             tokio::time::timeout(Duration::from_secs(1), async { stream.try_next().await }).await;
         match result {
             Ok(Ok(Some(bytes))) => {
-                println!("Received data: {bytes:?}");
                 assert_eq!(bytes, Bytes::from_static(b"success"));
-                println!("Test passed: HttpPuller correctly handled Pending state!");
             }
             e => {
                 panic!(
@@ -537,7 +536,7 @@ mod tests {
     async fn test_http_puller_reuses_response() {
         let url = Url::parse("http://localhost").unwrap();
         // Hand a pre-opened response to the puller; a full-file pull should reuse
-        // it directly (lines 119-123) instead of issuing a new request.
+        // it directly instead of issuing a new request.
         let resp = Some(Arc::new(parking_lot::Mutex::new(Some(MockResponse::new(
             None,
         )))));
@@ -687,6 +686,11 @@ mod tests {
             content_range_start(&MockHeaders(None)),
             None,
             "a response without Content-Range has no offset"
+        );
+        assert_eq!(
+            content_range_start(&RawHeaders("Bytes 5-9/20")),
+            Some(5),
+            "the range unit is a case-insensitive token"
         );
     }
 

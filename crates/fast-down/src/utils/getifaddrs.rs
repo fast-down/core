@@ -12,29 +12,6 @@ use std::net::IpAddr;
 #[cfg(not(target_family = "wasm"))]
 pub fn get_available_local_ips() -> std::io::Result<Vec<InterfaceInfo>> {
     use getifaddrs::{InterfaceFlags, getifaddrs};
-    const VIRTUAL_KEYWORDS: &[&str] = &[
-        // Docker and its bridges
-        "docker",
-        "veth",
-        "br-",
-        // VPN, tunnels, VMs
-        "utun",
-        "tun",
-        "tap",
-        // VirtualBox, VMware
-        "vboxnet",
-        "vmnet",
-        // LOOPBACK is already filtered by flags, but double-check
-        "lo",
-        // Common networking software
-        "tailscale",
-        "zerotier",
-        "bridge",
-        // Virtual bridges and dummy devices
-        "dummy",
-        "virtual",
-        "pseudo",
-    ];
 
     let mut ips = Vec::new();
     let interfaces = getifaddrs()?;
@@ -44,10 +21,7 @@ pub fn get_available_local_ips() -> std::io::Result<Vec<InterfaceInfo>> {
             && let Some(ip_addr) = interface.address.ip_addr()
             && !ip_addr.is_unspecified()
             && !is_link_local(&ip_addr)
-            && {
-                let name = interface.name.to_lowercase();
-                !VIRTUAL_KEYWORDS.iter().any(|k| name.contains(k))
-            }
+            && !is_virtual_name(&interface.name)
         {
             ips.push(InterfaceInfo {
                 name: interface.name,
@@ -67,7 +41,38 @@ pub const fn get_available_local_ips() -> std::io::Result<Vec<InterfaceInfo>> {
     Ok(Vec::new())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// Whether `name` looks like a virtual interface rather than a physical one.
+///
+/// `lo` is matched exactly: as a substring it would also hide real adapters
+/// such as Linux `wlo1` or Windows `Local Area Connection`.
+#[cfg(not(target_family = "wasm"))]
+fn is_virtual_name(name: &str) -> bool {
+    const VIRTUAL_KEYWORDS: &[&str] = &[
+        // Docker and its bridges
+        "docker",
+        "veth",
+        "br-",
+        // VPN, tunnels, VMs
+        "utun",
+        "tun",
+        "tap",
+        // VirtualBox, VMware
+        "vboxnet",
+        "vmnet",
+        // Common networking software
+        "tailscale",
+        "zerotier",
+        "bridge",
+        // Virtual bridges and dummy devices
+        "dummy",
+        "virtual",
+        "pseudo",
+    ];
+    let name = name.to_lowercase();
+    name == "lo" || VIRTUAL_KEYWORDS.iter().any(|k| name.contains(k))
+}
+
+#[cfg(not(target_family = "wasm"))]
 const fn is_link_local(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_link_local(),
@@ -87,7 +92,7 @@ pub struct InterfaceInfo {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{get_available_local_ips, is_link_local};
+    use super::{get_available_local_ips, is_link_local, is_virtual_name};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -165,26 +170,43 @@ mod tests {
         }
     }
 
+    /// Real adapter names must survive the virtual-interface filter: `lo` as a
+    /// substring used to drop `wlo1` (Linux Wi-Fi) and `Local Area Connection`.
+    #[test]
+    fn virtual_name_filter_keeps_real_adapters() {
+        for name in [
+            "eth0",
+            "en0",
+            "wlo1",
+            "wlan0",
+            "Ethernet",
+            "Local Area Connection",
+        ] {
+            assert!(!is_virtual_name(name), "{name} is a physical adapter");
+        }
+        for name in [
+            "lo",
+            "docker0",
+            "veth1234",
+            "br-1a2b",
+            "utun3",
+            "tun0",
+            "tap0",
+            "vboxnet0",
+            "vmnet1",
+            "tailscale0",
+            "zerotier1",
+            "bridge0",
+            "dummy0",
+            "pseudo0",
+        ] {
+            assert!(is_virtual_name(name), "{name} must be filtered as virtual");
+        }
+    }
+
     #[test]
     fn get_available_local_ips_satisfies_invariants() {
         let ips = get_available_local_ips().expect("get_available_local_ips must succeed");
-        let virtual_keywords = [
-            "docker",
-            "veth",
-            "br-",
-            "utun",
-            "tun",
-            "tap",
-            "vboxnet",
-            "vmnet",
-            "lo",
-            "tailscale",
-            "zerotier",
-            "bridge",
-            "dummy",
-            "virtual",
-            "pseudo",
-        ];
         for iface in &ips {
             assert!(
                 !iface.ip.is_unspecified(),
@@ -196,10 +218,10 @@ mod tests {
                 "returned ip {} must not be link-local (filtered by get_available_local_ips)",
                 iface.ip
             );
-            let name = iface.name.to_lowercase();
             assert!(
-                !virtual_keywords.iter().any(|k| name.contains(k)),
-                "returned interface name {name} must not match a virtual-keyword"
+                !is_virtual_name(&iface.name),
+                "returned interface name {} must not be virtual",
+                iface.name
             );
         }
     }
