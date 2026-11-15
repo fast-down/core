@@ -8,6 +8,7 @@
 //! dropped (or [`DownloadResult::abort`] is called).
 
 use crate::Event;
+use crate::Pusher;
 use crossfire::{MAsyncRx, mpmc};
 use fast_steal::{Executor, TaskQueue};
 use force_send::ForceSend;
@@ -119,6 +120,47 @@ fn spawn_stall_watch<PullError, PushError>(
             }
         }
     });
+}
+
+/// Flush the sink, retrying until it succeeds, the session is cancelled, or
+/// `stall_timeout` has passed since the first failure.
+///
+/// A flush error is normally permanent (full disk, EIO), so a session that keeps
+/// failing ends instead of looping forever. `watch_stop` ends the stall watchdog
+/// first: every pulled chunk has been handled and only the flush is left, which
+/// the watchdog must not cut short.
+fn flush_sink<W, PullError, PushError>(
+    pusher: &mut W,
+    tx: &crossfire::MTx<mpmc::List<Event<PullError, PushError>>>,
+    token: &CancellationToken,
+    watch_stop: &CancellationToken,
+    retry_gap: Duration,
+    stall_timeout: Duration,
+) where
+    W: Pusher<Error = PushError>,
+    PullError: Send + Unpin + 'static,
+    PushError: Send + Unpin + 'static,
+{
+    watch_stop.cancel();
+    let mut first_failure: Option<Instant> = None;
+    loop {
+        if token.is_cancelled() {
+            return;
+        }
+        let _ = tx.send(Event::Flushing);
+        match pusher.flush() {
+            Ok(()) => return,
+            Err(err) => {
+                let _ = tx.send(Event::FlushError(err));
+                let since = *first_failure.get_or_insert_with(Instant::now);
+                if !stall_timeout.is_zero() && since.elapsed() >= stall_timeout {
+                    token.cancel();
+                    return;
+                }
+            }
+        }
+        std::thread::park_timeout(retry_gap);
+    }
 }
 
 /// Shared state of an active download session.
@@ -521,7 +563,7 @@ mod tests {
         // `Debug` of `DownloadResultInner` is reached through `DownloadResult`'s
         // own `Debug` impl, which forwards to the inner value.
         let _ = format!("{result:?}");
-        // Lines 234-236 (forwarding) and 111-123 (inner task-queue adjustment).
+        // Exercises the forwarding and the inner task-queue adjustment.
         result.set_threads(4);
         // Await completion by draining `event_chain` (it disconnects once the
         // push driver drops its sender) — this replaces `join()`.
@@ -536,8 +578,7 @@ mod tests {
         let puller = MockPuller::new(&mock_data);
         let pusher = MemPusher::with_capacity(mock_data.len());
         let receive = pusher.receive.clone();
-        // Single-threaded sessions have no task queue, so `set_threads` is a no-op
-        // (covers the `if let` else path, line 122 of `DownloadResultInner`).
+        // Single-threaded sessions have no task queue, so `set_threads` is a no-op.
         let result = download_single(
             puller,
             pusher,
@@ -547,7 +588,7 @@ mod tests {
                 stall_timeout: Duration::from_secs(60),
             },
         );
-        // Lines 167-171: `DownloadResult` is `Clone`.
+        // `DownloadResult` is `Clone`.
         let _clone = result.clone();
         result.set_threads(4);
         while result.event_chain().recv().await.is_ok() {}

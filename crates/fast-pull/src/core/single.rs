@@ -1,6 +1,6 @@
 //! Single-threaded sequential download.
 
-use crate::core::{PUSH_POLL, ProgressClock, spawn_stall_watch};
+use crate::core::{PUSH_POLL, ProgressClock, flush_sink, spawn_stall_watch};
 use crate::{
     DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, multi::TokioExecutor,
 };
@@ -9,7 +9,6 @@ use core::time::Duration;
 use crossfire::{RecvTimeoutError, mpmc, spsc};
 use futures::TryStreamExt;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// Options for a single-threaded download.
@@ -105,33 +104,15 @@ pub fn download_single<R: Puller, W: Pusher>(
                     std::thread::park_timeout(options.retry_gap);
                 }
             }
-            // Every pulled chunk has been handled; only the flush is left, and
-            // the stall guard must not cut that short.
-            watch_stop.cancel();
-            let mut first_failure: Option<Instant> = None;
-            loop {
-                if token.is_cancelled() {
-                    break;
-                }
-                let _ = tx.send(Event::Flushing);
-                match pusher.flush() {
-                    Ok(()) => break,
-                    Err(err) => {
-                        let _ = tx.send(Event::FlushError(err));
-                        // A flush error is normally permanent (full disk, EIO).
-                        // Retry for `stall_timeout` after the first failure, then
-                        // end the session instead of looping forever.
-                        let since = *first_failure.get_or_insert_with(Instant::now);
-                        if !options.stall_timeout.is_zero()
-                            && since.elapsed() >= options.stall_timeout
-                        {
-                            token.cancel();
-                            return;
-                        }
-                    }
-                }
-                std::thread::park_timeout(options.retry_gap);
-            }
+            // Every pulled chunk has been handled; only the flush is left.
+            flush_sink(
+                &mut pusher,
+                &tx,
+                &token,
+                &watch_stop,
+                options.retry_gap,
+                options.stall_timeout,
+            );
         }
     });
 
@@ -196,14 +177,24 @@ pub fn download_single<R: Puller, W: Pusher>(
     tokio::spawn({
         let token = token.clone();
         async move {
-            tokio::select! {
-                _ = push_handle => {},
-                () = token.cancelled() => {
-                    pull_handle.abort();
-                    if let Some(t) = push_thread.get() {
-                        t.unpark();
-                    }
-                }
+            let push_failed = tokio::select! {
+                res = push_handle => res.is_err(),
+                () = token.cancelled() => false,
+            };
+            // The push driver is the only sink for pulled bytes, so its death
+            // aborts the session rather than leaving it to look like a download
+            // that is merely slow: `is_aborted()` is how a caller observes it.
+            // `multi` does the same for its workers.
+            if push_failed {
+                token.cancel();
+            }
+            // Always drop the pull task. The push driver may win the race above
+            // by returning as soon as it sees the cancelled token, and the pull
+            // task owns the event sender: leaving it detached would keep the
+            // stream open and hang the caller's drain loop.
+            pull_handle.abort();
+            if let Some(t) = push_thread.get() {
+                t.unpark();
             }
         }
     });
@@ -226,8 +217,9 @@ mod tests {
         MemPusher, Merge, ProgressEntry,
         mock::{MockPuller, build_mock_data},
     };
+    use futures::StreamExt;
     use futures::stream;
-    use std::{dbg, vec};
+    use std::vec;
     use tokio::time::{sleep, timeout};
     use vec::Vec;
 
@@ -262,8 +254,6 @@ mod tests {
                 _ => {}
             }
         }
-        dbg!(&pull_progress);
-        dbg!(&push_progress);
         assert_eq!(pull_progress, download_chunks);
         assert_eq!(push_progress, download_chunks);
 
@@ -472,9 +462,8 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Coverage for the push-error retry path (lines 54-59), flush-error retry path
-    // (lines 69-73), pull-error path (lines 83-85), stream-error path (lines 99-105)
-    // and the `SlowMockPuller` `Some` branch (line 247).
+    // Coverage for the push/flush retry paths, the pull and stream error paths,
+    // and the `SlowMockPuller` `Some` branch.
     // -------------------------------------------------------------------------
 
     use parking_lot::Mutex;
@@ -509,8 +498,8 @@ mod tests {
         }
     }
 
-    /// In-memory sink that can be told to fail the next `push` (lines 54-59) or
-    /// `flush` (lines 69-73), or every `flush`.
+    /// In-memory sink that can be told to fail the next `push` or
+    /// `flush`, or every `flush`.
     struct FlakySink {
         fail_push: Arc<AtomicBool>,
         fail_flush: Arc<AtomicBool>,
@@ -626,7 +615,7 @@ mod tests {
     }
 
     /// Like [`StreamErrOncePuller`] but yields a *recoverable* stream error first,
-    /// so the `is_irrecoverable == false` fall-through (line 105) is exercised.
+    /// so the `is_irrecoverable == false` fall-through is exercised.
     #[derive(Debug, Clone)]
     struct RecoverableStreamErrOncePuller {
         data: Arc<[u8]>,
@@ -642,7 +631,7 @@ mod tests {
         > + Send {
             // The first `pull` yields one recoverable stream error *followed by* the
             // real data in the same stream. In `single` a recoverable stream error
-            // falls through (line 105) and then keeps reading the same stream, so the
+            // falls through and then keeps reading the same stream, so the
             // download still completes successfully.
             let first = !self.failed.swap(true, Ordering::SeqCst);
             let data = match range {
@@ -664,7 +653,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_push_error_retries() {
-        // Lines 54-59: a failing inner push is retried after `park_timeout`.
+        // a failing inner push is retried after `park_timeout`.
         let mock_data = build_mock_data(3 * 1024);
         let puller = MockPuller::new(&mock_data);
         let sink = FlakySink::new();
@@ -685,7 +674,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_flush_error_retries() {
-        // Lines 69-73: a failing inner flush is retried after `park_timeout`.
+        // a failing inner flush is retried after `park_timeout`.
         let mock_data = build_mock_data(3 * 1024);
         let puller = MockPuller::new(&mock_data);
         let sink = FlakySink::new();
@@ -737,7 +726,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_pull_error_retries() {
-        // Lines 83-85: a `pull` error (recoverable) is retried.
+        // a `pull` error (recoverable) is retried.
         let mock_data = build_mock_data(3 * 1024);
         let puller = PullErrOncePuller {
             data: Arc::from(mock_data.as_slice()),
@@ -760,7 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_stream_error_irrecoverable_retries() {
-        // Lines 99-105: a stream error whose `is_irrecoverable` is true triggers a
+        // a stream error whose `is_irrecoverable` is true triggers a
         // `continue 'redownload` and a re-pull, which then succeeds.
         let mock_data = build_mock_data(3 * 1024);
         let puller = StreamErrOncePuller {
@@ -784,8 +773,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_stream_error_recoverable_retries() {
-        // Lines 99-105: a stream error whose `is_irrecoverable` is false does NOT
-        // `continue 'redownload`; instead it falls through (line 105) and retries the
+        // a stream error whose `is_irrecoverable` is false does NOT
+        // `continue 'redownload`; instead it falls through and retries the
         // pull, which then succeeds.
         let mock_data = build_mock_data(3 * 1024);
         let puller = RecoverableStreamErrOncePuller {
@@ -809,8 +798,8 @@ mod tests {
 
     #[tokio::test]
     async fn puller_and_error_coverage() {
-        // Exercise `Display` for the test error types (lines 386-388, 400-403) and
-        // both arms of each test puller's `match range` (lines 483, 511, 541, 550-551).
+        // Exercise `Display` for the test error types and
+        // both arms of each test puller's `match range`.
         assert_eq!(format!("{FatalErr}"), "fatal");
         assert_eq!(format!("{RecoverableErr}"), "recoverable");
 
@@ -841,7 +830,7 @@ mod tests {
 
     #[test]
     fn flaky_sink_noncontiguous_write_rebuffers() {
-        // Lines 446-449: a write whose start is not flush against the current end of
+        // a write whose start is not flush against the current end of
         // the sink takes the `else` branch (resize + scatter copy) instead of `extend`.
         let mut sink = FlakySink::new();
         sink.push(&(5..8u64), Bytes::from_static(b"xyz")).unwrap();
@@ -850,7 +839,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_slow_mock_puller_some_range() {
-        // Line 247: the `Some` branch of `SlowMockPuller::pull` (the sequential
+        // the `Some` branch of `SlowMockPuller::pull` (the sequential
         // download always passes `None`, so this branch is otherwise uncovered).
         let mut p = SlowMockPuller {
             data: Arc::from(b"hello world".as_slice()),
@@ -877,8 +866,8 @@ mod tests {
                 stall_timeout: Duration::from_secs(60),
             },
         );
-        // Drain events so `event_chain` does not pin the task open.
-        while result.event_chain().recv().await.is_ok() {}
+        // Drain events so `event_chain` does not pin the task open; the timeout
+        // guards against a hang.
         timeout(Duration::from_secs(10), async {
             while result.event_chain().recv().await.is_ok() {}
         })
@@ -919,7 +908,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_pull_error_without_retry_gap_uses_options_default() {
-        // Lines 83-85: a `pull` error carrying `None` as the retry gap must fall
+        // a `pull` error carrying `None` as the retry gap must fall
         // back to `options.retry_gap` rather than panicking or stalling.
         let mock_data = build_mock_data(3 * 1024);
         let puller = PullErrNoGapPuller {
@@ -1004,6 +993,67 @@ mod tests {
         .await
         .expect("a stalled body must end after the stall timeout");
         assert!(stalled, "the session must report Event::Stalled");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_driver_panic_does_not_leave_the_pull_task_attached() {
+        // The push driver dies on its first write while the pull task is blocked
+        // in `try_next`. The supervisor must abort the pull task so the event
+        // stream closes; the old code only aborted inside the cancel arm, so this
+        // hung until the test timeout.
+        let result = download_single(
+            OneChunkThenStallPuller,
+            PanickingSink,
+            DownloadOptions {
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 16,
+                stall_timeout: Duration::ZERO,
+            },
+        );
+        timeout(Duration::from_secs(5), async {
+            while result.event_chain().recv().await.is_ok() {}
+        })
+        .await
+        .expect("a panicking push driver must not keep the session alive");
+        assert!(
+            result.is_aborted(),
+            "a dead writer must report the session as aborted, not merely unfinished"
+        );
+    }
+
+    /// A sink that panics on its first write, killing the push thread.
+    struct PanickingSink;
+
+    impl Pusher for PanickingSink {
+        type Error = std::convert::Infallible;
+
+        fn push(
+            &mut self,
+            _range: &crate::ProgressEntry,
+            _bytes: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            panic!("sink panic");
+        }
+    }
+
+    /// Yields one chunk, then a stream that never resolves: the pull task stays
+    /// blocked in `try_next` after the push driver dies.
+    #[derive(Clone)]
+    struct OneChunkThenStallPuller;
+
+    impl Puller for OneChunkThenStallPuller {
+        type Error = std::convert::Infallible;
+
+        fn pull(
+            &mut self,
+            _range: Option<&crate::ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            type Item = crate::PullResult<Bytes, std::convert::Infallible>;
+            let items: Vec<Item> = vec![Ok(Bytes::from_static(b"x"))];
+            std::future::ready(Ok(stream::iter(items).chain(stream::pending::<Item>())))
+        }
     }
 
     #[tokio::test]
