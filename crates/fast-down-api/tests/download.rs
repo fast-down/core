@@ -518,24 +518,51 @@ async fn cancellation_keeps_state_and_resume_completes() {
 
     let (tx, rx) = create_channel();
     let ctx = Ctx::new();
-    let cancel = ctx.clone();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
         .build(&tx)
         .await
         .expect("build");
     assert!(matches!(&ready.outcome, ResumeOutcome::Fresh));
-    let drain = tokio::spawn(run_to_end(rx));
-    let watcher = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        cancel.cancel();
+    // Cancel once a chunk has actually reached the sink instead of after a fixed
+    // delay: a timer races the pipeline build, and a cancel that lands before a
+    // byte is recorded drops the empty pair this run created rather than keeping
+    // it resumable. The throttle leaves the remaining chunks well over a cancel
+    // round trip away.
+    let drain = tokio::spawn({
+        let cancel = ctx.clone();
+        async move {
+            let mut pushed = 0u64;
+            while let Ok(event) = rx.recv().await {
+                if let Event::PushProgress(range) = &event
+                    && range.start < range.end
+                {
+                    pushed = pushed.saturating_add(range.end - range.start);
+                    cancel.cancel();
+                }
+                if let Event::Terminated(reason) = event {
+                    return (reason, pushed);
+                }
+            }
+            panic!("the run must report Terminated");
+        }
     });
     let _handle = ready.start(StartMode::Auto, tx, &ctx);
-    watcher.await.unwrap();
-    let reason = drain.await.unwrap();
+    let (reason, pushed) = timeout(Duration::from_secs(10), drain)
+        .await
+        .expect("a chunk must reach the sink")
+        .expect("drain task");
     assert_eq!(
         reason,
         TerminationReason::Cancelled,
         "a mid-transfer cancel must report Cancelled"
+    );
+    // Without this the test degrades silently: a cancel that only lands after the
+    // whole file reached the sink still reports `Cancelled`, and the resume below
+    // would then re-check a complete pair instead of a partial one.
+    assert!(
+        pushed < FILE_SIZE as u64,
+        "the cancel must land mid-transfer, but {pushed} of {FILE_SIZE} bytes \
+         had already reached the sink when it fired"
     );
 
     // The `.fd` survives so a later run continues and completes the file.
