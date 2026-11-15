@@ -4,11 +4,6 @@ use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::Bytes;
 use memmap2::MmapMut;
 
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
-#[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
-
 /// File pusher using memory-mapped I/O for zero-copy writes.
 ///
 /// Delegates writes to the OS via `MmapMut`. The file size is fixed at
@@ -34,22 +29,17 @@ impl MmapFilePusher {
     /// 2. Returns an error if `MmapMut::map_mut` fails.
     pub async fn new(file: &tokio::fs::File, size: u64, sync_all: bool) -> std::io::Result<Self> {
         file.set_len(size).await?;
-        // `MmapMut::map_mut` performs a synchronous `mmap()` syscall, but it only
-        // needs the raw fd/handle — it never takes ownership of the `File`. Moving
-        // just the raw descriptor (always `Send`) into the blocking pool satisfies
-        // `spawn_blocking`'s `'static` bound with zero extra `dup`/`CloneFile`.
-        // (`RawHandle` is a `*mut c_void` and `!Send` on Windows, so it is carried
-        // as `usize` and reconstructed inside the blocking closure.)
-        #[cfg(unix)]
-        let raw = file.as_raw_fd();
-        #[cfg(windows)]
-        let raw = file.as_raw_handle() as usize;
+        // Map from an independent handle owned by the blocking closure: the
+        // caller's `file` can be dropped if the build future is cancelled while
+        // the mapping task is still queued, and a descriptor passed by value
+        // could then be closed (or reused for an unrelated file) before the
+        // mapping runs.
+        let file = file.try_clone().await?;
+        let std_file = file.into_std().await;
         let mmap = tokio::task::spawn_blocking(move || unsafe {
-            #[cfg(unix)]
-            let desc = raw;
-            #[cfg(windows)]
-            let desc = raw as std::os::windows::io::RawHandle;
-            MmapMut::map_mut(desc)
+            // SAFETY: the file is owned by this closure and stays open for the
+            // call; the returned mapping holds its own reference to the object.
+            MmapMut::map_mut(&std_file)
         })
         .await
         .map_err(std::io::Error::other)??;
@@ -68,8 +58,31 @@ impl Pusher for MmapFilePusher {
     }
 
     fn push(&mut self, range: &ProgressEntry, bytes: Bytes) -> Result<(), (Self::Error, Bytes)> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let in_bounds = usize::try_from(range.start)
+            .ok()
+            .zip(usize::try_from(range.end).ok())
+            .is_some_and(|(start, end)| {
+                start <= end && end <= self.mmap.len() && end - start == bytes.len()
+            });
+        if !in_bounds {
+            // Indexing the mapping would panic. A caller-supplied range is a
+            // contract violation, not a transient write failure: the engine
+            // retries a returned error, so this branch must stay unreachable for
+            // ranges derived from the mapped size.
+            return Err((
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "push range does not match the mapped file",
+                ),
+                bytes,
+            ));
+        }
         #[allow(clippy::cast_possible_truncation)]
-        self.mmap[range.start as usize..range.end as usize].copy_from_slice(&bytes);
+        let (start, end) = (range.start as usize, range.end as usize);
+        self.mmap[start..end].copy_from_slice(&bytes);
         if let Some(l) = &mut self.listener {
             l(range.clone());
         }
@@ -126,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_debug_and_sync_all_flush() {
-        // Lines 25-29: `Debug` impl. Line 80: the `sync_all == true` branch of `flush`.
+        // The `Debug` impl and the `sync_all == true` branch of `flush`.
         let temp_file = NamedTempFile::new().unwrap();
         let file_path = temp_file.path().to_path_buf();
         let mut pusher = MmapFilePusher::new(&temp_file.reopen().unwrap().into(), 10, true)
@@ -145,7 +158,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_listener_invoked_on_push() {
-        // Lines 66-68 (`set_listener`) and 73-75 (listener call inside `push`).
+        // `set_listener` stores the callback and `push` invokes it.
         let temp_file = NamedTempFile::new().unwrap();
         let mut pusher = MmapFilePusher::new(&temp_file.reopen().unwrap().into(), 10, false)
             .await
@@ -160,8 +173,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mmap_pusher_rejects_a_range_outside_the_mapping() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut pusher = MmapFilePusher::new(&temp_file.reopen().unwrap().into(), 10, false)
+            .await
+            .unwrap();
+        let (err, unwritten) = pusher
+            .push(&(8..13), Bytes::from_static(b"abcde"))
+            .expect_err("a range past the mapping must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(&unwritten[..], b"abcde", "the caller keeps its bytes");
+
+        // A range whose length disagrees with the payload is refused too.
+        assert!(pusher.push(&(0..2), Bytes::from_static(b"abc")).is_err());
+    }
+
+    #[tokio::test]
     async fn test_mmap_pusher_zero_length_file() {
-        // Hypothesis: an empty download (size == 0) must still construct a usable
+        // An empty download (size == 0) must still construct a usable
         // pusher. `MmapMut::map_mut` on a zero-length file returns EINVAL on Unix,
         // so this probes whether `new(0)` is a latent break for 0-byte resources.
         let temp_file = NamedTempFile::new().unwrap();
