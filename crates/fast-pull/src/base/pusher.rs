@@ -8,7 +8,7 @@ use bytes::Bytes;
 ///
 /// Leaf sinks (`StdFilePusher`, `MmapFilePusher`, `MemPusher`) store this and
 /// call it from their [`Pusher::push`] success path. The alias exists so the
-/// `Box<dyn Fn ...>` parameter does not trip `clippy::type_complexity`.
+/// `Box<dyn Fn...>` parameter does not trip `clippy::type_complexity`.
 pub type ProgressListener = Box<dyn FnMut(ProgressEntry) + Send + 'static>;
 
 /// Abstraction over a data sink that receives pushed byte chunks.
@@ -19,10 +19,13 @@ pub trait Pusher: Send + 'static {
     type Error: std::error::Error + Send + Sync + Unpin + 'static;
     /// Write `content` covering the given `range` to the destination.
     ///
-    /// On success returns `Ok(())`. On failure returns `Err((error, bytes))`
-    /// where `bytes` is the (possibly partial) payload that was **not** written,
-    /// so the engine can retry it. Implementors should keep already-written
-    /// bytes internally on failure rather than dropping them.
+    /// Returning `Ok(())` means the sink took responsibility for `content`; a
+    /// buffering decorator may still hold it in memory until its next `flush`,
+    /// provided it guarantees that flush writes it. On failure returns
+    /// `Err((error, bytes))` where `bytes` is the part of `content` the caller
+    /// still owns: either the bytes to retry, or empty when the decorator kept
+    /// them internally for a later flush. A decorator that returns empty must
+    /// therefore never drop them silently.
     #[allow(clippy::missing_errors_doc)]
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)>;
     /// Flush any buffered data to the destination.
@@ -124,8 +127,8 @@ mod tests {
 
     #[test]
     fn default_set_listener_is_noop() {
-        // Exercises the default `Pusher::set_listener` body (line 42) and the
-        // default-`flush` `DummyPusher::push` path (lines 112-118).
+        // Exercises the default `Pusher::set_listener` body and the
+        // default-`flush` `DummyPusher::push` path.
         let mut p = DummyPusher;
         p.set_listener(Box::new(|_| {}));
         p.push(&(0..0), Bytes::new()).unwrap();
@@ -133,7 +136,7 @@ mod tests {
 
     #[test]
     fn upcast_boxes_any_error() {
-        // Exercises `BoxPusher::upcast` (lines 96-98).
+        // Exercises `BoxPusher::upcast`.
         let boxed: Box<dyn AnyError> = BoxPusher::upcast(std::io::Error::other("boom"));
         let _ = boxed;
     }
@@ -191,7 +194,7 @@ mod tests {
 
     #[test]
     fn box_pusher_forwards_push_flush_and_listener() {
-        // Covers `BoxPusher`/`PusherAdapter` success forwarding (lines 61-69, 75-87).
+        // Covers `BoxPusher`/`PusherAdapter` success forwarding.
         let inner = RecordingPusher::new();
         let mut bp = BoxPusher::new(inner.clone());
         bp.set_listener(Box::new(|_| {}));
@@ -206,7 +209,7 @@ mod tests {
 
     #[test]
     fn box_pusher_upcasts_push_error() {
-        // Covers `PusherAdapter::push`'s `map_err`/upcast path (lines 80-84).
+        // Covers `PusherAdapter::push`'s `map_err`/upcast path.
         let inner = RecordingPusher::new();
         inner.fail_push.store(true, Ordering::SeqCst);
         let mut bp = BoxPusher::new(inner);
@@ -217,7 +220,7 @@ mod tests {
 
     #[test]
     fn box_pusher_upcasts_flush_error() {
-        // Covers `PusherAdapter::flush`'s `map_err`/upcast path (lines 85-87).
+        // Covers `PusherAdapter::flush`'s `map_err`/upcast path.
         let inner = RecordingPusher::new();
         inner.fail_flush.store(true, Ordering::SeqCst);
         let mut bp = BoxPusher::new(inner);

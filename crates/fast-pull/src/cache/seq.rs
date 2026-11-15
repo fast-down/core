@@ -4,6 +4,8 @@ use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::Bytes;
 use std::collections::BTreeMap;
 
+use super::util::rebuffer_tail;
+
 /// Pusher wrapper that reorders out-of-order chunks into sequential order.
 ///
 /// Buffers chunks in a `BTreeMap` keyed by offset. Eviction starts once the buffered
@@ -53,13 +55,7 @@ impl<P: Pusher> CacheSeqPusher<P> {
             let next_pos = start + chunk_len as u64;
             self.cache_size -= chunk_len;
             if let Err((e, ret)) = self.inner.push(&(start..next_pos), chunk) {
-                if !ret.is_empty() {
-                    let written = chunk_len.saturating_sub(ret.len());
-                    self.cache_size += ret.len();
-                    if let Some(old) = self.cache.insert(start + written as u64, ret) {
-                        self.cache_size -= old.len();
-                    }
-                }
+                rebuffer_tail(&mut self.cache, &mut self.cache_size, start, chunk_len, ret);
                 return Err(e);
             }
             expected = Some(next_pos);
@@ -104,81 +100,12 @@ impl<P: Pusher> Pusher for CacheSeqPusher<P> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
-
-    /// Records every push and can be told to fail the next one (with the bytes
-    /// returned so the cache can re-buffer them).
-    #[derive(Clone)]
-    struct RecordingSink {
-        pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
-        fail_next: Arc<AtomicBool>,
-        listener_set: Arc<AtomicBool>,
-    }
-    impl RecordingSink {
-        fn new() -> Self {
-            Self {
-                pushes: Arc::new(Mutex::new(Vec::new())),
-                fail_next: Arc::new(AtomicBool::new(false)),
-                listener_set: Arc::new(AtomicBool::new(false)),
-            }
-        }
-    }
-    impl Pusher for RecordingSink {
-        type Error = std::io::Error;
-        fn set_listener(&mut self, _: ProgressListener) {
-            self.listener_set.store(true, Ordering::SeqCst);
-        }
-        fn push(
-            &mut self,
-            range: &ProgressEntry,
-            bytes: Bytes,
-        ) -> Result<(), (Self::Error, Bytes)> {
-            if self.fail_next.fetch_and(false, Ordering::SeqCst) {
-                return Err((std::io::Error::other("boom"), bytes));
-            }
-            self.pushes.lock().unwrap().push((range.clone(), bytes));
-            Ok(())
-        }
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
-
-    /// Inner pusher that writes only the first 2 bytes of the chunk on its first call,
-    /// then fails returning the unwritten tail as `rem`. Exercises `evict_until`'s
-    /// partial-write re-buffering.
-    #[derive(Clone)]
-    struct PartialSink {
-        pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
-        partial: Arc<AtomicBool>,
-    }
-    impl Pusher for PartialSink {
-        type Error = std::io::Error;
-        fn push(
-            &mut self,
-            range: &ProgressEntry,
-            bytes: Bytes,
-        ) -> Result<(), (Self::Error, Bytes)> {
-            self.pushes
-                .lock()
-                .unwrap()
-                .push((range.clone(), bytes.clone()));
-            if !self.partial.swap(true, Ordering::SeqCst) {
-                let rem = bytes.slice(2..);
-                return Err((std::io::Error::other("partial"), rem));
-            }
-            Ok(())
-        }
-    }
-
-    fn bb(s: &str) -> Bytes {
-        Bytes::copy_from_slice(s.as_bytes())
-    }
+    use crate::testkit::{PartialSink, RecordingSink, bb};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn empty_push_is_noop() {
-        // Line 69: a zero-length chunk returns `Ok(())` immediately.
+        // a zero-length chunk returns `Ok(())` immediately.
         let sink = RecordingSink::new();
         let mut p = CacheSeqPusher::new(sink.clone(), 100, 0);
         p.push(&(0..0), Bytes::new()).unwrap();
@@ -187,7 +114,7 @@ mod tests {
 
     #[test]
     fn duplicate_start_overwrites_old_bytes() {
-        // Line 74: re-inserting at an already-cached start replaces the old entry
+        // re-inserting at an already-cached start replaces the old entry
         // and adjusts `cache_size` so the total does not grow.
         let sink = RecordingSink::new();
         let mut p = CacheSeqPusher::new(sink.clone(), 100, 0);
@@ -202,7 +129,7 @@ mod tests {
 
     #[test]
     fn evict_stops_at_gap_once_below_target() {
-        // Line 41: when the cache has dropped to <= low_watermark and the next
+        // when the cache has dropped to <= low_watermark and the next
         // cached chunk is not contiguous with what was just flushed, eviction stops.
         let sink = RecordingSink::new();
         let mut p = CacheSeqPusher::new(sink.clone(), 100, 30);
@@ -211,7 +138,7 @@ mod tests {
         // This insertion reaches the high watermark (100) and triggers eviction to 30.
         // During eviction A (40) then B (40) are flushed; cache_size drops to 20 (<= 30)
         // but the next buffered chunk starts at 200 (a gap, not contiguous with the
-        // previous flush end of 80), so the loop breaks at line 41 and C stays buffered.
+        // previous flush end of 80), so the loop breaks and C stays buffered.
         p.push(&(200..220), bb(&"C".repeat(20))).unwrap();
 
         let pushes = sink.pushes.lock().unwrap();
@@ -223,7 +150,7 @@ mod tests {
 
     #[test]
     fn inner_push_failure_during_push_eviction_propagates() {
-        // Lines 47-52 (re-buffer remainder) and 78-80 (propagate the error from `push`).
+        // Re-buffers the remainder and propagates the error from `push`.
         let sink = RecordingSink::new();
         sink.fail_next.store(true, Ordering::SeqCst);
         let mut p = CacheSeqPusher::new(sink, 10, 0);
@@ -233,7 +160,7 @@ mod tests {
 
     #[test]
     fn inner_push_failure_during_flush_propagates() {
-        // Lines 47-52 via `flush`: the failing chunk is re-buffered and the error surfaces.
+        // Via `flush`: the failing chunk is re-buffered and the error surfaces.
         let sink = RecordingSink::new();
         sink.fail_next.store(true, Ordering::SeqCst);
         let mut p = CacheSeqPusher::new(sink, 100, 0);
@@ -243,7 +170,7 @@ mod tests {
 
     #[test]
     fn set_listener_forwards_to_inner() {
-        // Lines 63-65: the listener is forwarded to the inner pusher.
+        // the listener is forwarded to the inner pusher.
         let sink = RecordingSink::new();
         let mut p = CacheSeqPusher::new(sink.clone(), 100, 0);
         p.set_listener(Box::new(|_| {}));
@@ -252,7 +179,7 @@ mod tests {
 
     #[test]
     fn evict_breaks_on_gap_below_target() {
-        // Line 41: once `cache_size` has dropped to <= target but the next
+        // once `cache_size` has dropped to <= target but the next
         // buffered chunk is not the expected sequential position, eviction
         // stops early and the gapped chunk remains buffered.
         let sink = RecordingSink::new();
@@ -270,10 +197,7 @@ mod tests {
     fn evict_until_partial_write_rebuffers_tail_at_correct_offset() {
         // A partial inner write (first 2 of 10 bytes persisted, then failure with the
         // 8-byte tail as `rem`) must re-buffer the tail at offset 2 and flush only it on retry.
-        let sink = PartialSink {
-            pushes: Arc::new(Mutex::new(Vec::new())),
-            partial: Arc::new(AtomicBool::new(false)),
-        };
+        let sink = PartialSink::new();
         let mut p = CacheSeqPusher::new(sink.clone(), 10, 0);
         // Reaches high watermark (10) and evicts: the partial failure re-buffers [2..10).
         let res = p.push(&(0..10), bb(&"A".repeat(10)));

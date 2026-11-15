@@ -4,7 +4,11 @@ use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::{Bytes, BytesMut};
 use std::collections::{BTreeMap, btree_map::Entry};
 
+use super::util::{rebuffer_tail, runs_longest_first};
+
 /// Pusher wrapper that buffers chunks and merges each flush run into a single [`Bytes`].
+///
+/// Not used by the built-in file pipeline, which uses [`crate::CacheSeqPusher`].
 ///
 /// Out-of-order chunks are stored in a `BTreeMap`. When a contiguous run reaches
 /// the high watermark, all chunks in that run are coalesced into one contiguous
@@ -47,33 +51,7 @@ impl<P: Pusher> CacheMergePusher<P> {
             return Ok(());
         }
 
-        let mut runs: Vec<(u64, usize)> = Vec::with_capacity(self.cache.len());
-        let mut curr_start = None;
-        let mut curr_len = 0;
-        let mut expected_next = 0;
-
-        for (&start, bytes) in &self.cache {
-            let len = bytes.len();
-            if let Some(c_start) = curr_start {
-                if start == expected_next {
-                    curr_len += len;
-                    expected_next += len as u64;
-                } else {
-                    runs.push((c_start, curr_len));
-                    curr_start = Some(start);
-                    curr_len = len;
-                    expected_next = start + len as u64;
-                }
-            } else {
-                curr_start = Some(start);
-                curr_len = len;
-                expected_next = start + len as u64;
-            }
-        }
-        if let Some(c_start) = curr_start {
-            runs.push((c_start, curr_len));
-        }
-        runs.sort_unstable_by_key(|&(_, len)| std::cmp::Reverse(len));
+        let runs = runs_longest_first(&self.cache);
 
         let mut curr_buf = BytesMut::with_capacity(self.cache_size);
         let mut err = None;
@@ -108,13 +86,13 @@ impl<P: Pusher> CacheMergePusher<P> {
                 self.cache_size -= total_len;
                 if let Err((e, ret_bytes)) = self.inner.push(&range, chunk) {
                     err = Some(e);
-                    if !ret_bytes.is_empty() {
-                        let written = total_len.saturating_sub(ret_bytes.len());
-                        self.cache_size += ret_bytes.len();
-                        if let Some(old) = self.cache.insert(start + written as u64, ret_bytes) {
-                            self.cache_size -= old.len();
-                        }
-                    }
+                    rebuffer_tail(
+                        &mut self.cache,
+                        &mut self.cache_size,
+                        start,
+                        total_len,
+                        ret_bytes,
+                    );
                 }
             } else if let Some(old) = self.cache.insert(start, chunk) {
                 self.cache_size -= old.len();
@@ -160,81 +138,12 @@ impl<P: Pusher> Pusher for CacheMergePusher<P> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
-
-    /// A `Pusher` that records everything pushed into a shared buffer so tests
-    /// can inspect it without reaching into `CacheMergePusher`'s private fields.
-    #[derive(Clone)]
-    struct SharedSink {
-        pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
-        fail_next: Arc<AtomicBool>,
-        listener_set: Arc<AtomicBool>,
-    }
-    impl SharedSink {
-        fn new() -> Self {
-            Self {
-                pushes: Arc::new(Mutex::new(Vec::new())),
-                fail_next: Arc::new(AtomicBool::new(false)),
-                listener_set: Arc::new(AtomicBool::new(false)),
-            }
-        }
-    }
-    impl Pusher for SharedSink {
-        type Error = std::io::Error;
-        fn set_listener(&mut self, _: ProgressListener) {
-            self.listener_set.store(true, Ordering::SeqCst);
-        }
-        fn push(
-            &mut self,
-            range: &ProgressEntry,
-            bytes: Bytes,
-        ) -> Result<(), (Self::Error, Bytes)> {
-            if self.fail_next.fetch_and(false, Ordering::SeqCst) {
-                return Err((std::io::Error::other("boom"), bytes));
-            }
-            self.pushes.lock().unwrap().push((range.clone(), bytes));
-            Ok(())
-        }
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
-
-    /// Inner pusher that writes only the first 2 bytes of the chunk on its first call,
-    /// then fails returning the unwritten tail as `rem`. Exercises `evict_until`'s
-    /// partial-write re-buffering for a *merged* run.
-    #[derive(Clone)]
-    struct PartialSinkMerge {
-        pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
-        partial: Arc<AtomicBool>,
-    }
-    impl Pusher for PartialSinkMerge {
-        type Error = std::io::Error;
-        fn push(
-            &mut self,
-            range: &ProgressEntry,
-            bytes: Bytes,
-        ) -> Result<(), (Self::Error, Bytes)> {
-            self.pushes
-                .lock()
-                .unwrap()
-                .push((range.clone(), bytes.clone()));
-            if !self.partial.swap(true, Ordering::SeqCst) {
-                let rem = bytes.slice(2..);
-                return Err((std::io::Error::other("partial"), rem));
-            }
-            Ok(())
-        }
-    }
-
-    fn bb(s: &str) -> Bytes {
-        Bytes::copy_from_slice(s.as_bytes())
-    }
+    use crate::testkit::{PartialSink, RecordingSink, bb};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn test_cache_merge_evicts_contiguous_run() {
-        let sink = SharedSink::new();
+        let sink = RecordingSink::new();
         let mut p = CacheMergePusher::new(sink.clone(), 30, 0);
         // Out-of-order insertion; not yet at watermark.
         p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
@@ -253,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_cache_merge_no_evict_below_watermark() {
-        let sink = SharedSink::new();
+        let sink = RecordingSink::new();
         let mut p = CacheMergePusher::new(sink.clone(), 100, 0);
         p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
         p.push(&(10..20), bb(&"B".repeat(10))).unwrap();
@@ -268,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_cache_merge_inner_failure_propagates() {
-        let sink = SharedSink::new();
+        let sink = RecordingSink::new();
         sink.fail_next.store(true, Ordering::SeqCst);
         let mut p = CacheMergePusher::new(sink, 10, 0);
         let res = p.push(&(0..10), bb(&"A".repeat(10)));
@@ -277,7 +186,7 @@ mod tests {
 
     #[test]
     fn test_cache_merge_empty_bytes_is_noop() {
-        let sink = SharedSink::new();
+        let sink = RecordingSink::new();
         let mut p = CacheMergePusher::new(sink.clone(), 1, 0);
         p.push(&(0..0), Bytes::new()).unwrap();
         assert!(sink.pushes.lock().unwrap().is_empty());
@@ -286,7 +195,7 @@ mod tests {
     #[test]
     fn test_cache_merge_partial_overwrite_replaces() {
         // A chunk at an already-cached start position replaces the old bytes.
-        let sink = SharedSink::new();
+        let sink = RecordingSink::new();
         let mut p = CacheMergePusher::new(sink.clone(), 100, 0);
         p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
         p.push(&(0..10), bb(&"B".repeat(10))).unwrap();
@@ -299,9 +208,8 @@ mod tests {
 
     #[test]
     fn test_cache_merge_set_listener_forwards() {
-        // Lines 120-122 (forwarding) and 173 (inner set_listener): the listener must
-        // reach the inner sink.
-        let sink = SharedSink::new();
+        // The listener must reach the inner sink.
+        let sink = RecordingSink::new();
         let mut p = CacheMergePusher::new(sink.clone(), 100, 0);
         p.set_listener(Box::new(|_| {}));
         assert!(sink.listener_set.load(Ordering::SeqCst));
@@ -312,7 +220,7 @@ mod tests {
         // With high == low, `evict_until` returns early only while `cache_size` is
         // exactly on the watermark. It is not a permanent no-op: the next push takes
         // the buffer above the watermark and eviction runs normally.
-        let sink = SharedSink::new();
+        let sink = RecordingSink::new();
         let mut p = CacheMergePusher::new(sink.clone(), 10, 10);
         p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
         assert!(sink.pushes.lock().unwrap().is_empty());
@@ -326,15 +234,15 @@ mod tests {
 
     #[test]
     fn test_cache_merge_gap_segmentation_and_reinsert() {
-        // Covers 54-58 (gap segmentation), 84-96 (multi-chunk merge) and 109-111
-        // (a multi-chunk run re-inserted when eviction stops at the low watermark).
+        // Covers gap segmentation, multi-chunk merge, and re-inserting a
+        // multi-chunk run when eviction stops at the low watermark.
         //
         // Layout at eviction time (high=200, low=70):
         //   runA [0..100)  two chunks  -> 100 bytes (longest)
         //   runB [200..260) two chunks -> 60 bytes
         //   runC [300..340) two chunks -> 40 bytes (multi-chunk, stays buffered)
         //   runD [400..420) one chunk  -> 20 bytes (single, stays buffered)
-        let sink = SharedSink::new();
+        let sink = RecordingSink::new();
         let mut p = CacheMergePusher::new(sink.clone(), 200, 70);
         p.push(&(0..50), bb(&"A".repeat(50))).unwrap();
         p.push(&(50..100), bb(&"A".repeat(50))).unwrap();
@@ -354,9 +262,9 @@ mod tests {
 
     #[test]
     fn test_cache_merge_reaches_low_watermark_stops_single() {
-        // Line 78: once cache_size falls to <= low_watermark, a remaining single-chunk
+        // once cache_size falls to <= low_watermark, a remaining single-chunk
         // run is `continue`d (left in the cache) rather than pushed.
-        let sink = SharedSink::new();
+        let sink = RecordingSink::new();
         let mut p = CacheMergePusher::new(sink.clone(), 200, 70);
         p.push(&(0..100), bb(&"A".repeat(100))).unwrap();
         p.push(&(200..240), bb(&"B".repeat(40))).unwrap();
@@ -375,10 +283,7 @@ mod tests {
         // A contiguous run of three chunks [0..30) is merged into one 30-byte chunk and
         // evicted; a partial inner write (first 2 bytes persisted, tail returned) must
         // re-buffer the 28-byte tail at offset 2 and retry it on flush.
-        let sink = PartialSinkMerge {
-            pushes: Arc::new(Mutex::new(Vec::new())),
-            partial: Arc::new(AtomicBool::new(false)),
-        };
+        let sink = PartialSink::new();
         let mut p = CacheMergePusher::new(sink.clone(), 30, 0);
         p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
         p.push(&(10..20), bb(&"B".repeat(10))).unwrap();

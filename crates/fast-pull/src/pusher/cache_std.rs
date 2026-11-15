@@ -8,8 +8,9 @@ use bytes::Bytes;
 /// File pusher combining [`CacheSeqPusher`] with [`StdFilePusher`].
 ///
 /// Provides out-of-order reordering on top of standard file I/O.
-/// The write buffer, watermark levels, and sync-all behavior are forwarded
-/// to [`StdFilePusher::new`].
+///
+/// The size and sync-all flag go to [`StdFilePusher::new`]; the write buffer
+/// size goes to [`BufWriterPusher`] and the watermarks to [`CacheSeqPusher`].
 #[derive(Debug)]
 pub struct CacheFilePusher {
     inner: CacheSeqPusher<BufWriterPusher<StdFilePusher>>,

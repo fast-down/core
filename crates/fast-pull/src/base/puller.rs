@@ -78,8 +78,8 @@ mod tests {
 
     #[test]
     fn default_is_irrecoverable_is_false() {
-        // Exercises the default `PullerError::is_irrecoverable` body (lines 49-51) and
-        // the `Display` impl for `DefaultErr` (lines 70-72).
+        // Exercises the default `PullerError::is_irrecoverable` body and the
+        // `Display` impl for `DefaultErr`.
         assert!(!DefaultErr.is_irrecoverable());
         assert_eq!(format!("{DefaultErr}"), "default error");
     }

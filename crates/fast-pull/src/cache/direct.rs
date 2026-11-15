@@ -4,7 +4,11 @@ use crate::{ProgressEntry, ProgressListener, Pusher};
 use bytes::Bytes;
 use std::collections::BTreeMap;
 
+use super::util::{rebuffer_tail, runs_longest_first};
+
 /// Pusher wrapper that buffers chunks and flushes large contiguous runs without merging.
+///
+/// Not used by the built-in file pipeline, which uses [`crate::CacheSeqPusher`].
 ///
 /// Out-of-order chunks are stored in a `BTreeMap`. When a contiguous run reaches
 /// the high watermark, it is flushed to the inner pusher as-is (no byte merging).
@@ -47,33 +51,7 @@ impl<P: Pusher> CacheDirectPusher<P> {
             return Ok(());
         }
 
-        let mut runs: Vec<(u64, usize)> = Vec::with_capacity(self.cache.len());
-        let mut curr_start = None;
-        let mut curr_len = 0;
-        let mut expected_next = 0;
-
-        for (&start, bytes) in &self.cache {
-            let len = bytes.len();
-            if let Some(c_start) = curr_start {
-                if start == expected_next {
-                    curr_len += len;
-                    expected_next += len as u64;
-                } else {
-                    runs.push((c_start, curr_len));
-                    curr_start = Some(start);
-                    curr_len = len;
-                    expected_next = start + len as u64;
-                }
-            } else {
-                curr_start = Some(start);
-                curr_len = len;
-                expected_next = start + len as u64;
-            }
-        }
-        if let Some(c_start) = curr_start {
-            runs.push((c_start, curr_len));
-        }
-        runs.sort_unstable_by_key(|&(_, len)| std::cmp::Reverse(len));
+        let runs = runs_longest_first(&self.cache);
 
         for (mut start, mut total_len) in runs {
             while total_len > 0 {
@@ -83,13 +61,7 @@ impl<P: Pusher> CacheDirectPusher<P> {
                 total_len -= len;
                 let range = start..start + len as u64;
                 if let Err((e, ret_bytes)) = self.inner.push(&range, chunk) {
-                    if !ret_bytes.is_empty() {
-                        self.cache_size += ret_bytes.len();
-                        let written = len.saturating_sub(ret_bytes.len());
-                        if let Some(old) = self.cache.insert(start + written as u64, ret_bytes) {
-                            self.cache_size -= old.len();
-                        }
-                    }
+                    rebuffer_tail(&mut self.cache, &mut self.cache_size, start, len, ret_bytes);
                     return Err(e);
                 }
                 start += len as u64;
@@ -138,81 +110,12 @@ impl<P: Pusher> Pusher for CacheDirectPusher<P> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
-
-    /// Records every push and can be told to fail the next one, returning the
-    /// bytes so the cache can re-buffer them.
-    #[derive(Clone)]
-    struct RecordingSink {
-        pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
-        fail_next: Arc<AtomicBool>,
-        listener_set: Arc<AtomicBool>,
-    }
-    impl RecordingSink {
-        fn new() -> Self {
-            Self {
-                pushes: Arc::new(Mutex::new(Vec::new())),
-                fail_next: Arc::new(AtomicBool::new(false)),
-                listener_set: Arc::new(AtomicBool::new(false)),
-            }
-        }
-    }
-    impl Pusher for RecordingSink {
-        type Error = std::io::Error;
-        fn set_listener(&mut self, _: ProgressListener) {
-            self.listener_set.store(true, Ordering::SeqCst);
-        }
-        fn push(
-            &mut self,
-            range: &ProgressEntry,
-            bytes: Bytes,
-        ) -> Result<(), (Self::Error, Bytes)> {
-            if self.fail_next.fetch_and(false, Ordering::SeqCst) {
-                return Err((std::io::Error::other("boom"), bytes));
-            }
-            self.pushes.lock().unwrap().push((range.clone(), bytes));
-            Ok(())
-        }
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
-
-    /// Inner pusher that writes only the first 2 bytes of the chunk on its first call,
-    /// then fails returning the unwritten tail as `rem`. Exercises `evict_until`'s
-    /// per-chunk partial-write re-buffering.
-    #[derive(Clone)]
-    struct PartialSinkDirect {
-        pushes: Arc<Mutex<Vec<(ProgressEntry, Bytes)>>>,
-        partial: Arc<AtomicBool>,
-    }
-    impl Pusher for PartialSinkDirect {
-        type Error = std::io::Error;
-        fn push(
-            &mut self,
-            range: &ProgressEntry,
-            bytes: Bytes,
-        ) -> Result<(), (Self::Error, Bytes)> {
-            self.pushes
-                .lock()
-                .unwrap()
-                .push((range.clone(), bytes.clone()));
-            if !self.partial.swap(true, Ordering::SeqCst) {
-                let rem = bytes.slice(2..);
-                return Err((std::io::Error::other("partial"), rem));
-            }
-            Ok(())
-        }
-    }
-
-    fn bb(s: &str) -> Bytes {
-        Bytes::copy_from_slice(s.as_bytes())
-    }
+    use crate::testkit::{PartialSink, RecordingSink, bb};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn empty_push_is_noop() {
-        // Lines 103-105: a zero-length chunk returns `Ok(())` without buffering.
+        // a zero-length chunk returns `Ok(())` without buffering.
         let sink = RecordingSink::new();
         let mut p = CacheDirectPusher::new(sink.clone(), 100, 0);
         p.push(&(0..0), Bytes::new()).unwrap();
@@ -258,7 +161,7 @@ mod tests {
 
     #[test]
     fn evicts_longest_run_first() {
-        // Lines 42-68: runs are segmented, sorted longest-first, and each chunk is
+        // runs are segmented, sorted longest-first, and each chunk is
         // flushed as-is in ascending offset order within a run.
         let sink = RecordingSink::new();
         let mut p = CacheDirectPusher::new(sink.clone(), 70, 0);
@@ -283,7 +186,7 @@ mod tests {
 
     #[test]
     fn duplicate_start_overwrites_old_bytes() {
-        // Lines 107-110: re-inserting at an already-cached start replaces the old
+        // re-inserting at an already-cached start replaces the old
         // bytes and keeps `cache_size` correct.
         let sink = RecordingSink::new();
         let mut p = CacheDirectPusher::new(sink.clone(), 100, 0);
@@ -298,7 +201,7 @@ mod tests {
 
     #[test]
     fn inner_push_failure_rebuffers_partial() {
-        // Lines 77-84: when an inner push fails, the un-written tail is re-inserted
+        // when an inner push fails, the un-written tail is re-inserted
         // into the cache and the error is returned to the caller.
         let sink = RecordingSink::new();
         sink.fail_next.store(true, Ordering::SeqCst);
@@ -309,7 +212,7 @@ mod tests {
 
     #[test]
     fn evict_stops_early_at_low_watermark() {
-        // Lines 87-89: once the buffered size drops to <= low_watermark, the
+        // once the buffered size drops to <= low_watermark, the
         // eviction loop breaks early and the remaining (separate) run stays buffered.
         // The three chunks are kept as separate runs via gaps.
         let sink = RecordingSink::new();
@@ -329,7 +232,7 @@ mod tests {
 
     #[test]
     fn set_listener_forwards_to_inner() {
-        // Lines 98-99: the listener is forwarded to the inner pusher.
+        // the listener is forwarded to the inner pusher.
         let sink = RecordingSink::new();
         let mut p = CacheDirectPusher::new(sink.clone(), 100, 0);
         p.set_listener(Box::new(|_| {}));
@@ -341,10 +244,7 @@ mod tests {
         // A run of three 10-byte chunks [0..30) is evicted chunk-by-chunk; a partial
         // inner write on the first chunk (first 2 bytes persisted, tail returned) must
         // re-buffer that chunk's 8-byte tail at offset 2 and retry it on flush.
-        let sink = PartialSinkDirect {
-            pushes: Arc::new(Mutex::new(Vec::new())),
-            partial: Arc::new(AtomicBool::new(false)),
-        };
+        let sink = PartialSink::new();
         let mut p = CacheDirectPusher::new(sink.clone(), 30, 0);
         p.push(&(0..10), bb(&"A".repeat(10))).unwrap();
         p.push(&(10..20), bb(&"B".repeat(10))).unwrap();

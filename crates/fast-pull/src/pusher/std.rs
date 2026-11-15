@@ -160,7 +160,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_debug_impl() {
-        // Lines 30-35: `Debug` impl for `StdFilePusher`.
+        // `Debug` impl for `StdFilePusher`.
         let temp_file = NamedTempFile::new().unwrap();
         let pusher = StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, false)
             .await
@@ -170,8 +170,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_noncontiguous_write_seeks_and_calls_listener() {
-        // Lines 54-60: `p != start` triggers a `seek` before writing.
-        // Line 73: the listener is invoked from inside `write_at`.
+        // `p != start` triggers a `seek` before writing.
+        // the listener is invoked from inside `write_at`.
         let temp_file = NamedTempFile::new().unwrap();
         let mut pusher = StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, false)
             .await
@@ -188,7 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_push_is_noop() {
-        // Line 97: an empty chunk returns `Ok(())` without writing.
+        // an empty chunk returns `Ok(())` without writing.
         let temp_file = NamedTempFile::new().unwrap();
         let mut pusher = StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, false)
             .await
@@ -198,7 +198,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_all_flush() {
-        // Lines 118-119: the `sync_all == true` branch of `flush`.
+        // the `sync_all == true` branch of `flush`.
         let temp_file = NamedTempFile::new().unwrap();
         let mut pusher = StdFilePusher::new(temp_file.reopen().unwrap().into(), 10, true)
             .await

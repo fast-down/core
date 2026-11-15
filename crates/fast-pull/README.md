@@ -21,7 +21,8 @@ byte ranges from any source to any sink.
 2. **🔌 `Puller` / `Pusher` abstractions**
    A download is just a `Puller` (source) feeding a `Pusher` (sink). Bring your
    own, or use the built-ins. `Puller` must be `Clone` so work can be stolen and
-   retried; `Pusher` reports partial failures so the engine can retry them.
+   retried; `Pusher` owns the write side, including how far a chunk got before
+   failing.
 3. **💾 Multiple write paths** (`file` is feature-gated; `mem` is always available)
    - `file` — `StdFilePusher` (raw `std::fs::File` random-access writes) and
      `MmapFilePusher` (memory-mapped zero-copy writes), plus the ready-made
