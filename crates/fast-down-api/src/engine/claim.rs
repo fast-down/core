@@ -22,13 +22,11 @@ pub struct Claim(PathBuf);
 pub fn claim(fd_path: &Path) -> Option<Claim> {
     // Normalize so different spellings of the same path (`./out.fd`,
     // `dir/../out.fd`, a junction to the same directory) share one key.
-    let mut key = soft_canonicalize(fd_path).unwrap_or_else(|_| fd_path.to_path_buf());
+    let key = soft_canonicalize(fd_path).unwrap_or_else(|_| fd_path.to_path_buf());
+    // Windows compares paths case-insensitively, so `OUT.FD` and `out.fd` name
+    // the same pair and must share one claim.
     #[cfg(windows)]
-    {
-        // Windows compares paths case-insensitively, so `OUT.FD` and `out.fd`
-        // name the same pair and must share one claim.
-        key = PathBuf::from(key.to_string_lossy().to_lowercase());
-    }
+    let key = PathBuf::from(key.to_string_lossy().to_lowercase());
     let mut active = ACTIVE.lock();
     if active.insert(key.clone()) {
         Some(Claim(key))
