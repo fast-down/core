@@ -52,11 +52,11 @@ mod event;
 
 pub use event::QueueEvent;
 
-use crate::{Ctx, Event, StartPolicy, State, TerminationReason};
+use crate::{CancellationToken, Ctx, Event, StartPolicy, State, TerminationReason};
 use crossfire::{MAsyncRx, MTx, mpmc::List};
 use parking_lot::Mutex;
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     hash::Hash,
     sync::Arc,
 };
@@ -91,7 +91,8 @@ pub enum QueueError {
 /// A queue that runs downloads with a bounded concurrency, keyed by `K`.
 ///
 /// Construct one with [`Queue::new`], feed it [`State`]s with [`Queue::push`],
-/// and watch the matching [`QueueRx`]. Cloning a `Queue` shares the same tasks.
+/// and watch the matching [`QueueRx`]. [`Queue::cancel`] stops a queued or
+/// running task by key. Cloning a `Queue` shares the same tasks.
 #[derive(Clone)]
 pub struct Queue<K: 'static> {
     state: Arc<Mutex<QueueState<K>>>,
@@ -103,8 +104,8 @@ struct QueueState<K> {
     limit: usize,
     /// Tasks waiting for a slot, in arrival order.
     pending: VecDeque<(K, PendingRun)>,
-    /// Keys holding a slot.
-    running: HashSet<K>,
+    /// Keys holding a slot, with the token that cancels the running task.
+    running: HashMap<K, CancellationToken>,
 }
 
 /// Everything needed to run a task, kept as plain data so a waiting task holds
@@ -134,7 +135,7 @@ where
             state: Arc::new(Mutex::new(QueueState {
                 limit: concurrency.max(1),
                 pending: VecDeque::new(),
-                running: HashSet::new(),
+                running: HashMap::new(),
             })),
             tx,
         }
@@ -165,7 +166,7 @@ where
             policy: policy.into(),
         };
         let mut guard = self.state.lock();
-        if guard.running.contains(&id) || guard.pending.iter().any(|(key, _)| *key == id) {
+        if guard.running.contains_key(&id) || guard.pending.iter().any(|(key, _)| *key == id) {
             return Err(QueueError::AlreadyQueued);
         }
         let _ = self.tx.send(QueueEvent::Queued(id.clone()));
@@ -180,13 +181,46 @@ where
             let Some((id, run)) = state.pending.pop_front() else {
                 break;
             };
-            state.running.insert(id.clone());
+            state.running.insert(id.clone(), run.ctx.token().clone());
             tokio::spawn(self.clone().drive(id, run));
         }
     }
 
+    /// Cancel a task by key.
+    ///
+    /// A task still waiting for a slot is removed and reported as
+    /// [`QueueEvent::Cancelled`] without ever running; a running task has its
+    /// cancellation token triggered, and its own run reports the outcome.
+    /// Returns whether `id` named a queued or running task. A run's terminal
+    /// event and the removal of its key happen under the same lock, so `true`
+    /// always means the cancellation reached a task that had not ended yet. A
+    /// running task keeps its key until that point, so re-pushing the key before
+    /// its terminal event still returns [`QueueError::AlreadyQueued`].
+    pub fn cancel(&self, id: &K) -> bool {
+        let mut guard = self.state.lock();
+        if let Some(token) = guard.running.get(id) {
+            token.cancel();
+            return true;
+        }
+        if let Some(pos) = guard.pending.iter().position(|(key, _)| key == id) {
+            guard.pending.remove(pos);
+            // A task that never started gets `Cancelled`, not `Terminated`: the
+            // "one Terminated per started task" contract stays intact.
+            let _ = self.tx.send(QueueEvent::Cancelled(id.clone()));
+            return true;
+        }
+        false
+    }
+
     /// Run one task from slot acquisition to release.
     async fn drive(self, id: K, run: PendingRun) {
+        // Free the slot even if the driver panics; a leaked key would block that
+        // key forever and permanently cost one concurrency slot.
+        let slot = SlotGuard {
+            queue: self.clone(),
+            id: id.clone(),
+            armed: true,
+        };
         let PendingRun { ctx, state, policy } = run;
         let _ = self.tx.send(QueueEvent::Started(id.clone()));
         // A task's own events flow on a private channel; forwarding them tags
@@ -197,41 +231,134 @@ where
         //   - success: `start` takes `tx` and drops it when the run finishes,
         //   - failure: the failure events are still ours to publish, so emit them
         //     and drop `tx` ourselves.
-        match state.build(&tx).await {
-            Ok(ready) => {
+        //
+        // Resolving (prefetch) is watched by the cancel token too: dropping the
+        // future abandons the request, so cancelling a task that is still probing
+        // the remote does not wait out its retries.
+        let built = tokio::select! {
+            biased;
+            () = ctx.token().cancelled() => None,
+            built = state.build(&tx) => Some(built),
+        };
+        match built {
+            None => drop(tx),
+            Some(Ok(ready)) => {
                 // `start` returns as soon as the run is spawned; its events
                 // arrive on `tx` while `rx` is drained below.
                 drop(ready.start(policy, tx, &ctx));
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 // Keep the "one Terminated per task" contract even when the
                 // resolve fails and no run is ever spawned.
                 event::emit_resolve_failed(&tx, e);
                 drop(tx);
             }
         }
-        // Drain until the run drops `tx`, so the terminal event lands before the
-        // slot is released.
-        let mut terminated = false;
+        // Hold the terminal event back so it can be published together with the
+        // slot release: a caller that re-queues the same key on `Terminated` must
+        // never observe the key as still running.
+        let mut terminal = None;
         while let Ok(event) = rx.recv().await {
-            terminated |= matches!(&event, Event::Terminated(_));
-            let _ = self.tx.send(QueueEvent::Task(id.clone(), event));
+            if matches!(event, Event::Terminated(_)) {
+                terminal = Some(event);
+            } else {
+                let _ = self.tx.send(QueueEvent::Task(id.clone(), event));
+            }
         }
-        if !terminated {
-            // A panicking run drops its sender before reporting; keep the
-            // "exactly one `Terminated` per started task" contract.
-            let _ = self.tx.send(QueueEvent::Task(
-                id.clone(),
-                Event::Terminated(TerminationReason::Failed),
-            ));
-        }
-        self.release(&id);
+        // A panicking run drops its sender before reporting; keep the
+        // "exactly one `Terminated` per started task" contract.
+        let terminal = terminal.unwrap_or(if ctx.token().is_cancelled() {
+            Event::Terminated(TerminationReason::Cancelled)
+        } else {
+            Event::Terminated(TerminationReason::Failed)
+        });
+        slot.finish(terminal);
     }
 
-    /// Free the slot and admit the next waiting task.
-    fn release(&self, id: &K) {
+    /// Publish `terminal` and free the slot as one step, then admit the next
+    /// waiting task.
+    fn finish(&self, id: &K, terminal: Event) {
         let mut guard = self.state.lock();
+        let _ = self.tx.send(QueueEvent::Task(id.clone(), terminal));
         guard.running.remove(id);
         self.spawn_ready(&mut guard);
+    }
+}
+
+/// Releases a task's slot on normal completion and on panic.
+struct SlotGuard<K: Clone + Eq + Hash + Send + Sync + 'static> {
+    queue: Queue<K>,
+    id: K,
+    armed: bool,
+}
+
+impl<K> SlotGuard<K>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+{
+    fn finish(mut self, terminal: Event) {
+        self.armed = false;
+        self.queue.finish(&self.id, terminal);
+    }
+}
+
+impl<K> Drop for SlotGuard<K>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        if self.armed {
+            self.queue
+                .finish(&self.id, Event::Terminated(TerminationReason::Failed));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{PartialConfig, create_queue_channel};
+    use url::Url;
+
+    fn waiting(id: u8) -> (u8, PendingRun) {
+        (
+            id,
+            PendingRun {
+                ctx: Ctx::new(),
+                state: State::new(
+                    Url::parse("http://example.com/f.bin").unwrap(),
+                    PartialConfig::default(),
+                ),
+                policy: StartPolicy::auto(),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn cancel_removes_a_waiting_task_and_reports_it() {
+        let (tx, rx) = create_queue_channel::<u8>();
+        let queue = Queue::new(1, tx);
+        // Fill the only slot with a task that never runs here, then queue one
+        // more so `cancel` sees it as waiting.
+        queue
+            .state
+            .lock()
+            .running
+            .insert(0, Ctx::new().token().clone());
+        queue.state.lock().pending.push_back(waiting(7));
+
+        assert!(queue.cancel(&7));
+        assert!(queue.state.lock().pending.is_empty());
+        assert!(
+            matches!(rx.recv().await, Ok(QueueEvent::Cancelled(7))),
+            "a waiting task reports Cancelled, never Started/Terminated"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_of_an_unknown_key_is_false() {
+        let (tx, _rx) = create_queue_channel::<u8>();
+        let queue = Queue::new(1, tx);
+        assert!(!queue.cancel(&9));
     }
 }

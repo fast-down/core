@@ -225,7 +225,8 @@ run events once it has **started**: `Started` opens its run and its engine event
 follow, each ending with exactly one `Event::Terminated`. A task that never
 started — still waiting when every handle is dropped — emits only that `Queued`
 and leaves no files on disk, so a download manager can keep its own task manifest
-and re-adopt the waiting tasks on the next start.
+and re-adopt the waiting tasks on the next start. A waiting task removed with
+`Queue::cancel` emits `QueueEvent::Cancelled` instead of `Started`/`Terminated`.
 
 ## API overview
 
@@ -269,7 +270,8 @@ Resolving a download against the remote:
    - no `.fd` (or a missing `.part`) → `Fresh`.
 
 Cancellation leaves both files in place, so a later resolve can pick up exactly
-where the run stopped.
+where the run stopped. A run cancelled before any byte was recorded removes the
+empty pair it had just created instead.
 
 Every run — whether it completes, is cancelled, stops incomplete, or fails —
 ends with exactly one `Event::Terminated(TerminationReason)` as the last event

@@ -36,7 +36,7 @@ use url::Url;
 /// several tasks race for the queue's slots.
 const FILE_SIZE: usize = 512 * 1024;
 /// Inter-chunk delay, so a download is slow enough to observe concurrency.
-const THROTTLE_MS: u64 = 5;
+const THROTTLE_MS: u64 = 10;
 type RespBody = BoxBody<Bytes, Infallible>;
 
 struct FileData {
@@ -396,4 +396,138 @@ async fn a_resolve_failure_still_terminates_once() {
     assert_eq!(errors, 1, "the resolve failure must be reported");
     assert_eq!(terminated, 1, "a failed task must terminate exactly once");
     assert_eq!(reason, Some(TerminationReason::Failed));
+}
+
+/// A task still waiting for a slot that is cancelled reports `Cancelled` and
+/// never starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_removes_a_waiting_task() {
+    let payload = payload();
+    let (_server, url) = start_server(payload, "v1").await;
+    let dir = temp_dir("cancel_pending");
+    let url = Url::parse(&url).unwrap();
+    let (tx, rx) = create_queue_channel::<i32>();
+    let queue = Queue::<i32>::new(1, tx);
+    queue
+        .push(
+            1,
+            State::new(url.clone(), config(&dir, "a.bin")),
+            StartMode::Auto,
+        )
+        .unwrap();
+
+    // Wait until the first task holds the only slot.
+    while let Ok(event) = rx.recv().await {
+        if matches!(event, QueueEvent::Started(1)) {
+            break;
+        }
+    }
+
+    queue
+        .push(2, State::new(url, config(&dir, "b.bin")), StartMode::Auto)
+        .unwrap();
+    assert!(queue.cancel(&2));
+
+    let mut cancelled = false;
+    let mut second_started = false;
+    timeout(Duration::from_secs(20), async {
+        while let Ok(event) = rx.recv().await {
+            match event {
+                QueueEvent::Cancelled(2) => cancelled = true,
+                QueueEvent::Started(2) => second_started = true,
+                QueueEvent::Task(1, Event::Terminated(_)) => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the first task must finish");
+
+    assert!(cancelled, "a cancelled waiting task must report Cancelled");
+    assert!(!second_started, "the cancelled task must never start");
+}
+
+/// A running task stops when it is cancelled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_stops_a_running_task() {
+    let payload = payload();
+    let (_server, url) = start_server(payload, "v1").await;
+    let dir = temp_dir("cancel_running");
+    let (tx, rx) = create_queue_channel::<i32>();
+    let queue = Queue::<i32>::new(1, tx);
+    queue
+        .push(
+            1,
+            State::new(Url::parse(&url).unwrap(), config(&dir, "a.bin")),
+            StartMode::Auto,
+        )
+        .unwrap();
+
+    let mut requested = false;
+    let mut reason = None;
+    timeout(Duration::from_secs(20), async {
+        while let Ok(event) = rx.recv().await {
+            match event {
+                QueueEvent::Task(1, Event::Start { .. }) if !requested => {
+                    requested = true;
+                    assert!(queue.cancel(&1));
+                }
+                QueueEvent::Task(1, Event::Terminated(r)) => {
+                    reason = Some(r);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("a cancelled run must terminate");
+
+    assert!(requested, "the test must cancel after the run starts");
+    assert_eq!(reason, Some(TerminationReason::Cancelled));
+}
+
+/// A key freed by its terminal event can be pushed again immediately.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_key_can_be_requeued_after_terminated() {
+    let payload = payload();
+    let (_server, url) = start_server(payload, "v1").await;
+    let dir = temp_dir("requeue");
+    let url = Url::parse(&url).unwrap();
+    let (tx, rx) = create_queue_channel::<i32>();
+    let queue = Queue::<i32>::new(1, tx);
+    queue
+        .push(
+            1,
+            State::new(url.clone(), config(&dir, "a.bin")),
+            StartMode::Auto,
+        )
+        .unwrap();
+
+    let mut requeued = false;
+    let mut terminals = 0usize;
+    timeout(Duration::from_secs(20), async {
+        while let Ok(event) = rx.recv().await {
+            if let QueueEvent::Task(1, Event::Terminated(_)) = event {
+                terminals += 1;
+                if terminals == 1 {
+                    queue
+                        .push(
+                            1,
+                            State::new(url.clone(), config(&dir, "b.bin")),
+                            StartMode::Auto,
+                        )
+                        .expect("the key is free once its terminal event is delivered");
+                    requeued = true;
+                } else {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("both runs must terminate");
+
+    assert!(requeued, "a terminal event must free the key");
+    assert_eq!(terminals, 2);
 }

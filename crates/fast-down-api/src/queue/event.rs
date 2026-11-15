@@ -12,7 +12,9 @@ use crate::{Event, PlanError, TerminationReason, Tx};
 /// and exactly one [`Event::Terminated`] closes it. A task still waiting when
 /// the queue is abandoned emits only its [`Queued`](QueueEvent::Queued) notification, never runs, and
 /// leaves no files on disk, so a download manager can keep its own manifest and
-/// re-adopt that task on the next start.
+/// re-adopt that task on the next start. A waiting task removed with
+/// [`Queue::cancel`](super::Queue::cancel) emits
+/// [`Cancelled`](QueueEvent::Cancelled) instead of `Started`/`Terminated`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum QueueEvent<K> {
@@ -21,6 +23,11 @@ pub enum QueueEvent<K> {
     /// A task acquired a slot and began resolving the remote. Emitted before any
     /// of its [`Task`](QueueEvent::Task) events, and only for tasks that started.
     Started(K),
+    /// A waiting task was cancelled before it started.
+    ///
+    /// Emitted instead of `Started`/`Terminated`: the task never ran and left no
+    /// files on disk, so a manager can drop it from its manifest.
+    Cancelled(K),
     /// An engine [`Event`] from one task's run.
     Task(K, Event),
 }

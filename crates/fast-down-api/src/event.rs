@@ -35,22 +35,34 @@ pub enum Event {
     /// For example the target directory is not writable or the file name is
     /// invalid on this platform.
     GenPathError(std::io::Error),
-    /// Persisting the `.fd` state file failed (see [`StateError`]).
+    /// Persisting or removing the `.fd` state file failed (see [`StateError`]).
     ///
     /// Non-fatal for the current run, but the download can no longer be resumed
-    /// reliably if it is interrupted afterwards.
+    /// reliably if it is interrupted afterwards. On a completed download the
+    /// failure means the finished run's `.fd` could not be removed, so the next
+    /// run treats the output as a fresh download.
     StateSaveError(StateError),
     /// Building the HTTP client failed (TLS / backend initialization, etc.).
     BuildClientError(BuildClientError),
+    /// A configured request header was rejected (invalid name or value) and is
+    /// not sent.
+    ///
+    /// Non-fatal: the request proceeds without that header.
+    InvalidHeader(String),
     /// Creating the output sink — opening the `.part` file — failed.
     BuildPusherError(std::io::Error),
     /// Disk space for the whole file is about to be reserved, carrying the
     /// target size in bytes.
     ///
-    /// Only emitted when [`crate::Config::pre_alloc`] is enabled and the remote
-    /// size is known. Where the platform has no fast-reservation path this is
-    /// followed by a full-size zero-fill pass, which can take a while — this
-    /// event exists so a UI can say so instead of appearing frozen.
+    /// Emitted whenever the remote size is known, for both the required
+    /// reservation ([`crate::Config::pre_alloc`]) and the best-effort one. A
+    /// required reservation always ends in [`Event::Allocated`] or
+    /// [`Event::AllocError`]; the best-effort one reports success only where the
+    /// platform has a fast path, so it is sometimes followed by neither.
+    ///
+    /// The reservation itself can take a while where the platform has no fast
+    /// path (`pre_alloc` then writes zeros across the whole file); this event
+    /// exists so a UI can say so instead of appearing frozen.
     Allocating(u64),
     /// Disk space reservation for the whole file finished.
     ///
@@ -87,8 +99,10 @@ pub enum Event {
     /// Emitted once the pipeline is set up and writing is about to begin.
     ///
     /// Carries the `.part` path, the `.fd` state-file path, and the resolved
-    /// [`PartialConfig`] actually used for this run (after merging any resumed
-    /// progress and applying defaults).
+    /// [`PartialConfig`] used for this run: the caller's overrides merged with
+    /// any resumed progress, then folded against the crate defaults, so a field
+    /// that is `None` is at its crate default rather than missing. Call
+    /// `build()` on it for the effective configuration.
     ///
     /// `parsed_config` is boxed: `PartialConfig` is ~400 bytes, and inlining it
     /// would make **every** `Event` that large — including the per-chunk
@@ -113,10 +127,21 @@ pub enum Event {
         /// The remote file size.
         size: u64,
     },
-    /// Emitted when an explicit `resume()` call cannot continue the download.
-    /// Unlike `download()` (which silently falls back to a full re-download),
-    /// `resume()` reports the failure so the caller can decide what to do.
+    /// Emitted when the start policy refuses to continue a `.fd`/`.part` pair
+    /// that exists but can no longer be resumed.
+    ///
+    /// [`StartMode::Auto`](crate::StartMode::Auto) never emits it — it falls
+    /// back to a full re-download instead. The modes that refuse a mismatch
+    /// ([`StartMode::Resume`](crate::StartMode::Resume), and
+    /// [`StartMode::Forced`](crate::StartMode::Forced) when a forced resume
+    /// would be unsound) report it here so the caller can decide what to do.
     ResumeError(StateError),
+    /// Another run in this process already owns the same `.fd`/`.part` pair.
+    ///
+    /// Only one run may write a given state file: a second run would interleave
+    /// writes to the `.part` and overwrite the `.fd` progress. The claim is
+    /// process-local, so another process can still open the same pair.
+    AlreadyRunning(PathBuf),
 
     /// Worker `id` started fetching its assigned byte range from the network.
     Pulling(WorkerId),
@@ -184,13 +209,14 @@ pub enum TerminationReason {
     /// [`Event::Renamed`] carries the path it landed on.
     Completed,
     /// The [`CancellationToken`](crate::CancellationToken) was
-    /// triggered. The `.part` and `.fd` files are left on disk so a later
-    /// resume can pick up where this run stopped.
+    /// triggered. A run cancelled before any byte was recorded removes the empty
+    /// pair it had just created; otherwise the `.part` and `.fd` files are left
+    /// on disk so a later resume can pick up where this run stopped.
     Cancelled,
     /// The run stopped on its own without completing the file — every worker
-    /// gave up, for example because the connection kept failing. Like
-    /// [`TerminationReason::Cancelled`], the `.part` and `.fd` files are left
-    /// on disk.
+    /// gave up, for example because the connection kept failing. The `.part` and
+    /// `.fd` files are left on disk, so the next resolve resumes from the
+    /// recorded progress.
     Incomplete,
     /// A fatal error ended the run: metadata could not be fetched, the output
     /// file could not be opened, the rename failed, and so on.
