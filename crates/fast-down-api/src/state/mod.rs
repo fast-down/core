@@ -127,7 +127,7 @@ impl State {
         let (record, outcome, fd_path) = if config.resume {
             match Record::load(&probe_fd_path).await {
                 Ok(mut old) if info.fast_download => {
-                    let tmp = probe_fd_path.with_extension("part");
+                    let tmp = crate::utils::part_path(&probe_fd_path);
                     // Every judgement reads the OLD state and must run before
                     // any mutation: `validate` compares the recorded identity,
                     // and `part_state` measures the file against the recorded

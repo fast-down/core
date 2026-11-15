@@ -68,7 +68,9 @@ impl Ready {
     /// cancellation token and the live worker-pool control, and is shared with
     /// the returned handle.
     ///
-    /// Cancelling the token stops fetching and leaves `.part`/`.fd` in place.
+    /// Cancelling the token stops fetching. A run cancelled before it recorded
+    /// any byte removes the empty `.part`/`.fd` pair it had just created;
+    /// otherwise both files are left in place for a later resume.
     /// Requires an active tokio runtime; panics otherwise.
     #[must_use]
     pub fn start(self, policy: impl Into<StartPolicy>, tx: Tx, ctx: &Ctx) -> RunHandle {
@@ -92,7 +94,7 @@ impl Ready {
     /// `None` when the `.fd` location is not decided yet.
     #[must_use]
     pub fn tmp_path(&self) -> Option<PathBuf> {
-        self.fd_path.as_deref().map(|p| p.with_extension("part"))
+        self.fd_path.as_deref().map(crate::utils::part_path)
     }
 
     /// Byte ranges recorded so far (empty for a fresh download).

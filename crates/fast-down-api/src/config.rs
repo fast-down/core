@@ -25,13 +25,14 @@ pub enum WriteMethod {
 ))]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Config {
-    /// 保存的文件夹
+    /// Directory the output file is saved to.
     pub save_dir: PathBuf,
 
-    /// 文件名解析
+    /// Derive the output file name from the response's name and content type.
     pub parse_filename: bool,
 
-    /// 文件名
+    /// Output file name. Used as-is unless [`Config::parse_filename`] also
+    /// expands it as a `{...}` template.
     pub filename: String,
 
     /// Number of threads. Recommended: `32` / `16` / `8`. More threads does not always mean faster.
@@ -190,8 +191,8 @@ pub struct Config {
     ///   re-ordered into sequential order by the cache layer before being written.
     pub write_method: WriteMethod,
 
-    /// Number of retries for fetching metadata. Recommended: `10`. Note: this is not
-    /// the retry count during download.
+    /// Number of metadata prefetch attempts, the first one included.
+    /// Recommended: `10`. Not the retry count during the download itself.
     #[config(default = 10)]
     pub retry_times: usize,
 
@@ -235,11 +236,11 @@ pub struct Config {
     /// subsequent requests (including across redirects).
     pub cookie_store: bool,
 
-    /// 是否尝试断点续传，推荐值: `true`
+    /// Whether to resume from recorded progress. Recommended: `true`.
     #[config(default = true)]
     pub resume: bool,
 
-    /// 是否覆盖已存在的文件，推荐值: `false`
+    /// Whether to overwrite an existing output file. Recommended: `false`.
     pub overwrite: bool,
 }
 
@@ -340,7 +341,21 @@ mod range_list {
                 // rely on the sorted invariant even when the `.fd` was hand-edited
                 // or written by an older build that stored chunks out of order.
                 ranges.sort_by_key(|r| r.start);
-                Ok(Some(ranges))
+                // Those consumers also assume the ranges are disjoint: `invert`
+                // partitions the complement and `Record::is_complete` looks for a
+                // single `0..total`. A hand-edited `.fd` can repeat or overlap
+                // entries, so fold each run into its union here rather than
+                // failing (or double-counting) further down.
+                let mut merged: Vec<ProgressEntry> = Vec::with_capacity(ranges.len());
+                for range in ranges {
+                    match merged.last_mut() {
+                        Some(last) if range.start <= last.end => {
+                            last.end = last.end.max(range.end);
+                        }
+                        _ => merged.push(range),
+                    }
+                }
+                Ok(Some(merged))
             }
         }
     }
@@ -456,7 +471,7 @@ mod tests {
 
     #[test]
     fn downloaded_chunk_rejects_range_without_dash() {
-        // No '-' separator: `split_once('-')` fails (deserialize lines 299-303).
+        // No '-' separator: `split_once('-')` fails.
         let toml = "downloaded_chunk = \"5\"\n";
         let err = toml::from_str::<PartialConfig>(toml).unwrap_err();
         let msg = err.to_string();
@@ -468,7 +483,7 @@ mod tests {
 
     #[test]
     fn downloaded_chunk_rejects_bad_start() {
-        // Non-numeric start: `start_repr.parse()` fails (lines 304-306).
+        // Non-numeric start: `start_repr.parse()` fails.
         let toml = "downloaded_chunk = \"x-10\"\n";
         let err = toml::from_str::<PartialConfig>(toml).unwrap_err();
         let msg = err.to_string();
@@ -480,7 +495,7 @@ mod tests {
 
     #[test]
     fn downloaded_chunk_rejects_bad_end() {
-        // Non-numeric end: `end_repr.parse()` fails (lines 307-309).
+        // Non-numeric end: `end_repr.parse()` fails.
         let toml = "downloaded_chunk = \"5-y\"\n";
         let err = toml::from_str::<PartialConfig>(toml).unwrap_err();
         let msg = err.to_string();
@@ -490,7 +505,7 @@ mod tests {
         );
     }
 
-    /// Covers the `None` arm of `range_list::serialize` (`config.rs` line 267).
+    /// Covers the `None` arm of `range_list::serialize`.
     ///
     /// `PartialConfig` can never reach it: `inherit-config` injects
     /// `#[serde(skip_serializing_if = "Option::is_none")]` on every partial
@@ -514,7 +529,7 @@ mod tests {
         );
     }
 
-    /// Covers the `None` arm of `range_list::deserialize` (`config.rs` line 290).
+    /// Covers the `None` arm of `range_list::deserialize`.
     ///
     /// TOML has no `null` and the partial field carries `serde(default)`, so a
     /// missing key never calls the helper; the arm is only reachable by feeding
@@ -563,5 +578,16 @@ mod tests {
         let toml = "downloaded_chunk = \"5-9,1-3,100-100\"\n";
         let pc: PartialConfig = toml::from_str(toml).unwrap();
         assert_eq!(pc.downloaded_chunk, Some(vec![1..4, 5..10, 100..101]));
+    }
+
+    /// Overlapping and adjacent entries must fold into their union: `invert` and
+    /// `Record::is_complete` assume disjoint ranges, so a hand-edited overlap
+    /// would otherwise yield a reversed gap range and a never-complete task.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn downloaded_chunk_deserialize_merges_overlaps() {
+        let toml = "downloaded_chunk = \"0-9,5-19,20-30,31-31\"\n";
+        let pc: PartialConfig = toml::from_str(toml).unwrap();
+        assert_eq!(pc.downloaded_chunk, Some(vec![0..32]));
     }
 }

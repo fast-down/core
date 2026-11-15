@@ -41,9 +41,16 @@ pub async fn build_pipeline(
     let resp = Some(Arc::new(Mutex::new(Some(resp))));
     token
         .run_until_cancelled(async move {
+            // Report rejected headers here: this map is built from the run's
+            // merged config, so it covers every header the download request
+            // would carry (the prefetch probe only sees the caller's layer).
+            let (headers, invalid) = build_header(&config.headers);
+            for name in invalid {
+                let _ = tx.send(Event::InvalidHeader(name));
+            }
             let puller = FastDownPuller::new(FastDownPullerOptions {
                 url: info.final_url.clone(),
-                headers: build_header(&config.headers).into(),
+                headers: headers.into(),
                 proxy: config.proxy.as_deref(),
                 accept_invalid_certs: config.accept_invalid_certs,
                 accept_invalid_hostnames: config.accept_invalid_hostnames,

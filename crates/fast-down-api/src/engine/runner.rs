@@ -8,7 +8,9 @@
 //! the public event channel.
 
 use super::{
-    build_pipeline, open_create, paths,
+    build_pipeline,
+    claim::{self, Claim},
+    open_create, paths,
     policy::{IdentityRecovery, Recovery, StartPolicy},
     stats::StatsTracker,
 };
@@ -45,7 +47,7 @@ enum Fate {
 }
 
 /// Resolve a [`StartPolicy`] against the probed [`ResumeOutcome`].
-fn decide(policy: StartPolicy, outcome: &ResumeOutcome) -> Fate {
+const fn decide(policy: StartPolicy, outcome: &ResumeOutcome) -> Fate {
     if !policy.use_recorded {
         return Fate::Fresh;
     }
@@ -64,24 +66,17 @@ fn decide(policy: StartPolicy, outcome: &ResumeOutcome) -> Fate {
                 Recovery::Fresh => Fate::Fresh,
                 Recovery::Fail => Fate::Fail,
             },
-            StateError::FileChanged {
-                local_file_size,
-                remote_file_size,
-                ..
-            } => {
-                if local_file_size == remote_file_size {
-                    match policy.identity_changed {
-                        IdentityRecovery::Fresh => Fate::Fresh,
-                        IdentityRecovery::Fail => Fate::Fail,
-                        IdentityRecovery::Force => Fate::Resume,
-                    }
-                } else {
-                    match policy.size_changed {
-                        Recovery::Fresh => Fate::Fresh,
-                        Recovery::Fail => Fate::Fail,
-                    }
-                }
-            }
+            // The size still matches, so the recorded ranges still describe
+            // these bytes whatever the identity headers say.
+            StateError::FileChanged { .. } if error.force_safe() => match policy.identity_changed {
+                IdentityRecovery::Fresh => Fate::Fresh,
+                IdentityRecovery::Fail => Fate::Fail,
+                IdentityRecovery::Force => Fate::Resume,
+            },
+            StateError::FileChanged { .. } => match policy.size_changed {
+                Recovery::Fresh => Fate::Fresh,
+                Recovery::Fail => Fate::Fail,
+            },
             _ => match policy.unreadable {
                 Recovery::Fresh => Fate::Fresh,
                 Recovery::Fail => Fate::Fail,
@@ -92,6 +87,10 @@ fn decide(policy: StartPolicy, outcome: &ResumeOutcome) -> Fate {
 
 /// Live control for a run: the cancellation token plus a handle to resize the
 /// worker pool while the download is in flight.
+///
+/// One `Ctx` controls one run at a time: starting a second run with the same
+/// handle replaces the first run's session for the control methods, and the
+/// first run clears only the session it attached.
 ///
 /// The engine session does not exist until the pipeline is built, so a
 /// [`set_threads`](Self::set_threads) or [`set_min_chunk_size`](Self::set_min_chunk_size)
@@ -117,6 +116,8 @@ struct Slot {
     pending_min: Option<u64>,
     /// A pool size requested before the session existed.
     pending_threads: Option<usize>,
+    /// Bumped on every attach, so a finishing run only clears its own session.
+    generation: u64,
 }
 
 impl Ctx {
@@ -141,7 +142,9 @@ impl Ctx {
         &self.token
     }
 
-    /// Cancel the run, leaving `.part`/`.fd` in place for a later resume.
+    /// Cancel the run. A run that has not recorded any byte yet drops the empty
+    /// `.part`/`.fd` pair it created; otherwise both files stay on disk for a
+    /// later resume.
     pub fn cancel(&self) {
         self.token.cancel();
     }
@@ -183,7 +186,7 @@ impl Ctx {
     ///
     /// A pending minimum is applied to the live pool; without one the session
     /// already carries the run's configured granularity, so nothing is needed.
-    fn attach(&self, session: &Session) {
+    fn attach(&self, session: &Session) -> AttachGuard<'_> {
         let mut slot = self.slot.lock();
         if let Some(min) = slot.pending_min.take() {
             session.set_min_chunk_size(min);
@@ -191,7 +194,37 @@ impl Ctx {
         if let Some(threads) = slot.pending_threads.take() {
             session.set_threads(threads);
         }
+        slot.generation = slot.generation.wrapping_add(1);
         slot.session = Some(session.clone());
+        AttachGuard {
+            ctx: self,
+            generation: slot.generation,
+        }
+    }
+
+    /// Forget the finished session, unless another run attached since.
+    ///
+    /// A later [`set_threads`](Self::set_threads) or
+    /// [`set_min_chunk_size`](Self::set_min_chunk_size) is then remembered for
+    /// the next run on this handle instead of being applied to a dead session
+    /// and silently dropped.
+    fn detach(&self, generation: u64) {
+        let mut slot = self.slot.lock();
+        if slot.generation == generation {
+            slot.session = None;
+        }
+    }
+}
+
+/// Detaches a run's session when it ends, including on an early return.
+struct AttachGuard<'a> {
+    ctx: &'a Ctx,
+    generation: u64,
+}
+
+impl Drop for AttachGuard<'_> {
+    fn drop(&mut self) {
+        self.ctx.detach(self.generation);
     }
 }
 
@@ -308,6 +341,12 @@ async fn drive(
     } = prepared;
     let token = ctx.token();
 
+    // A cancel that arrived before the run was spawned must win over the start
+    // policy: report Cancelled, not a policy failure.
+    if token.is_cancelled() {
+        return TerminationReason::Cancelled;
+    }
+
     // Resolve the fate once: whether to resume, fresh-download, or fail.
     let resuming = match decide(policy, &outcome) {
         Fate::Resume => true,
@@ -321,10 +360,17 @@ async fn drive(
     };
 
     // 1. Provision the `.fd`/`.part` pair and persist the starting state.
+    // A cancel that arrived while the policy was being resolved must not create
+    // a pair it will immediately abandon.
+    if token.is_cancelled() {
+        return TerminationReason::Cancelled;
+    }
     let Target {
         record,
         fd_path,
         tmp_path,
+        _claim,
+        fresh,
     } = match resolve_target(
         record,
         &origin_config,
@@ -353,10 +399,17 @@ async fn drive(
     let config = record.config.clone().build();
     let (puller, pusher) = match build_pipeline(&config, &info, resp, &tmp_path, tx, token).await {
         // `None` means the run was cancelled mid-build; a cancel must report
-        // as such, not as a build failure.
-        None => return TerminationReason::Cancelled,
+        // as such, not as a build failure. The pair this run just created holds
+        // no bytes, so drop it rather than leave a 0% "resumable" task behind.
+        None => {
+            discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
+            return TerminationReason::Cancelled;
+        }
         Some(Err(event)) => {
             let _ = tx.send(event);
+            // A pair this run just created and never wrote to would otherwise
+            // stay on disk as a permanent 0-byte "resumable" task.
+            discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
             return TerminationReason::Failed;
         }
         Some(Ok(built)) => built,
@@ -369,17 +422,22 @@ async fn drive(
 
     // 4. Drive the engine session to completion.
     let session = start_session(&config, &info, puller, pusher);
-    ctx.attach(&session);
+    let _attachment = ctx.attach(&session);
     let (record, engine_aborted) =
         drive_session(record, &fd_path, &info, &config, session, tx, token).await;
 
     if token.is_cancelled() {
+        // A cancel that arrived before any byte was recorded leaves nothing to
+        // resume, so drop the empty pair instead of a permanent 0% task.
+        discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
         return TerminationReason::Cancelled;
     }
     if !record.is_complete(info.size) {
+        discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
         return TerminationReason::Incomplete;
     }
     if engine_aborted {
+        discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
         return TerminationReason::Failed;
     }
 
@@ -392,6 +450,11 @@ struct Target {
     record: Record,
     fd_path: PathBuf,
     tmp_path: PathBuf,
+    /// Published for the whole run: dropping it releases the pair for the next
+    /// run (or process).
+    _claim: Claim,
+    /// Whether this run created the pair, so a failed start may discard it.
+    fresh: bool,
 }
 
 /// Provision the output directory and the `.fd`/`.part` pair and persist the
@@ -415,27 +478,36 @@ async fn resolve_target(
     }
 
     // Resolve the `.fd`/`.part` pair.
-    let (fd_path, tmp_path) = if resuming {
+    let (fd_path, tmp_path, fresh) = if resuming {
         // A resumable/mismatched state always carries its location.
         let Some(fd_path) = fd_path else {
             let _ = tx.send(Event::ResumeError(StateError::NotResumable));
             return Err(TerminationReason::Failed);
         };
-        let tmp = fd_path.with_extension("part");
-        (fd_path, tmp)
+        let tmp = crate::utils::part_path(&fd_path);
+        (fd_path, tmp, false)
     } else if let Some(fd_path) = fd_path {
         // Fresh over an existing pair: reuse the location and the `.part`, but
         // start from byte zero. This is how a pinned `.fd` (from `State::at_path`)
         // is reused even when its `.part` is missing.
-        let tmp = fd_path.with_extension("part");
+        let tmp = crate::utils::part_path(&fd_path);
         if let Err(e) = open_create().open(&tmp).await {
             let _ = tx.send(Event::BuildPusherError(e));
             return Err(TerminationReason::Failed);
         }
         record = fresh_over(&record, origin_config, info);
-        (fd_path, tmp)
+        (fd_path, tmp, false)
     } else {
-        paths::claim_pair(final_path, tx).await?
+        let (fd_path, tmp_path) = paths::claim_pair(final_path, tx).await?;
+        (fd_path, tmp_path, true)
+    };
+
+    // Only one run may drive a given pair: a second would interleave writes to
+    // the `.part` and overwrite this run's `.fd`.
+    let Some(claim) = claim::claim(&fd_path) else {
+        discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
+        let _ = tx.send(Event::AlreadyRunning(fd_path));
+        return Err(TerminationReason::Failed);
     };
 
     // Fold the configuration into a difference against the crate defaults before
@@ -447,6 +519,9 @@ async fn resolve_target(
     record.simplify_from(&PartialConfig::default());
 
     if let Err(e) = record.store(&fd_path).await {
+        // The pair was just created and holds no bytes; do not leave it behind
+        // as a 0% "resumable" task.
+        discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
         let _ = tx.send(Event::StateSaveError(e));
         return Err(TerminationReason::Failed);
     }
@@ -455,6 +530,8 @@ async fn resolve_target(
         record,
         fd_path,
         tmp_path,
+        _claim: claim,
+        fresh,
     })
 }
 
@@ -625,14 +702,35 @@ async fn finalize(
     };
     if let Err(e) = fs::rename(tmp_path, &target).await {
         if !config.overwrite {
+            // `gen_unique_path` reserved this name by creating an empty file;
+            // drop that placeholder so a later retry can still use the intended
+            // name instead of falling back to `name (1)`.
             let _ = fs::remove_file(&target).await;
         }
         let _ = tx.send(Event::RenameFailed(e));
         return TerminationReason::Failed;
     }
-    let _ = fs::remove_file(fd_path).await;
+    if let Err(e) = fs::remove_file(fd_path).await {
+        // The download completed, but the stale `.fd` makes the next run see a
+        // finished pair whose `.part` is gone, so it downloads the file again
+        // under a unique name. Report the cleanup failure; the bytes are safe.
+        let _ = tx.send(Event::StateSaveError(StateError::Remove(e)));
+    }
     let _ = tx.send(Event::Renamed(target));
     TerminationReason::Completed
+}
+
+/// Drop a pair this run created when it holds no recorded progress.
+///
+/// Both conditions matter: `fresh` keeps a resumed or pinned pair (never ours to
+/// delete) while the progress check keeps a cancelled mid-download pair, whose
+/// recorded bytes are still worth resuming. The removal lives here rather than
+/// in a standalone helper so there is no unchecked way to delete a pair.
+async fn discard_unused_pair(fresh: bool, record: &Record, fd_path: &Path, tmp_path: &Path) {
+    if fresh && record.progress().is_empty() {
+        let _ = fs::remove_file(tmp_path).await;
+        let _ = fs::remove_file(fd_path).await;
+    }
 }
 
 /// Persist snapshots until the sender is dropped. Reports save failures straight

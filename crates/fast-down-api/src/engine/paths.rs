@@ -37,7 +37,7 @@ pub async fn claim_pair(
 ) -> Result<(PathBuf, PathBuf), TerminationReason> {
     for base in final_path.iter_stem() {
         let fd_path = base.with_added_extension("fd");
-        let tmp_path = fd_path.with_extension("part");
+        let tmp_path = crate::utils::part_path(&fd_path);
         match open_create_new().open(&tmp_path).await {
             Ok(_) => match open_create_new().open(&fd_path).await {
                 Ok(_) => return Ok((fd_path, tmp_path)),

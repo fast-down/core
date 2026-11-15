@@ -32,10 +32,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = create_channel();
     let ctx = Ctx::new();
     let ready = State::new(url.clone(), config.clone()).build(&tx).await?;
-    let fd_path = ready
-        .fd_path
-        .clone()
-        .expect("a fresh build decides the .fd path when overwrite is set");
+    // A fresh, unpinned build never decides the `.fd` location: `fd_path` is only
+    // set when the caller pins one. The default is `<final>.fd`, which is
+    // predictable here because `save_dir` and `filename` are fixed above.
+    let mut fd_name = ready.final_path.clone().into_os_string();
+    fd_name.push(".fd");
+    let fd_path = std::path::PathBuf::from(fd_name);
 
     let handle = ready.start(StartMode::Auto, tx, &ctx);
     let mut cancelled = false;

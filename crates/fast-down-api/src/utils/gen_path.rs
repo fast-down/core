@@ -71,7 +71,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_filename_uses_auto_ext() {
-        // filename empty => `auto_ext` branch (line 12) is taken.
+        // filename empty => the `auto_ext` branch is taken.
         let dir = tempdir("auto_ext");
         let url = Url::parse("https://example.com/path/data.bin?x=1").unwrap();
         let info = make_info("data.bin", Some("application/octet-stream"));
@@ -93,7 +93,7 @@ mod tests {
 
     #[tokio::test]
     async fn template_expands_into_subdir() {
-        // parse_filename true + non-empty filename => template branch (lines 20-33).
+        // parse_filename true + non-empty filename => the template branch.
         let dir = tempdir("template");
         let url = Url::parse("https://example.com/a/b/data.bin").unwrap();
         let info = make_info("data.bin", None);

@@ -207,7 +207,7 @@ impl Record {
     /// Only call this once the record is known to still describe `info` (see
     /// [`Record::validate`]): overwriting the identity first would make a later
     /// validation compare a value with itself and always pass.
-    pub fn refresh_identity(&mut self, info: &UrlInfo) {
+    pub(crate) fn refresh_identity(&mut self, info: &UrlInfo) {
         self.size = info.size;
         self.etag.clone_from(&info.file_id.etag);
         self.last_modified.clone_from(&info.file_id.last_modified);

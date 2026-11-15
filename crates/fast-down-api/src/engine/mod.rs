@@ -3,6 +3,7 @@
 //! Everything that talks to the engine lives here, so `state` stays pure data
 //! and decision logic that can be tested without a server.
 
+mod claim;
 mod paths;
 mod pipeline;
 mod policy;

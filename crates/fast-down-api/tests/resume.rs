@@ -932,7 +932,9 @@ async fn test_concurrent_resume_with_fragmented_progress() {
     let recorded = vec![size / 8..size / 4, size / 2..3 * size / 4];
 
     let mut record = Record::new(url.clone(), cfg.clone());
-    record.refresh_identity(&info);
+    record.size = info.size;
+    record.etag = info.file_id.etag.clone();
+    record.last_modified = info.file_id.last_modified.clone();
     record.set_progress(recorded.clone());
     record.store(&fd).await.expect("seed .fd");
 
@@ -1613,7 +1615,7 @@ async fn test_download_join_resolves() {
 
 /// Like [`make_config`] but with `overwrite = false`, so downloads fall into the
 /// unique-path branch and resume from a `.part`/`.fd` via the non-overwrite arm of
-/// `download()` (mod.rs lines 189-213, overwrite.rs 198-202).
+/// `download()`.
 fn make_config_no_overwrite(save_dir: &Path) -> PartialConfig {
     PartialConfig {
         save_dir: Some(save_dir.to_path_buf()),
@@ -1649,7 +1651,7 @@ async fn test_handle_join_completes() {
 }
 
 /// `download()` silently resumes (emitting `Event::Resumed`) when a valid
-/// `.fd`/`.part` already exists and `overwrite = true` (mod.rs lines 157-165).
+/// `.fd`/`.part` already exists and `overwrite = true`.
 #[tokio::test]
 async fn test_download_silent_resume_overwrite() {
     let dir = temp_dir("silent_resume_overwrite");
@@ -1691,7 +1693,7 @@ async fn test_download_silent_resume_overwrite() {
 }
 
 /// `download()` with `overwrite = false` resumes via the non-overwrite arm
-/// (mod.rs lines 189-204) and renames into a unique path (overwrite.rs 198-202).
+/// and renames into a unique path.
 #[tokio::test]
 async fn test_download_resume_without_overwrite() {
     let dir = temp_dir("resume_no_overwrite");
@@ -1735,7 +1737,7 @@ async fn test_download_resume_without_overwrite() {
 
 /// When `resume()` is pointed at a `.part` that is actually a *directory*, the
 /// sink file cannot be opened, so `build_pipeline` fails and `overwrite` returns
-/// early (overwrite.rs line 84) emitting `Event::BuildPusherError` — no rename,
+/// early, emitting `Event::BuildPusherError` — no rename,
 /// and crucially not a `ResumeError` (that path is reserved for state/validation
 /// failures, not a plain IO open error).
 #[tokio::test]
@@ -1790,7 +1792,7 @@ async fn test_resume_with_directory_part_fails_pipeline() {
 }
 
 /// `prefetch` retries on failure and gives up (returns `None`, so `download`
-/// never proceeds) once `retry_times` attempts are exhausted (prefetch.rs 24-30).
+/// never proceeds) once `retry_times` attempts are exhausted.
 #[tokio::test]
 async fn test_prefetch_retries_then_gives_up() {
     // Stand up a server that always answers 500 so every prefetch attempt fails.
@@ -1848,7 +1850,7 @@ async fn test_prefetch_retries_then_gives_up() {
 }
 
 /// A zero-byte file reports `total == 0`; `DownloadStats::push.percent` is then
-/// forced to `0.0` (`progress_reporter.rs` line 134) rather than dividing by zero.
+/// forced to `0.0` rather than dividing by zero.
 #[tokio::test]
 async fn test_progress_zero_total_file() {
     let dir = temp_dir("progress_zero");
@@ -1880,7 +1882,7 @@ async fn test_progress_zero_total_file() {
     assert!(!progresses.is_empty(), "expected Event::Progress events");
     assert!(
         progresses.iter().all(|s| s.push.percent == 0.0),
-        "percent must be exactly 0.0 for a zero-byte file (line 134)"
+        "percent must be exactly 0.0 for a zero-byte file"
     );
     let final_path = dir.join("out.bin");
     let got = tokio::fs::read(&final_path).await.expect("read final file");

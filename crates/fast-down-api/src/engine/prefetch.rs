@@ -24,8 +24,9 @@ pub async fn prefetch(
     config: &Config,
     tx: &Tx,
 ) -> Result<(UrlInfo, Response), PlanError> {
+    let (headers, _) = build_header(&config.headers);
     let client = build_client(
-        build_header(&config.headers),
+        headers,
         config.proxy.as_deref(),
         config.accept_invalid_certs,
         config.accept_invalid_hostnames,
@@ -130,7 +131,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn prefetch_succeeds_against_local_server() {
-        // Exercises the Ok branch of `prefetch` (prefetch.rs lines 19-22): a server
+        // Exercises the Ok branch of `prefetch`: a server
         // that answers a normal GET with 200 + content-length/etag/last-modified and
         // a Range probe with 206 + content-range must make `prefetch` resolve to
         // `Some((UrlInfo, _))`, populate the UrlInfo correctly, and emit

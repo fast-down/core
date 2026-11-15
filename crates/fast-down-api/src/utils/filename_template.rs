@@ -1,11 +1,10 @@
 use chrono::Local;
+use chrono::format::{Item, StrftimeItems};
 use path_helper::sanitize_filename;
-use std::panic;
 use url::Url;
 
 pub fn parse_filename_template(template: &str, url: &Url, filename: &str) -> String {
-    let template = panic::catch_unwind(|| Local::now().format(template).to_string())
-        .unwrap_or_else(|_| template.to_string());
+    let template = expand_time(template);
     let host = sanitize_filename(url.host_str().unwrap_or("unknown"), 255);
     let mut parent_path: Vec<_> = url
         .path_segments()
@@ -34,6 +33,18 @@ pub fn parse_filename_template(template: &str, url: &Url, filename: &str) -> Str
         .replace("{file_name}", filename)
         .replace("{file_stem}", file_stem)
         .replace("{file_ext}", file_ext)
+}
+
+/// Expand chrono `%`-sequences in a filename template.
+///
+/// An invalid sequence (`%Q`, a lone `%`) is kept literally: letting the
+/// formatter panic would print through the panic hook, and with
+/// `panic = "abort"` it would take the process down.
+fn expand_time(template: &str) -> String {
+    if StrftimeItems::new(template).any(|item| matches!(item, Item::Error)) {
+        return template.to_string();
+    }
+    Local::now().format(template).to_string()
 }
 
 #[cfg(test)]
@@ -91,7 +102,7 @@ mod tests {
     #[test]
     fn parent_path_is_dot_for_cannot_be_a_base_url() {
         // `mailto:` URLs are cannot-be-a-base, so `path_segments()` is `None` and
-        // the parent path collapses to "." (filename_template.rs lines 10-25).
+        // the parent path collapses to ".".
         let url = Url::parse("mailto:foo@x").unwrap();
         let out = parse_filename_template("{parent_path}/{file_name}", &url, "foo.txt");
         assert_eq!(out, "./foo.txt");
@@ -100,10 +111,19 @@ mod tests {
     #[test]
     fn chrono_format_expands_into_template() {
         // A leading `%Y` is a chrono format spec expanded by `Local::now().format`
-        // before the `{...}` placeholders are substituted (filename_template.rs line 7).
+        // before the `{...}` placeholders are substituted.
         let url = Url::parse("https://example.com/file.txt").unwrap();
         let out = parse_filename_template("%Y/file.txt", &url, "file.txt");
         let year = chrono::Local::now().format("%Y").to_string();
         assert_eq!(out, format!("{year}/file.txt"));
+    }
+
+    #[test]
+    fn invalid_time_sequence_is_kept_literally() {
+        // `%Q` is not a chrono spec; the template must survive verbatim instead
+        // of panicking through the formatter.
+        let url = Url::parse("https://example.com/file.txt").unwrap();
+        let out = parse_filename_template("%Q/{file_name}", &url, "file.txt");
+        assert_eq!(out, "%Q/file.txt");
     }
 }

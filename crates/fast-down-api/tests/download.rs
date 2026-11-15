@@ -259,7 +259,8 @@ async fn seed_partial(
     let fd = final_path.with_added_extension("fd");
     let tmp = fd.with_extension("part");
     let mut record = Record::new(Url::parse(url).unwrap(), make_config(dir));
-    record.refresh_identity(info);
+    record.size = info.size;
+    record.last_modified = info.file_id.last_modified.clone();
     record.etag = Some(etag.into());
     record.set_progress(vec![0..progress_end]);
     record.store(&fd).await.expect("seed .fd");
@@ -306,8 +307,8 @@ async fn fresh_download_completes_and_renames() {
 }
 
 /// A source that sends headers and then never delivers a body must end the run
-/// with [`Event::Stalled`] instead of retrying forever, and leave the `.part`
-/// resumable.
+/// with [`Event::Stalled`] instead of retrying forever. Since it never records a
+/// byte, it must not leave a 0% "resumable" pair behind either.
 #[tokio::test(flavor = "multi_thread")]
 async fn stalled_source_reports_stalled_and_ends() {
     let payload = vec![0x5Au8; FILE_SIZE];
@@ -344,6 +345,14 @@ async fn stalled_source_reports_stalled_and_ends() {
         .expect("drain task");
     assert!(stalled, "the run must report Event::Stalled");
     assert_eq!(reason, Some(TerminationReason::Incomplete));
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .expect("read dir")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a run that recorded no byte must not leave a resumable pair, found {leftovers:?}"
+    );
 }
 
 /// The pipeline reports the actually-chosen writer and, with `pre_alloc` on, the
@@ -545,21 +554,19 @@ async fn cancellation_keeps_state_and_resume_completes() {
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 }
 
-/// A cancel that lands before the pipeline has finished building must report
-/// [`Cancelled`](TerminationReason::Cancelled), not a build failure: the build
-/// is abandoned because the run was cancelled, which is not an error.
+/// A cancel that lands before provisioning must report
+/// [`Cancelled`](TerminationReason::Cancelled) and leave no `.fd`/`.part`
+/// behind: `drive` returns before it claims a pair.
 #[tokio::test(flavor = "multi_thread")]
-async fn cancel_before_pipeline_is_built_reports_cancelled() {
+async fn cancel_before_provisioning_reports_cancelled_without_files() {
     let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 211) as u8).collect();
     let (_server, url) = start_server(payload, "v1", true).await;
     let dir = temp_dir("cancel_build");
 
     let (tx, rx) = create_channel();
     let ctx = Ctx::new();
-    // Cancel before the run is spawned: `drive` reaches `build_pipeline` with the
-    // token already cancelled, so `run_until_cancelled` abandons the build.
-    // Resolving the `.fd`/`.part` pair happens first and does not observe the
-    // token, so this isolates the build-abandonment path.
+    // Cancel before the run is spawned: `drive` checks the token before it
+    // resolves the `.fd`/`.part` pair, so nothing is created.
     ctx.cancel();
     let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
         .build(&tx)
@@ -568,6 +575,77 @@ async fn cancel_before_pipeline_is_built_reports_cancelled() {
     let drain = tokio::spawn(run_to_end(rx));
     let _handle = ready.start(StartMode::Auto, tx, &ctx);
     assert_eq!(drain.await.unwrap(), TerminationReason::Cancelled);
+
+    let leftovers: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("read save dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("fd" | "part")
+            )
+        })
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a cancelled-before-start run must not leave a state pair: {leftovers:?}"
+    );
+}
+
+/// A second run pinned to the same `.fd` while the first is still running must be
+/// refused instead of interleaving writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn second_run_on_the_same_fd_is_refused() {
+    let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 197) as u8).collect();
+    // The body never produces a byte, so the first run cannot finish (and thus
+    // cannot release the claim) before the second one tries to take it. A
+    // throttled body would make this a race against the transfer's remaining
+    // time, which a loaded machine can lose.
+    let (_server, url) = start_server_stalled(payload, "v1", true).await;
+    let dir = temp_dir("claim");
+    let fd = dir.join("out.bin").with_added_extension("fd");
+    let url = Url::parse(&url).unwrap();
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::at_path(url.clone(), fd.clone(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("first build");
+    let first = ready.start(StartMode::Auto, tx, &ctx);
+
+    // Wait until the first run owns the pair.
+    let mut started = false;
+    while let Ok(event) = rx.recv().await {
+        if matches!(event, Event::Start { .. }) {
+            started = true;
+            break;
+        }
+    }
+    assert!(started, "the first run must reach Start");
+
+    let (tx2, rx2) = create_channel();
+    let ctx2 = Ctx::new();
+    let ready2 = State::at_path(url, fd, make_config(&dir))
+        .build(&tx2)
+        .await
+        .expect("second build");
+    let second = ready2.start(StartMode::Auto, tx2, &ctx2);
+    let mut events = Vec::new();
+    while let Ok(event) = rx2.recv().await {
+        events.push(event);
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::AlreadyRunning(_))),
+        "the second run must report the claim conflict, got {events:?}"
+    );
+    assert_eq!(second.await, TerminationReason::Failed);
+
+    ctx.cancel();
+    drop(first);
 }
 
 #[tokio::test(flavor = "multi_thread")]

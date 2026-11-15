@@ -15,6 +15,9 @@ pub enum StateError {
     /// The `.fd` could not be written.
     #[error("failed to save .fd: {0}")]
     Save(std::io::Error),
+    /// A completed run's `.fd` could not be removed.
+    #[error("failed to remove .fd: {0}")]
+    Remove(std::io::Error),
     /// The `.fd` contents are not valid TOML.
     #[error("failed to decode .fd: {0}")]
     Decode(#[from] toml::de::Error),
@@ -87,9 +90,6 @@ pub enum PlanError {
     /// The output path could not be computed.
     #[error(transparent)]
     GenPath(std::io::Error),
-    /// Loading or probing the recorded state failed.
-    #[error(transparent)]
-    State(#[from] StateError),
 }
 
 impl PlanError {
@@ -104,7 +104,6 @@ impl PlanError {
             Self::BuildClient(e) => tx.send(Event::BuildClientError(e)),
             Self::Prefetch(e) => tx.send(Event::PrefetchError(e)),
             Self::GenPath(e) => tx.send(Event::GenPathError(e)),
-            Self::State(e) => tx.send(Event::ResumeError(e)),
         };
     }
 }
