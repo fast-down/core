@@ -21,6 +21,60 @@ use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
+/// The cookies a client built by [`build_client`] keeps.
+///
+/// A [`FastDownPuller`] shares one store across every client it builds, so a
+/// clone — which rebuilds the client to rotate the local source address — still
+/// inherits the session earlier responses established. Cloning the store shares
+/// the jar; it never copies the cookies.
+///
+/// Cookie support is compiled in by the `cookie-store` feature (it enables
+/// reqwest's `cookies` feature). Without it no client can retain a cookie, and
+/// `enabled` has no effect — the same behaviour the plain `cookie_store` flag
+/// always had.
+#[derive(Debug, Clone, Default)]
+pub struct CookieStore {
+    #[cfg(feature = "cookie-store")]
+    jar: Option<Arc<reqwest::cookie::Jar>>,
+}
+
+impl CookieStore {
+    /// A store that keeps cookies only when `enabled`.
+    #[must_use]
+    pub fn new(enabled: bool) -> Self {
+        #[cfg(feature = "cookie-store")]
+        {
+            Self {
+                jar: if enabled {
+                    Some(Arc::new(reqwest::cookie::Jar::default()))
+                } else {
+                    None
+                },
+            }
+        }
+        #[cfg(not(feature = "cookie-store"))]
+        {
+            let _ = enabled;
+            Self {}
+        }
+    }
+
+    /// Whether this store keeps cookies at all.
+    ///
+    /// Always `false` without the `cookie-store` feature.
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        #[cfg(feature = "cookie-store")]
+        {
+            self.jar.is_some()
+        }
+        #[cfg(not(feature = "cookie-store"))]
+        {
+            false
+        }
+    }
+}
+
 /// # Errors
 /// Returns [`BuildClientError`] if the HTTP client cannot be built (invalid
 /// proxy URL, TLS backend failure, or other `reqwest::ClientBuilder` errors).
@@ -30,7 +84,7 @@ pub fn build_client(
     proxy: Proxy<&str>,
     #[allow(unused)] accept_invalid_certs: bool,
     #[allow(unused)] accept_invalid_hostnames: bool,
-    #[allow(unused)] cookie_store: bool,
+    #[allow(unused)] cookie_store: &CookieStore,
     local_addr: Option<std::net::IpAddr>,
     max_redirects: usize,
     connect_timeout: Duration,
@@ -61,8 +115,11 @@ pub fn build_client(
             .danger_accept_invalid_hostnames(accept_invalid_hostnames);
     }
     #[cfg(feature = "cookie-store")]
-    {
-        client = client.cookie_store(cookie_store);
+    if let Some(jar) = &cookie_store.jar {
+        // Hand over the puller's jar instead of letting the builder allocate a
+        // private one: a rebuild must not lose the cookies the previous client
+        // collected.
+        client = client.cookie_provider(jar.clone());
     }
     Ok(SmartRedirectClient::new(
         client.build()?,
@@ -79,7 +136,9 @@ pub fn build_client(
 ///
 /// Wraps an [`HttpPuller`] with a [`SmartRedirectClient`], IP rotation,
 /// and proxy support. Cloning creates a new HTTP client with an optionally
-/// rotated local address for multi-interface setups.
+/// rotated local address for multi-interface setups; the cookie jar (with the
+/// `cookie-store` feature) is shared with every client the puller builds, so a
+/// clone keeps the session earlier responses established.
 #[derive(Debug)]
 pub struct FastDownPuller {
     inner: HttpPuller<SmartRedirectClient>,
@@ -88,7 +147,7 @@ pub struct FastDownPuller {
     url: Arc<Url>,
     accept_invalid_certs: bool,
     accept_invalid_hostnames: bool,
-    cookie_store: bool,
+    cookie_store: CookieStore,
     file_id: FileId,
     resp: Option<Arc<Mutex<Option<Response>>>>,
     available_ips: Arc<[std::net::IpAddr]>,
@@ -112,8 +171,13 @@ pub struct FastDownPullerOptions<'a> {
     pub accept_invalid_certs: bool,
     /// Accept invalid TLS hostnames (requires the `reqwest-tls` feature).
     pub accept_invalid_hostnames: bool,
-    /// Enable a cookie store (requires the `cookie-store` feature).
-    pub cookie_store: bool,
+    /// The cookie store every client this puller builds shares (requires the
+    /// `cookie-store` feature).
+    ///
+    /// Pass the same value to the prefetch client and to the puller so the
+    /// session a probe established survives into the download. `CookieStore`'s
+    /// `Clone` shares the jar; it never copies the cookies.
+    pub cookie_store: CookieStore,
     /// The expected [`FileId`], used to detect a changed resource and resume safely.
     pub file_id: FileId,
     /// An already-open response to reuse for the first request (e.g. from a prefetch).
@@ -139,7 +203,7 @@ impl FastDownPuller {
             option.proxy,
             option.accept_invalid_certs,
             option.accept_invalid_hostnames,
-            option.cookie_store,
+            &option.cookie_store,
             local_addr,
             option.max_redirects,
             option.connect_timeout,
@@ -183,8 +247,11 @@ fn next_local_addr(
 
 impl Clone for FastDownPuller {
     /// Rebuilds the HTTP client so a retry can leave the previous client and
-    /// local source address behind. If rebuilding fails, the previous client is
-    /// kept: `Clone` cannot report the failure and a download must not panic.
+    /// local source address behind. The cookie store (with the `cookie-store`
+    /// feature) is shared with the previous client, so the rebuild keeps the
+    /// session earlier responses established. If rebuilding fails, the previous
+    /// client is kept: `Clone` cannot report the failure and a download must not
+    /// panic.
     fn clone(&self) -> Self {
         let available_ips = self.available_ips.clone();
         let turn = self.turn.clone();
@@ -195,7 +262,7 @@ impl Clone for FastDownPuller {
                 self.proxy.as_deref(),
                 self.accept_invalid_certs,
                 self.accept_invalid_hostnames,
-                self.cookie_store,
+                &self.cookie_store,
                 local_addr,
                 self.max_redirects,
                 self.connect_timeout,
@@ -217,7 +284,7 @@ impl Clone for FastDownPuller {
             url: self.url.clone(),
             accept_invalid_certs: self.accept_invalid_certs,
             accept_invalid_hostnames: self.accept_invalid_hostnames,
-            cookie_store: self.cookie_store,
+            cookie_store: self.cookie_store.clone(),
             file_id: self.file_id.clone(),
             available_ips,
             turn,
@@ -249,7 +316,7 @@ mod tests {
             proxy: Proxy::No,
             accept_invalid_certs: false,
             accept_invalid_hostnames: false,
-            cookie_store: false,
+            cookie_store: CookieStore::default(),
             file_id: FileId::default(),
             resp: None,
             available_ips: Arc::from(Vec::<std::net::IpAddr>::new()),
@@ -273,6 +340,95 @@ mod tests {
         );
     }
 
+    /// `clone()` rebuilds the client, but the rebuilt client must be handed the
+    /// very same jar: a jar per client is what made `cookie-store` useless on the
+    /// download path.
+    #[cfg(feature = "cookie-store")]
+    #[test]
+    fn clone_shares_the_cookie_jar() {
+        let mut opts = make_options(Url::parse("http://example.com/a.bin").unwrap());
+        opts.cookie_store = CookieStore::new(true);
+        let puller = FastDownPuller::new(opts).expect("new must succeed");
+        assert!(
+            puller.cookie_store.is_enabled(),
+            "cookie_store = true must create a jar"
+        );
+        let cloned = puller.clone();
+        let jar = puller
+            .cookie_store
+            .jar
+            .as_ref()
+            .expect("the puller must hold a jar");
+        let cloned_jar = cloned
+            .cookie_store
+            .jar
+            .as_ref()
+            .expect("the clone must hold a jar");
+        assert!(
+            Arc::ptr_eq(jar, cloned_jar),
+            "clone() must share the cookie jar instead of starting a new one"
+        );
+    }
+
+    /// The first response sets a cookie; a clone (the retry) must send it.
+    /// `/b` only answers when the `cookie` header the jar collected is present,
+    /// so a clone with a fresh jar cannot pass.
+    #[cfg(feature = "cookie-store")]
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn clone_keeps_the_cookies_the_first_response_set() {
+        use futures::TryStreamExt;
+
+        let mut server = mockito::Server::new_async().await;
+        let sets_cookie = server
+            .mock("GET", "/a")
+            .with_status(200)
+            .with_header("set-cookie", "k=v")
+            .with_body("a")
+            .expect(1)
+            .create_async()
+            .await;
+        let needs_cookie = server
+            .mock("GET", "/b")
+            .match_header("cookie", "k=v")
+            .with_status(200)
+            .with_body("b")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut opts = make_options(Url::parse(&format!("{}/a", server.url())).unwrap());
+        opts.cookie_store = CookieStore::new(true);
+        let mut puller = FastDownPuller::new(opts).expect("new must succeed");
+        let mut first = FastDownPuller::pull(&mut puller, None)
+            .await
+            .expect("the request that sets the cookie must succeed");
+        while first
+            .try_next()
+            .await
+            .expect("the first body must arrive")
+            .is_some()
+        {}
+        // The stream borrows the puller for as long as it lives.
+        drop(first);
+
+        // A retry is a clone: same jar, rebuilt client, next resource.
+        puller.url = Arc::new(Url::parse(&format!("{}/b", server.url())).unwrap());
+        let mut retry = puller.clone();
+        let mut second = FastDownPuller::pull(&mut retry, None)
+            .await
+            .expect("the clone must request /b with the cookie the first response set");
+        while second
+            .try_next()
+            .await
+            .expect("the second body must arrive")
+            .is_some()
+        {}
+
+        needs_cookie.assert_async().await;
+        sets_cookie.assert_async().await;
+    }
+
     #[test]
     fn build_client_custom_proxy_succeeds() {
         let headers = HeaderMap::new();
@@ -281,7 +437,7 @@ mod tests {
             Proxy::Custom("http://127.0.0.1:1080"),
             false,
             false,
-            false,
+            &CookieStore::new(false),
             None,
             10,
             Duration::from_secs(10),
@@ -320,7 +476,7 @@ mod tests {
             Proxy::System,
             false,
             false,
-            false,
+            &CookieStore::new(false),
             None,
             10,
             Duration::from_secs(10),

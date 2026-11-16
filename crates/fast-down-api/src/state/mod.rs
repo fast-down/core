@@ -8,6 +8,7 @@ pub use record::*;
 
 use crate::utils::gen_path;
 use crate::{PartialConfig, Tx, engine::prefetch};
+use fast_down::fast_puller::CookieStore;
 use inherit_config::ConfigLayer;
 use std::path::PathBuf;
 use url::Url;
@@ -110,7 +111,8 @@ impl State {
         let mut partial = record.config.clone();
         partial.downloaded_chunk = None;
         let mut config = partial.clone().build();
-        let (info, resp) = prefetch(url, &config, tx).await?;
+        let cookie_store = CookieStore::new(config.cookie_store);
+        let (info, resp) = prefetch(url, &config, &cookie_store, tx).await?;
 
         // The output has to be reachable from the pair: the `.part` sits next to
         // the `.fd` and `finalize` renames it there, so a destination elsewhere
@@ -225,6 +227,7 @@ impl State {
             info,
             resp,
             outcome,
+            cookie_store,
         })
     }
 }

@@ -19,7 +19,10 @@ use crate::{
     state::{Record, ResumeOutcome, StateError},
 };
 use fast_down::{
-    BoxPusher, UrlInfo, fast_puller::FastDownPuller, invert, multi::download_multi,
+    BoxPusher, UrlInfo,
+    fast_puller::{CookieStore, FastDownPuller},
+    invert,
+    multi::download_multi,
     single::download_single,
 };
 use inherit_config::ConfigLayer;
@@ -322,6 +325,8 @@ pub struct PreparedRun {
     pub info: UrlInfo,
     pub resp: Response,
     pub outcome: ResumeOutcome,
+    /// The store the probe used, shared with every client the run builds.
+    pub(crate) cookie_store: CookieStore,
 }
 
 async fn drive(
@@ -338,6 +343,7 @@ async fn drive(
         info,
         resp,
         outcome,
+        cookie_store,
     } = prepared;
     let token = ctx.token();
 
@@ -397,23 +403,24 @@ async fn drive(
 
     // 3. Build the run config and the pull/push pipeline.
     let config = record.config.clone().build();
-    let (puller, pusher) = match build_pipeline(&config, &info, resp, &tmp_path, tx, token).await {
-        // `None` means the run was cancelled mid-build; a cancel must report
-        // as such, not as a build failure. The pair this run just created holds
-        // no bytes, so drop it rather than leave a 0% "resumable" task behind.
-        None => {
-            discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
-            return TerminationReason::Cancelled;
-        }
-        Some(Err(event)) => {
-            let _ = tx.send(event);
-            // A pair this run just created and never wrote to would otherwise
-            // stay on disk as a permanent 0-byte "resumable" task.
-            discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
-            return TerminationReason::Failed;
-        }
-        Some(Ok(built)) => built,
-    };
+    let (puller, pusher) =
+        match build_pipeline(&config, &info, resp, &tmp_path, tx, token, cookie_store).await {
+            // `None` means the run was cancelled mid-build; a cancel must report
+            // as such, not as a build failure. The pair this run just created holds
+            // no bytes, so drop it rather than leave a 0% "resumable" task behind.
+            None => {
+                discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
+                return TerminationReason::Cancelled;
+            }
+            Some(Err(event)) => {
+                let _ = tx.send(event);
+                // A pair this run just created and never wrote to would otherwise
+                // stay on disk as a permanent 0-byte "resumable" task.
+                discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
+                return TerminationReason::Failed;
+            }
+            Some(Ok(built)) => built,
+        };
     let _ = tx.send(Event::Start {
         tmp_path: tmp_path.clone(),
         fd_path: fd_path.clone(),

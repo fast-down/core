@@ -1,5 +1,9 @@
 use crate::{Config, Event, PlanError, Tx, utils::build_header};
-use fast_down::{UrlInfo, fast_puller::build_client, http::Prefetch};
+use fast_down::{
+    UrlInfo,
+    fast_puller::{CookieStore, build_client},
+    http::Prefetch,
+};
 use reqwest::Response;
 use url::Url;
 
@@ -9,6 +13,10 @@ use url::Url;
 /// On success emits [`Event::Prefetch`] and hands back the [`UrlInfo`] together
 /// with the open [`Response`], which the download pipeline reuses to seed the
 /// first range request instead of paying for another round-trip.
+///
+/// `cookie_store` is the same store the download builds its clients from, so a
+/// session this probe establishes survives into the run instead of dying with
+/// the probe client.
 ///
 /// # Errors
 ///
@@ -22,6 +30,7 @@ use url::Url;
 pub async fn prefetch(
     url: &Url,
     config: &Config,
+    cookie_store: &CookieStore,
     tx: &Tx,
 ) -> Result<(UrlInfo, Response), PlanError> {
     let (headers, _) = build_header(&config.headers);
@@ -30,7 +39,7 @@ pub async fn prefetch(
         config.proxy.as_deref(),
         config.accept_invalid_certs,
         config.accept_invalid_hostnames,
-        config.cookie_store,
+        cookie_store,
         config.local_address.first().copied(),
         config.max_redirects,
         config.connect_timeout,
@@ -105,7 +114,7 @@ mod tests {
             ..Default::default()
         };
         let (tx, rx) = create_channel();
-        let result = prefetch(&url, &config, &tx).await;
+        let result = prefetch(&url, &config, &CookieStore::default(), &tx).await;
         match result {
             Err(PlanError::Prefetch(e)) => assert!(
                 matches!(e, fast_down::reqwest::ReqwestResponseError::Request(_)),
@@ -197,7 +206,7 @@ mod tests {
             ..Config::default()
         };
         let (tx, rx) = create_channel();
-        let result = prefetch(&url, &config, &tx).await;
+        let result = prefetch(&url, &config, &CookieStore::default(), &tx).await;
 
         assert!(
             result.is_ok(),

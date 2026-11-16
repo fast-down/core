@@ -21,7 +21,9 @@ use fast_down_api::{
 use http_body_util::BodyExt;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Incoming;
-use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LAST_MODIFIED, RANGE};
+use hyper::header::{
+    ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, COOKIE, ETAG, LAST_MODIFIED, RANGE, SET_COOKIE,
+};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
@@ -46,14 +48,27 @@ struct FileData {
     throttle: Option<Duration>,
     /// When set, the response sends headers but the body never produces a byte.
     stall: bool,
+    /// When set, every response carries `Set-Cookie: session=<value>` and any
+    /// request that also asks for a `Range` must send it back or gets a 403.
+    /// That splits probe traffic from download traffic the way a real session
+    /// does: the probe earns the cookie, the range requests must reuse it.
+    session: Option<&'static str>,
 }
 
 #[derive(Clone)]
 struct TestServer {
     data: Arc<RwLock<FileData>>,
+    /// How many requests carried a `Range` header, so a test can assert it
+    /// actually exercised range traffic instead of the reused probe response.
+    ranged_requests: Arc<AtomicU64>,
 }
 
 impl TestServer {
+    /// How many requests carried a `Range` header so far.
+    fn ranged_requests(&self) -> u64 {
+        self.ranged_requests.load(Ordering::Relaxed)
+    }
+
     async fn serve(&self) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -85,6 +100,7 @@ async fn handle(
     let body = data.body.clone();
     let throttle = data.throttle;
     let stall = data.stall;
+    let session = data.session;
     drop(data);
 
     let range = req
@@ -92,14 +108,36 @@ async fn handle(
         .get(RANGE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    if range.is_some() {
+        server.ranged_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Range traffic must present the cookie the probe earned -- except the
+    // `0-0` capability probe itself, which is issued concurrently with the
+    // first request and therefore cannot have it yet.
+    let parsed = range
+        .as_deref()
+        .and_then(|header| parse_range(header, total));
+    if let Some(expected) = session
+        && parsed.is_some()
+        && parsed != Some((0, 1))
+        && !has_session_cookie(&req, expected)
+    {
+        return Ok(Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(http_body_util::Full::new(Bytes::new()).boxed())
+            .expect("403"));
+    }
+    let set_cookie = session.map(|value| format!("session={value}"));
 
     if supports_range
-        && let Some(header) = range
-        && let Some((start, end)) = parse_range(&header, total)
+        && let Some((start, end)) = parsed
+        && end <= total
+        && start < end
     {
         let chunk = body[start..end].to_vec();
         let end_inclusive = end - 1;
-        return Ok(Response::builder()
+        let mut builder = Response::builder()
             .status(StatusCode::PARTIAL_CONTENT)
             .header(
                 CONTENT_RANGE,
@@ -108,18 +146,30 @@ async fn handle(
             .header(ACCEPT_RANGES, "bytes")
             .header(CONTENT_LENGTH, chunk.len().to_string())
             .header(ETAG, etag.as_str())
-            .header(LAST_MODIFIED, last_modified.as_str())
-            .body(body_of(chunk, throttle, stall))
-            .expect("206"));
+            .header(LAST_MODIFIED, last_modified.as_str());
+        if let Some(value) = &set_cookie {
+            builder = builder.header(SET_COOKIE, value.as_str());
+        }
+        return Ok(builder.body(body_of(chunk, throttle, stall)).expect("206"));
     }
 
-    Ok(Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_LENGTH, body.len().to_string())
         .header(ETAG, etag.as_str())
-        .header(LAST_MODIFIED, last_modified.as_str())
-        .body(body_of(body, throttle, stall))
-        .expect("200"))
+        .header(LAST_MODIFIED, last_modified.as_str());
+    if let Some(value) = &set_cookie {
+        builder = builder.header(SET_COOKIE, value.as_str());
+    }
+    Ok(builder.body(body_of(body, throttle, stall)).expect("200"))
+}
+
+fn has_session_cookie(req: &Request<Incoming>, expected: &str) -> bool {
+    let wanted = format!("session={expected}");
+    req.headers()
+        .get(COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(';').any(|part| part.trim() == wanted))
 }
 
 /// A response body: the whole `data` at once, or streamed in chunks with a
@@ -227,7 +277,9 @@ async fn start_server_with(
             supports_range,
             throttle,
             stall,
+            session: None,
         })),
+        ranged_requests: Arc::new(AtomicU64::new(0)),
     };
     let url = server.serve().await;
     (server, url)
@@ -1084,4 +1136,78 @@ async fn a_new_download_without_save_dir_says_so() {
         err.to_string().contains("save_dir"),
         "the message names the missing setting: {err}"
     );
+}
+
+/// A server whose responses set a session cookie and whose *ranged* responses
+/// require it back, so probe traffic and download traffic are split the way a
+/// real session splits them.
+async fn start_server_with_session(
+    body: Vec<u8>,
+    etag: &str,
+    session: &'static str,
+) -> (TestServer, String) {
+    let server = TestServer {
+        data: Arc::new(RwLock::new(FileData {
+            body,
+            etag: etag.to_string(),
+            last_modified: "Wed, 21 Oct 2026 07:28:00 GMT".to_string(),
+            supports_range: true,
+            throttle: None,
+            stall: false,
+            session: Some(session),
+        })),
+        ranged_requests: Arc::new(AtomicU64::new(0)),
+    };
+    let url = server.serve().await;
+    (server, url)
+}
+
+/// The cookie the probe earns has to reach the range requests the run issues
+/// afterwards. They are served by clients built later, in the pipeline, so this
+/// only holds when the probe and the run share one store.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cookie_set_by_the_probe_reaches_the_range_requests() {
+    let size = FILE_SIZE;
+    let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let (server, url) = start_server_with_session(payload.clone(), "v1", "s3ss10n").await;
+    let dir = temp_dir("cookie_session");
+    let half = size / 2;
+
+    // Seed half the file so the run asks for a sub-range. A fresh download would
+    // be served entirely from the prefetch response and never issue a range
+    // request, which would hide the cookie path altogether.
+    let fd = dir.join("out.bin").with_added_extension("fd");
+    let mut part = vec![0u8; size];
+    part[..half].copy_from_slice(&payload[..half]);
+    std::fs::write(dir.join("out.bin").with_added_extension("part"), &part).expect("seed .part");
+    let mut record = Record::new(Url::parse(&url).unwrap(), make_config(&dir));
+    record.size = size as u64;
+    record.etag = Some(std::sync::Arc::from("v1"));
+    record.last_modified = Some(std::sync::Arc::from("Wed, 21 Oct 2026 07:28:00 GMT"));
+    record.set_progress(vec![0..half as u64]);
+    record.store(&fd).await.expect("write the .fd");
+
+    let mut config = make_config(&dir);
+    config.cookie_store = Some(true);
+    config.min_chunk_size = Some(64 * 1024);
+    // Keep the negative case short: without a shared store every range request
+    // is a 403 and the run would otherwise sit out the default stall window.
+    config.stall_timeout = Some(Duration::from_secs(5));
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::at_path(Url::parse(&url).unwrap(), fd, config)
+        .build(&tx)
+        .await
+        .expect("build");
+    let handle = ready.start(StartMode::Auto, tx, &ctx);
+    while rx.recv().await.is_ok() {}
+
+    assert!(
+        server.ranged_requests() > 1,
+        "the run issued {} ranged requests, so it never exercised the cookie",
+        server.ranged_requests()
+    );
+    assert_eq!(handle.await, TerminationReason::Completed);
+    assert_eq!(std::fs::read(dir.join("out.bin")).unwrap(), payload);
 }

@@ -3,6 +3,7 @@ use crate::{
     engine::{Ctx, RunHandle, StartPolicy},
     state::Record,
 };
+use fast_down::fast_puller::CookieStore;
 use fast_down::{ProgressEntry, UrlInfo};
 use reqwest::Response;
 use std::path::PathBuf;
@@ -54,6 +55,9 @@ pub struct Ready {
     pub resp: Response,
     /// What `start` would do.
     pub outcome: ResumeOutcome,
+    /// The cookie store the probe used, handed on to the run so a session the
+    /// prefetch established survives into the download.
+    pub(crate) cookie_store: CookieStore,
 }
 
 impl Ready {
@@ -83,6 +87,7 @@ impl Ready {
                 info: self.info,
                 resp: self.resp,
                 outcome: self.outcome,
+                cookie_store: self.cookie_store,
             },
             policy,
             tx,

@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         proxy: Proxy::System,
         accept_invalid_certs: false,
         accept_invalid_hostnames: false,
-        cookie_store: false,
+        cookie_store: Default::default(),
         file_id: FileId::default(),
         resp: None,
         available_ips: Arc::from(Vec::<std::net::IpAddr>::new()),

@@ -4,7 +4,7 @@ use super::open_existing;
 use crate::{Config, Event, Tx, WriteMethod, utils::build_header};
 use fast_down::{
     BoxPusher, CacheFilePusher, MmapFilePusher, UrlInfo,
-    fast_puller::{FastDownPuller, FastDownPullerOptions},
+    fast_puller::{CookieStore, FastDownPuller, FastDownPullerOptions},
 };
 use file_alloc::FileAlloc;
 use parking_lot::Mutex;
@@ -37,6 +37,7 @@ pub async fn build_pipeline(
     path: &Path,
     tx: &Tx,
     token: &CancellationToken,
+    cookie_store: CookieStore,
 ) -> Option<Result<(FastDownPuller, BoxPusher), Event>> {
     let resp = Some(Arc::new(Mutex::new(Some(resp))));
     token
@@ -54,7 +55,7 @@ pub async fn build_pipeline(
                 proxy: config.proxy.as_deref(),
                 accept_invalid_certs: config.accept_invalid_certs,
                 accept_invalid_hostnames: config.accept_invalid_hostnames,
-                cookie_store: config.cookie_store,
+                cookie_store,
                 file_id: info.file_id.clone(),
                 resp,
                 available_ips: config.local_address.clone().into(),
