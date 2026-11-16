@@ -40,23 +40,26 @@ pub struct CookieStore {
 
 impl CookieStore {
     /// A store that keeps cookies only when `enabled`.
+    #[cfg(feature = "cookie-store")]
     #[must_use]
     pub fn new(enabled: bool) -> Self {
-        #[cfg(feature = "cookie-store")]
-        {
-            Self {
-                jar: if enabled {
-                    Some(Arc::new(reqwest::cookie::Jar::default()))
-                } else {
-                    None
-                },
-            }
+        Self {
+            jar: if enabled {
+                Some(Arc::new(reqwest::cookie::Jar::default()))
+            } else {
+                None
+            },
         }
-        #[cfg(not(feature = "cookie-store"))]
-        {
-            let _ = enabled;
-            Self {}
-        }
+    }
+
+    /// A store that keeps cookies only when `enabled`.
+    ///
+    /// Without the `cookie-store` feature no client can retain a cookie, so the
+    /// store is always empty and `enabled` has no effect.
+    #[cfg(not(feature = "cookie-store"))]
+    #[must_use]
+    pub const fn new(_enabled: bool) -> Self {
+        Self {}
     }
 
     /// Whether this store keeps cookies at all.
