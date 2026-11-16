@@ -52,6 +52,11 @@ impl State {
     /// against the remote. Use this when the caller already knows the URL and
     /// wants to resume from a specific state file it located itself.
     ///
+    /// The pinned path also decides where the finished file lands: the `.part`
+    /// lives next to the `.fd` and is renamed from there, so [`build`] resolves
+    /// the destination under the `.fd`'s own directory and ignores `save_dir`.
+    /// A `filename` template still applies, resolved relative to that directory.
+    ///
     /// [`build`]: Self::build
     #[must_use]
     pub const fn at_path(url: Url, fd_path: PathBuf, config: PartialConfig) -> Self {
@@ -104,8 +109,22 @@ impl State {
         // via `Record::merge_config`.
         let mut partial = record.config.clone();
         partial.downloaded_chunk = None;
-        let config = partial.clone().build();
+        let mut config = partial.clone().build();
         let (info, resp) = prefetch(url, &config, tx).await?;
+
+        // The output has to be reachable from the pair: the `.part` sits next to
+        // the `.fd` and `finalize` renames it there, so a destination elsewhere
+        // would move the file behind the caller's back or make the rename fail
+        // across volumes. A pinned `.fd` therefore owns the directory, and
+        // `save_dir` applies only to a fresh download; a name template still
+        // applies, resolved under that directory.
+        match fd_path.as_ref().and_then(|fd| fd.parent()) {
+            Some(dir) => config.save_dir = dir.to_path_buf(),
+            None if config.save_dir.as_os_str().is_empty() => {
+                return Err(PlanError::MissingSaveDir);
+            }
+            None => {}
+        }
         let final_path = gen_path(url, &info, &config).map_err(PlanError::GenPath)?;
 
         // Whether the caller pinned a specific `.fd` (via [`State::at_path`]). A

@@ -35,6 +35,12 @@ pub enum Event {
     /// For example the target directory is not writable or the file name is
     /// invalid on this platform.
     GenPathError(std::io::Error),
+    /// A new download has nowhere to write: [`Config::save_dir`](crate::Config)
+    /// is empty and there is no `.fd` whose directory could be reused.
+    ///
+    /// Resuming a pinned state file does not need one: the pair's own directory
+    /// is the destination.
+    MissingSaveDir,
     /// Persisting or removing the `.fd` state file failed (see [`StateError`]).
     ///
     /// Non-fatal for the current run, but the download can no longer be resumed

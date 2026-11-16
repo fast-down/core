@@ -90,6 +90,14 @@ pub enum PlanError {
     /// The output path could not be computed.
     #[error(transparent)]
     GenPath(std::io::Error),
+    /// A new download has nowhere to write: `save_dir` is empty and there is no
+    /// `.fd` whose directory could be reused. Resuming a pinned state file does
+    /// not need one.
+    #[error(
+        "save_dir is empty: a new download needs an output directory, while a \
+         resumed .fd resolves its destination next to itself"
+    )]
+    MissingSaveDir,
 }
 
 impl PlanError {
@@ -104,6 +112,7 @@ impl PlanError {
             Self::BuildClient(e) => tx.send(Event::BuildClientError(e)),
             Self::Prefetch(e) => tx.send(Event::PrefetchError(e)),
             Self::GenPath(e) => tx.send(Event::GenPathError(e)),
+            Self::MissingSaveDir => tx.send(Event::MissingSaveDir),
         };
     }
 }

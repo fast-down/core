@@ -37,7 +37,8 @@ let (tx, rx) = create_channel();
 let ctx = Ctx::new();
 
 // 2. Configure the download. Every field is optional; unset fields
-//    fall back to Config::default(). (save_dir is required at runtime.)
+//    fall back to Config::default(). A new download needs `save_dir`;
+//    a resumed `.fd` takes its directory from the state file instead.
 let config = PartialConfig {
     save_dir: Some(PathBuf::from("./downloads")),
     threads: Some(16),
@@ -86,6 +87,12 @@ When you already know where a state file lives — a UI rebuilding a list of
 paused downloads, or a caller resuming one specific file — pin it with
 `State::at_path`. Nothing is read there; `build` reads that one file and
 classifies it against the remote, instead of probing the default `<final>.fd`.
+
+The pinned path also decides where the finished file lands: the `.part` sits
+next to the `.fd` and is renamed from there, so `build` resolves the destination
+under the `.fd`'s directory and ignores `save_dir`. A `filename` template still
+applies, relative to that directory — which is why the resume below needs no
+`save_dir` at all.
 
 ```rust,no_run
 use fast_down_api::{PartialConfig, State, create_channel};

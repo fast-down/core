@@ -933,3 +933,126 @@ async fn handle_churns_both_setters_midflight() {
 
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 }
+
+/// A `.fd` pinned by path is self-contained: resuming with the crate defaults
+/// needs no `save_dir`, and the finished file lands next to the state file.
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_with_the_crate_defaults_lands_next_to_the_fd() {
+    let payload: Vec<u8> = (0..4096usize).map(|i| (i % 251) as u8).collect();
+    let (_server, url) = start_server(payload.clone(), "v1", true).await;
+    let dir = temp_dir("resume_defaults");
+    let fd = dir.join("out.bin").with_added_extension("fd");
+    let recorded = PartialConfig {
+        save_dir: Some(dir.clone()),
+        filename: Some("out.bin".to_string()),
+        parse_filename: Some(false),
+        ..PartialConfig::default()
+    };
+    Record::new(Url::parse(&url).unwrap(), recorded)
+        .store(&fd)
+        .await
+        .expect("write the .fd");
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::at_path(
+        Url::parse(&url).unwrap(),
+        fd.clone(),
+        PartialConfig::default(),
+    )
+    .build(&tx)
+    .await
+    .expect("resuming with the crate defaults must resolve a path");
+    let canon = |p: &Path| std::fs::canonicalize(p).expect("canonicalize");
+    assert_eq!(
+        canon(ready.final_path.parent().unwrap()),
+        canon(fd.parent().unwrap()),
+        "the destination is resolved under the .fd's directory"
+    );
+
+    let handle = ready.start(StartMode::Auto, tx, &ctx);
+    while rx.recv().await.is_ok() {}
+    assert_eq!(handle.await, TerminationReason::Completed);
+
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .expect("read dir")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        leftovers.len(),
+        1,
+        "only the finished file remains: {leftovers:?}"
+    );
+    assert_eq!(
+        std::fs::read(dir.join(leftovers[0].clone())).unwrap(),
+        payload
+    );
+}
+
+/// `save_dir` is a new-download setting: a pinned `.fd` keeps its pair where it
+/// is instead of relocating the output to whatever the caller configured.
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_ignores_a_conflicting_save_dir() {
+    let payload = vec![0x2Bu8; 2048];
+    let (_server, url) = start_server(payload, "v1", true).await;
+    let pair_dir = temp_dir("resume_pair");
+    let other_dir = temp_dir("resume_other");
+    let fd = pair_dir.join("out.bin").with_added_extension("fd");
+    let recorded = PartialConfig {
+        save_dir: Some(pair_dir.clone()),
+        filename: Some("out.bin".to_string()),
+        parse_filename: Some(false),
+        ..PartialConfig::default()
+    };
+    Record::new(Url::parse(&url).unwrap(), recorded)
+        .store(&fd)
+        .await
+        .expect("write the .fd");
+
+    let (tx, _rx) = create_channel();
+    let ready = State::at_path(
+        Url::parse(&url).unwrap(),
+        fd.clone(),
+        make_config(&other_dir),
+    )
+    .build(&tx)
+    .await
+    .expect("build");
+
+    let canon = |p: &Path| std::fs::canonicalize(p).expect("canonicalize");
+    assert_eq!(
+        canon(ready.final_path.parent().unwrap()),
+        canon(fd.parent().unwrap()),
+        "the pair decides the directory, not save_dir: {}",
+        ready.final_path.display()
+    );
+    assert!(
+        std::fs::read_dir(&other_dir)
+            .expect("read dir")
+            .next()
+            .is_none(),
+        "nothing is planned inside the caller's unrelated save_dir"
+    );
+}
+
+/// A new download has no pair to inherit a directory from, so an empty
+/// `save_dir` is reported as such instead of failing to canonicalize "".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_download_without_save_dir_says_so() {
+    let (_server, url) = start_server(vec![1u8; 64], "v1", true).await;
+    let (tx, _rx) = create_channel();
+    let Err(err) = State::new(Url::parse(&url).unwrap(), PartialConfig::default())
+        .build(&tx)
+        .await
+    else {
+        panic!("a new download without save_dir must not resolve a path");
+    };
+    assert!(
+        matches!(err, fast_down_api::PlanError::MissingSaveDir),
+        "the failure names the missing setting: {err}"
+    );
+    assert!(
+        err.to_string().contains("save_dir"),
+        "the message names the missing setting: {err}"
+    );
+}
