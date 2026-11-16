@@ -588,18 +588,28 @@ async fn fresh_mode_redownloads_and_completes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cancellation_keeps_state_and_resume_completes() {
     let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 251) as u8).collect();
-    // Throttled so the run cannot finish before the cancel lands mid-transfer.
-    let (_server, url) =
-        start_server_throttled(payload.clone(), "v1", true, Some(Duration::from_millis(15))).await;
+    // Throttled so the run cannot finish before the cancel lands mid-transfer,
+    // and single-stream: with the pool split across workers the whole file can
+    // land in a few tens of milliseconds, which is the same order as the cancel
+    // round trip and made this assertion flaky.
+    let (_server, url) = start_server_throttled(
+        payload.clone(),
+        "v1",
+        true,
+        Some(Duration::from_millis(100)),
+    )
+    .await;
     let dir = temp_dir("cancel_resume");
     let (final_path, info) = probe(&url, &dir).await;
     // Seed a *complete* run's worth would finish too fast, so seed nothing and
     // let the throttled full download be interrupted instead.
     let _ = info;
+    let mut first_run = make_config(&dir);
+    first_run.threads = Some(1);
 
     let (tx, rx) = create_channel();
     let ctx = Ctx::new();
-    let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
+    let ready = State::new(Url::parse(&url).unwrap(), first_run)
         .build(&tx)
         .await
         .expect("build");
