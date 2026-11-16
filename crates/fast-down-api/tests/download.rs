@@ -270,9 +270,38 @@ async fn seed_partial(
     fd
 }
 
+/// Budget for one wait on a run's event channel. Generous — a throttled 1 MiB
+/// body still lands in well under a second — but finite, so a run that stops
+/// emitting without closing its channel fails the test that started it instead
+/// of hanging CI until the job-wide timeout hits with no test name attached.
+const RECV_BUDGET: Duration = Duration::from_secs(60);
+
+/// Wait for the next event, `None` once the channel is closed, and fail the test
+/// instead of hanging when the run goes quiet but never closes the channel.
+///
+/// # Panics
+///
+/// Panics when [`RECV_BUDGET`] elapses with the channel still open, naming the
+/// hang: a leaked `Tx` clone, or a task that never terminates.
+async fn next_event(rx: &Rx) -> Option<Event> {
+    let recv = timeout(RECV_BUDGET, rx.recv()).await.unwrap_or_else(|_| {
+        panic!(
+            "no event for {}s and the channel is still open, so this test would \
+             hang forever (a leaked `Tx` clone, or a task that never terminated)",
+            RECV_BUDGET.as_secs()
+        )
+    });
+    recv.ok()
+}
+
 /// Drive `start` to completion and return the outcome.
+///
+/// # Panics
+///
+/// Panics if the channel closes without a `Terminated`, or if the run stops
+/// producing events while leaving the channel open (see [`next_event`]).
 async fn run_to_end(rx: Rx) -> TerminationReason {
-    while let Ok(event) = rx.recv().await {
+    while let Some(event) = next_event(&rx).await {
         if let Event::Terminated(reason) = event {
             return reason;
         }
@@ -377,7 +406,7 @@ async fn reports_write_method_and_allocation() {
     // Collect events while the run proceeds.
     let collect = tokio::spawn(async move {
         let mut seen = Vec::new();
-        while let Ok(ev) = rx.recv().await {
+        while let Some(ev) = next_event(&rx).await {
             let done = matches!(ev, Event::Terminated(_));
             seen.push(ev);
             if done {
@@ -644,7 +673,7 @@ async fn second_run_on_the_same_fd_is_refused() {
 
     // Wait until the first run owns the pair.
     let mut started = false;
-    while let Ok(event) = rx.recv().await {
+    while let Some(event) = next_event(&rx).await {
         if matches!(event, Event::Start { .. }) {
             started = true;
             break;
@@ -660,7 +689,7 @@ async fn second_run_on_the_same_fd_is_refused() {
         .expect("second build");
     let second = ready2.start(StartMode::Auto, tx2, &ctx2);
     let mut events = Vec::new();
-    while let Ok(event) = rx2.recv().await {
+    while let Some(event) = next_event(&rx2).await {
         events.push(event);
     }
     assert!(
@@ -815,7 +844,7 @@ async fn ctx_sets_min_chunk_size_midflight() {
 
     // Wait until the transfer has started, then resize the live pool.
     let mut saw_pull = false;
-    while let Ok(event) = rx.recv().await {
+    while let Some(event) = next_event(&rx).await {
         if matches!(event, Event::PullProgress(..)) {
             saw_pull = true;
             break;
@@ -867,7 +896,7 @@ async fn handle_churns_both_setters_midflight() {
     let written = Arc::new(AtomicU64::new(0));
     let w = written.clone();
     let drain = tokio::spawn(async move {
-        while let Ok(event) = rx.recv().await {
+        while let Some(event) = next_event(&rx).await {
             match event {
                 Event::PushProgress(p) => {
                     w.fetch_add(p.end - p.start, Ordering::Relaxed);

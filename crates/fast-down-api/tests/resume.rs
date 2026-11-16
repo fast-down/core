@@ -304,13 +304,47 @@ fn make_config_with(save_dir: &Path, threads: usize, min_chunk_size: u64) -> Par
     }
 }
 
-/// Drain all events from `rx` until the task ends (channel closed).
-async fn drain(rx: Rx) -> Vec<Event> {
+/// Budget for draining a run's event channel to closure. Generous — the slowest
+/// scenario here is a throttled 5 MiB transfer — but finite, so a run that never
+/// closes its channel fails the test that started it instead of hanging CI until
+/// the job-wide timeout hits with no test name attached.
+const DRAIN_BUDGET: Duration = Duration::from_secs(60);
+
+/// Collect every event from `rx` until the channel closes, handing each one to
+/// `on_event` first. Unbounded on its own: [`drain_with`] is the entry point that
+/// bounds it.
+async fn collect_events(rx: Rx, mut on_event: impl FnMut(&Event)) -> Vec<Event> {
     let mut events = Vec::new();
     while let Ok(e) = rx.recv().await {
+        on_event(&e);
         events.push(e);
     }
     events
+}
+
+/// Drain all events from `rx` until the task ends (channel closed), failing the
+/// test instead of hanging when the run never closes it.
+///
+/// # Panics
+///
+/// Panics when [`DRAIN_BUDGET`] elapses with the channel still open, naming the
+/// hang: a leaked `Tx` clone, or a task that never terminates.
+async fn drain_with(rx: Rx, on_event: impl FnMut(&Event)) -> Vec<Event> {
+    timeout(DRAIN_BUDGET, collect_events(rx, on_event))
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the run never closed its event channel within {}s, so draining it \
+                 would hang forever (a leaked `Tx` clone, or a task that never \
+                 terminated)",
+                DRAIN_BUDGET.as_secs()
+            )
+        })
+}
+
+/// Drain all events from `rx` until the task ends (channel closed).
+async fn drain(rx: Rx) -> Vec<Event> {
+    drain_with(rx, |_| {}).await
 }
 
 // ---- shims mapping the old entry points onto the new `State`/`Ready` API ----
@@ -516,6 +550,11 @@ async fn partial_download_via_cancel(
 /// [`partial_download_via_cancel`] with an explicit config and cancel threshold,
 /// so a test can interrupt a concurrent run after enough workers have written to
 /// leave real resume progress behind.
+///
+/// # Panics
+///
+/// Panics if the run never closes its event channel; the wait is bounded by
+/// [`DRAIN_BUDGET`] via [`drain_with`].
 async fn partial_download_via_cancel_with(
     url: &str,
     cfg: PartialConfig,
@@ -525,7 +564,6 @@ async fn partial_download_via_cancel_with(
     let (tx, rx) = create_channel();
     download(Url::parse(url).expect("valid url"), cfg, tx, cancel.clone());
 
-    let mut events = Vec::new();
     let mut started = false;
     let mut written = 0u64;
     let mut cancelled_at = None;
@@ -534,11 +572,11 @@ async fn partial_download_via_cancel_with(
     // toward a genuinely concurrent layout instead of landing once only the
     // leading worker's writes had been flushed.
     let mut seen_far = false;
-    while let Ok(e) = rx.recv().await {
+    let events = drain_with(rx, |e| {
         if matches!(e, Event::Start { .. }) {
             started = true;
         }
-        if let Event::PushProgress(ref p) = e {
+        if let Event::PushProgress(p) = e {
             written += p.end - p.start;
             if p.start >= MULTI_RANGE_GAP {
                 seen_far = true;
@@ -548,8 +586,8 @@ async fn partial_download_via_cancel_with(
                 cancel.cancel();
             }
         }
-        events.push(e);
-    }
+    })
+    .await;
     assert!(started, "expected Event::Start during the partial download");
     let Some(cancelled_at) = cancelled_at else {
         panic!("expected at least {cancel_after} bytes written before cancelling (got {written})")
@@ -1066,15 +1104,22 @@ async fn test_resume_with_rotated_url_succeeds() {
         resume_cancel.clone(),
     );
     let mut started = false;
-    while let Ok(e) = rx.recv().await {
-        if matches!(e, Event::Start { .. }) {
-            started = true;
-            resume_cancel.cancel();
+    timeout(DRAIN_BUDGET, async {
+        while let Ok(e) = rx.recv().await {
+            if matches!(e, Event::Start { .. }) {
+                started = true;
+                resume_cancel.cancel();
+            }
+            if matches!(e, Event::Renamed(_) | Event::ResumeError(_)) {
+                break;
+            }
         }
-        if matches!(e, Event::Renamed(_) | Event::ResumeError(_)) {
-            break;
-        }
-    }
+    })
+    .await
+    .expect(
+        "the mid-resume cancel run never reached a terminal event within the drain budget, \
+         so this test would hang forever",
+    );
     assert!(started, "resume must emit Event::Start");
     assert!(
         part.exists() && fd.exists(),

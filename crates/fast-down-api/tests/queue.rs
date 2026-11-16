@@ -193,15 +193,46 @@ fn payload() -> Vec<u8> {
     (0..FILE_SIZE).map(|i| (i % 251) as u8).collect()
 }
 
+/// Budget for one wait on a queue's event channel. Generous — a throttled 512 KiB
+/// body still lands in well under a second — but finite, so a run that stops
+/// emitting without closing its channel fails the test that started it instead of
+/// hanging CI until the job-wide timeout hits with no test name attached.
+const RECV_BUDGET: Duration = Duration::from_secs(60);
+
+/// Wait for the next queued event, `None` once the channel is closed, and fail
+/// the test instead of hanging when the queue goes quiet but never closes the
+/// channel.
+///
+/// # Panics
+///
+/// Panics when [`RECV_BUDGET`] elapses with the channel still open, naming the
+/// hang: a leaked `QueueTx` clone, or a task that never terminates.
+async fn next_event<K: 'static>(rx: &QueueRx<K>) -> Option<QueueEvent<K>> {
+    let recv = timeout(RECV_BUDGET, rx.recv()).await.unwrap_or_else(|_| {
+        panic!(
+            "no queue event for {}s and the channel is still open, so this test \
+             would hang forever (a leaked `QueueTx` clone, or a task that never \
+             terminated)",
+            RECV_BUDGET.as_secs()
+        )
+    });
+    recv.ok()
+}
+
 /// Drain the queue channel, returning the peak number of tasks *downloading at
 /// once* (counted as started minus terminated, which is exact here because a
 /// task holds its slot from `Started` until its terminal event) and each task's
 /// terminal reason.
+///
+/// # Panics
+///
+/// Panics if the queue stops producing events while leaving the channel open
+/// (see [`next_event`]).
 async fn drain_events(rx: QueueRx<i32>, tasks: usize) -> (usize, Vec<(i32, TerminationReason)>) {
     let mut live = 0usize;
     let mut max_live = 0usize;
     let mut done: Vec<(i32, TerminationReason)> = Vec::new();
-    while let Ok(event) = rx.recv().await {
+    while let Some(event) = next_event(&rx).await {
         match event {
             QueueEvent::Started(_) => {
                 live += 1;
@@ -323,7 +354,7 @@ async fn events_are_tagged_with_the_callers_key() {
 
     let mut started: HashSet<i32> = HashSet::new();
     let mut terminated: HashSet<i32> = HashSet::new();
-    while let Ok(event) = rx.recv().await {
+    while let Some(event) = next_event(&rx).await {
         match event {
             QueueEvent::Started(id) => {
                 assert!(started.insert(id), "task {id} started twice");
@@ -417,7 +448,7 @@ async fn cancel_removes_a_waiting_task() {
         .unwrap();
 
     // Wait until the first task holds the only slot.
-    while let Ok(event) = rx.recv().await {
+    while let Some(event) = next_event(&rx).await {
         if matches!(event, QueueEvent::Started(1)) {
             break;
         }
