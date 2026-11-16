@@ -18,7 +18,7 @@
 
 ```rust,no_run
 extern crate std;
-use fast_steal::{Executor, Handle, Task, TaskQueue};
+use fast_steal::{Executor, Handle, StealOutcome, Task, TaskQueue};
 use std::{
     collections::HashMap,
     sync::atomic::{AtomicUsize, Ordering},
@@ -48,9 +48,10 @@ impl Handle for TokioHandle {
     }
     // Must report `true` for the id of the worker this handle was returned for.
     // Get this wrong (e.g. always `false`) and `steal` cannot authenticate the
-    // caller: it returns `false`, which the worker reads as "no work left" and
-    // exits -- while the waiting queue still holds work. No error, no panic,
-    // just permanently stranded tasks.
+    // caller: it reports `StealOutcome::Unregistered`, which a worker that only
+    // checks for `Refilled` reads as "no work left" and exits -- while the
+    // waiting queue still holds work. No error, no panic, just permanently
+    // stranded tasks.
     fn is_self(&self, id: &Self::Id) -> bool {
         self.id == *id
     }
@@ -80,7 +81,11 @@ impl Executor for TokioExecutor {
                     println!("task: {i} = {res}");
                     tx.send((i, res)).unwrap();
                 }
-                if !task_queue.steal(&id, &mut task, 1, speculative) {
+                // `Refilled` is the only outcome that hands this worker more
+                // work; `NoWork` and `Unregistered` both end its loop.
+                if task_queue.steal(&id, &mut task, 1, speculative)
+                    != StealOutcome::Refilled
+                {
                     break;
                 }
             }

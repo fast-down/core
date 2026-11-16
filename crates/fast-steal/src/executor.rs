@@ -26,9 +26,9 @@ pub trait Executor {
     /// - **The returned handle must identify the spawned worker.** Its
     ///   [`Handle::is_self`] must return `true` for the id the worker passes to
     ///   [`TaskQueue::steal`] — that handle is the worker's *only* registration
-    ///   key. If it fails to match, `steal` treats the worker as unregistered
-    ///   and returns `false`, which the worker cannot distinguish from "no work
-    ///   left": it exits while work may still be waiting.
+    ///   key. If it fails to match, `steal` reports
+    ///   [`StealOutcome::Unregistered`](crate::StealOutcome::Unregistered) and the
+    ///   worker exits while work may still be waiting.
     fn execute(&self, task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle;
 }
 
@@ -64,7 +64,7 @@ mod tests {
     //! Contract tests: these pin the *requirements* [`TaskQueue`] places on
     //! implementors of [`Executor`] / [`Handle`], which the trait signatures
     //! alone cannot express.
-    use crate::{Executor, Handle, Task, TaskQueue};
+    use crate::{Executor, Handle, StealOutcome, Task, TaskQueue};
     use core::cell::Cell;
 
     /// A runtime-free stub: `execute` spawns nothing and just returns a handle
@@ -120,20 +120,21 @@ mod tests {
     fn honest_is_self_lets_the_worker_steal_waiting_work() {
         let queue = queue_with_one_worker(true);
         let mut task = Task::new(0..0);
-        assert!(queue.steal(&0, &mut task, 1, 1));
+        assert_eq!(queue.steal(&0, &mut task, 1, 1), StealOutcome::Refilled);
         assert_eq!(task.get(), 10..20);
     }
 
-    /// A broken `is_self` (always `false`) makes `steal`
-    /// return `false` -- indistinguishable from "no work left" -- while the
-    /// waiting queue still holds `10..20`. The worker exits and that work is
-    /// silently stranded. Nothing in the trait signature or docs prevents this.
+    /// A broken `is_self` (always `false`) makes `steal` report
+    /// [`StealOutcome::Unregistered`] -- distinct from the
+    /// [`StealOutcome::NoWork`] a drained queue reports -- while the waiting queue
+    /// still holds `10..20`. A worker that treats any non-`Refilled` outcome as
+    /// "no work left" exits and silently strands that work.
     #[test]
     fn broken_is_self_strands_waiting_work() {
         let queue = queue_with_one_worker(false);
         let mut task = Task::new(0..0);
         // Same queue state as the honest twin above; only `is_self` differs.
-        assert!(!queue.steal(&0, &mut task, 1, 1));
+        assert_eq!(queue.steal(&0, &mut task, 1, 1), StealOutcome::Unregistered);
         // The caller's task was not refilled, yet 10..20 was never handed out.
         assert_eq!(task.get(), 0..0);
     }
@@ -146,7 +147,7 @@ mod tests {
         let queue = queue_with_one_worker(true);
         let mut task = Task::new(0..0);
         // Worker ids handed out so far: only 0. Id 7 was never registered.
-        assert!(!queue.steal(&7, &mut task, 1, 1));
+        assert_eq!(queue.steal(&7, &mut task, 1, 1), StealOutcome::Unregistered);
         assert_eq!(task.get(), 0..0);
     }
 }

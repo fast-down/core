@@ -23,6 +23,26 @@ compile_error!(
     "fast-steal needs a lock backend: enable the default `std` feature, or `spin` for `no_std`"
 );
 
+/// What [`TaskQueue::steal`] did with the caller's task.
+///
+/// Reported instead of a `bool` so the three cases stay distinguishable: a
+/// worker that was never registered is a programming error, whereas a worker
+/// that found no work is simply leaving. Both used to look like `false`, so a
+/// broken [`Handle::is_self`](crate::Handle::is_self) was indistinguishable from
+/// an empty queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[must_use]
+pub enum StealOutcome {
+    /// `task` now holds fresh work and the worker is registered against it.
+    Refilled,
+    /// The worker was registered but nothing was stealable. It has been
+    /// deregistered as a side effect (it is leaving); only
+    /// [`set_threads`](TaskQueue::set_threads) registers it again.
+    NoWork,
+    /// `id` matches no registered worker, so nothing was changed.
+    Unregistered,
+}
+
 /// A concurrent work-stealing queue that manages a set of [`Task`]s.
 ///
 /// Workers created by [`Executor::execute`] call [`steal`](TaskQueue::steal) to obtain
@@ -96,17 +116,25 @@ impl<H: Handle> TaskQueue<H> {
     /// and the stolen task has few enough strong references, shares that same task
     /// speculatively.
     ///
-    /// Returns `true` if `task` was refilled, or `false` if the worker is not
-    /// registered or no work could be found. A worker that finds no work is
-    /// deregistered as a side effect; only
-    /// [`set_threads`](TaskQueue::set_threads) registers it again.
+    /// Returns a [`StealOutcome`] describing the three possible outcomes:
+    /// - [`Refilled`](StealOutcome::Refilled): `task` now holds fresh work and
+    ///   the worker is registered against it.
+    /// - [`NoWork`](StealOutcome::NoWork): the worker was registered, but
+    ///   nothing was stealable. It is *deregistered* as a side effect — finding
+    ///   no work means it is leaving — and only
+    ///   [`set_threads`](TaskQueue::set_threads) registers it again.
+    /// - [`Unregistered`](StealOutcome::Unregistered): `id` matches no
+    ///   registered worker, e.g. because
+    ///   [`Handle::is_self`](crate::Handle::is_self) misidentifies its worker.
+    ///   Nothing is changed: no queue state is touched and no worker is
+    ///   deregistered.
     pub fn steal(
         &self,
         id: &H::Id,
         task: &mut Task,
         min_chunk_size: u64,
         max_speculative: usize,
-    ) -> bool {
+    ) -> StealOutcome {
         let min_chunk_size = min_chunk_size.max(1);
         let mut guard = self.inner.lock();
         let mut worker_idx = None;
@@ -117,7 +145,7 @@ impl<H: Handle> TaskQueue<H> {
             }
         }
         let Some(worker_idx) = worker_idx else {
-            return false;
+            return StealOutcome::Unregistered;
         };
         let mut found = false;
         while let Some(new_task) = guard.waiting.pop_front() {
@@ -143,10 +171,11 @@ impl<H: Handle> TaskQueue<H> {
         }
         if found {
             guard.running[worker_idx].0 = task.downgrade();
+            StealOutcome::Refilled
         } else {
             guard.running.remove(worker_idx);
+            StealOutcome::NoWork
         }
-        found
     }
     /// Returns `None` when threads need to be increased but the executor is `None`
     #[must_use]
@@ -215,14 +244,23 @@ impl<H: Handle> TaskQueue<H> {
     /// Aborts every running task equal to `task` that does not belong to the
     /// worker `id`.
     ///
-    /// The call is a no-op unless `id` identifies a currently registered worker.
-    /// An unregistered caller matches no entry in `running`, which makes the
-    /// `is_self` guard vacuous: *every* twin would be aborted, including the one
-    /// that should survive, leaving work in `waiting` with no worker to claim it.
-    /// A caller can legitimately reach this state after a
-    /// [`set_threads`](TaskQueue::set_threads) shrink deregisters it, because the
-    /// abort that follows is cooperative and the worker keeps running until it
-    /// observes the signal.
+    /// The call is a no-op unless `id` identifies a currently registered worker
+    /// whose own registry entry aliases `task` ( [`Task`] equality compares the
+    /// shared cursor, so a speculative twin counts as its peer's task). Both
+    /// guards are load-bearing:
+    ///
+    /// - An unregistered caller matches no entry in `running`, which makes the
+    ///   `is_self` guard vacuous: *every* twin would be aborted, including the
+    ///   one that should survive, leaving work in `waiting` with no worker to
+    ///   claim it. A caller can legitimately reach this state after a
+    ///   [`set_threads`](TaskQueue::set_threads) shrink deregisters it, because
+    ///   the abort that follows is cooperative and the worker keeps running
+    ///   until it observes the signal.
+    /// - A registered caller that passes *another* worker's `task` would abort
+    ///   and deregister that peer, whose remaining range is neither reclaimed
+    ///   nor kept. Requiring the caller to own the task it cancels turns such a
+    ///   mismatched call into a no-op instead of letting one worker destroy
+    ///   another's work.
     ///
     /// Aborted twins are *deregistered* (removed from `running`) so a later
     /// [`set_threads`](TaskQueue::set_threads) liveness sweep does not mistake
@@ -237,7 +275,14 @@ impl<H: Handle> TaskQueue<H> {
     /// carry the work to completion.
     pub fn cancel_task(&self, task: &Task, id: &H::Id) {
         let mut guard = self.inner.lock();
-        if !guard.running.iter().any(|(_, h)| h.is_self(id)) {
+        // Both guards at once: a registered caller, whose own entry aliases the
+        // task it claims to be cancelling twins of.
+        let owns_task = guard
+            .running
+            .iter()
+            .find(|(_, h)| h.is_self(id))
+            .is_some_and(|(weak, _)| weak.upgrade().is_some_and(|own| own == *task));
+        if !owns_task {
             return;
         }
         // Abort every twin whose task matches but is not the caller's own, and
@@ -258,7 +303,7 @@ impl<H: Handle> TaskQueue<H> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     extern crate std;
-    use crate::{Executor, Handle, Task, TaskQueue};
+    use crate::{Executor, Handle, StealOutcome, Task, TaskQueue};
     use std::{
         collections::{HashMap, HashSet},
         sync::{
@@ -304,7 +349,7 @@ mod tests {
                         };
                         tx.send((i, res)).unwrap();
                     }
-                    if !task_queue.steal(&(), &mut task, 1, speculative) {
+                    if task_queue.steal(&(), &mut task, 1, speculative) != StealOutcome::Refilled {
                         break;
                     }
                 }
@@ -458,7 +503,7 @@ mod tests {
                         tx.send((id, i, res)).unwrap();
                     }
                     tokio::task::yield_now().await;
-                    if !q.steal(&id, &mut task, 1, speculative) {
+                    if q.steal(&id, &mut task, 1, speculative) != StealOutcome::Refilled {
                         break;
                     }
                     *steals.lock().unwrap() += 1;
@@ -923,8 +968,9 @@ mod tests {
         );
     }
 
-    /// An unregistered caller gets exactly the same `false` a worker gets when the
-    /// queue is drained -- even with work sitting in `waiting`.
+    /// An unregistered caller is reported as [`StealOutcome::Unregistered`] — not
+    /// as the [`StealOutcome::NoWork`] a registered worker gets on an empty queue
+    /// — and nothing is consumed from `waiting`.
     #[test]
     fn steal_rejects_an_unregistered_worker() {
         let ex = SyncExecutor::new();
@@ -932,13 +978,54 @@ mod tests {
         q.set_threads(1, 1, Some(&ex)).unwrap();
         let _ = q.add(Task::new(500..510));
         let mut t = Task::new(0..0);
-        assert!(!q.steal(&999, &mut t, 1, 1));
+        assert_eq!(
+            q.steal(&999, &mut t, 1, 1),
+            StealOutcome::Unregistered,
+            "a caller that was never registered is a programming error"
+        );
         assert_eq!(t.get(), 0..0);
         assert_eq!(
             q.inner.lock().waiting.len(),
             1,
             "waiting must not be disturbed by an unknown caller"
         );
+    }
+
+    /// The three outcomes are distinct: `NoWork` deregisters the registered worker
+    /// that found nothing, whereas `Unregistered` changes nothing at all.
+    #[test]
+    fn steal_outcome_separates_no_work_from_unregistered() {
+        // Empty queue: the registered worker gets `NoWork` and is deregistered.
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new(core::iter::once(0..1));
+        q.set_threads(1, 1, Some(&ex)).unwrap();
+        let mut t = ex.task_of(0);
+        assert_eq!(q.steal(&0, &mut t, 1, 1), StealOutcome::NoWork);
+        assert_eq!(
+            q.inner.lock().running.len(),
+            0,
+            "`NoWork` deregisters the worker that found nothing"
+        );
+
+        // An id no handle recognises: `Unregistered`, with the queue untouched --
+        // the live worker stays registered and the waiting work stays available.
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new(core::iter::once(0..1));
+        q.set_threads(1, 1, Some(&ex)).unwrap();
+        let _ = q.add(Task::new(100..200));
+        let mut t = Task::new(0..0);
+        assert_eq!(q.steal(&999, &mut t, 1, 1), StealOutcome::Unregistered);
+        assert_eq!(
+            q.inner.lock().running.len(),
+            1,
+            "`Unregistered` deregisters nobody"
+        );
+        assert_eq!(
+            q.inner.lock().waiting.len(),
+            1,
+            "`Unregistered` consumes no work"
+        );
+        assert_eq!(t.get(), 0..0);
     }
 
     #[test]
@@ -948,7 +1035,7 @@ mod tests {
         q.set_threads(2, 1, Some(&ex)).unwrap();
         let _ = q.add(Task::new(500..510));
         let mut t = ex.task_of(0);
-        assert!(q.steal(&0, &mut t, 1, 1));
+        assert_eq!(q.steal(&0, &mut t, 1, 1), StealOutcome::Refilled);
         assert_eq!(t.get(), 500..510);
         assert_eq!(
             ex.task_of(1).get(),
@@ -971,7 +1058,7 @@ mod tests {
         let _ = q.add(corrupted_task());
         let _ = q.add(Task::new(500..510));
         let mut t = ex.task_of(0);
-        assert!(q.steal(&0, &mut t, 1, 1));
+        assert_eq!(q.steal(&0, &mut t, 1, 1), StealOutcome::Refilled);
         assert_eq!(t.get(), 500..510);
         assert_eq!(
             q.inner.lock().waiting.len(),
@@ -988,7 +1075,7 @@ mod tests {
         let q = TaskQueue::new(core::iter::once(0..1000));
         q.set_threads(1, 1, Some(&ex)).unwrap();
         let mut t = ex.task_of(0);
-        assert!(!q.steal(&0, &mut t, 1, 2));
+        assert_eq!(q.steal(&0, &mut t, 1, 2), StealOutcome::NoWork);
         assert_eq!(t.get(), 0..1000, "the caller's own range must be untouched");
     }
 
@@ -998,7 +1085,7 @@ mod tests {
         let q = TaskQueue::new([0..2, 10..14, 100..200].into_iter());
         q.set_threads(3, 1, Some(&ex)).unwrap();
         let mut t = ex.task_of(0);
-        assert!(q.steal(&0, &mut t, 1, 1));
+        assert_eq!(q.steal(&0, &mut t, 1, 1), StealOutcome::Refilled);
         // 100..200 has the most work left, so it -- not 10..14 -- is halved.
         assert_eq!(t.get(), 150..200);
         assert_eq!(ex.task_of(2).get(), 100..150);
@@ -1015,8 +1102,9 @@ mod tests {
     /// The two cases are tested separately because a worker that exhausts its
     /// task and finds no stealable work is deregistered from `running` (so a
     /// concurrent shrink does not mistakenly wait for it). In production a
-    /// worker exits after its first `steal` returns `false`; retrying with
-    /// different parameters on a deregistered worker is a test-only scenario.
+    /// worker exits after its first `steal` reports anything but
+    /// [`StealOutcome::Refilled`]; retrying with different parameters on a
+    /// deregistered worker is a test-only scenario.
     #[test]
     fn steal_shares_speculatively_only_when_allowed() {
         // Case 1: speculation disabled -> the crumb is left alone.
@@ -1024,7 +1112,7 @@ mod tests {
         let q = TaskQueue::new([0..1, 100..101].into_iter());
         q.set_threads(2, 1, Some(&ex)).unwrap();
         let mut t = ex.task_of(0);
-        assert!(!q.steal(&0, &mut t, 1, 1));
+        assert_eq!(q.steal(&0, &mut t, 1, 1), StealOutcome::NoWork);
         assert_eq!(t.get(), 0..1);
 
         // Case 2: speculation enabled -> the caller aliases the peer's state.
@@ -1032,7 +1120,7 @@ mod tests {
         let q = TaskQueue::new([0..1, 100..101].into_iter());
         q.set_threads(2, 1, Some(&ex)).unwrap();
         let mut t = ex.task_of(0);
-        assert!(q.steal(&0, &mut t, 1, 2));
+        assert_eq!(q.steal(&0, &mut t, 1, 2), StealOutcome::Refilled);
         assert_eq!(t.get(), 100..101);
         assert_eq!(t, ex.task_of(1), "speculation must alias, not copy");
     }
@@ -1050,13 +1138,13 @@ mod tests {
         // All crumbs tie on `remain`, and `max_by_key` documents that ties resolve
         // to the *last* element, so worker 0 joins worker 2.
         let mut t0 = ex.task_of(0);
-        assert!(q.steal(&0, &mut t0, 1, 2));
+        assert_eq!(q.steal(&0, &mut t0, 1, 2), StealOutcome::Refilled);
         ex.rebind(0, &t0);
         assert_eq!(t0, ex.task_of(2));
         // Worker 1 tries to become the third sharer of that same crumb and is
         // refused: the sharer count now exceeds the cap.
         let mut t1 = ex.task_of(1);
-        assert!(!q.steal(&1, &mut t1, 1, 2));
+        assert_eq!(q.steal(&1, &mut t1, 1, 2), StealOutcome::NoWork);
         assert_eq!(t1.get(), 1..2, "the refused worker keeps its own range");
     }
 
@@ -1071,7 +1159,7 @@ mod tests {
         let mut t = ex.task_of(0);
         // No panic, no silent disable: the caller keeps its own tiny range because
         // the split branch is simply never taken (`remain >= u64::MAX` is false).
-        assert!(!q.steal(&0, &mut t, u64::MAX, 1));
+        assert_eq!(q.steal(&0, &mut t, u64::MAX, 1), StealOutcome::NoWork);
         assert_eq!(
             t.get(),
             0..2,
@@ -1113,7 +1201,7 @@ mod tests {
         q.set_threads(2, 1, Some(&ex)).unwrap();
 
         let mut t0 = ex.task_of(0);
-        assert!(q.steal(&0, &mut t0, 1, 2));
+        assert_eq!(q.steal(&0, &mut t0, 1, 2), StealOutcome::Refilled);
         ex.rebind(0, &t0);
         // Both `running` entries now weak-point at one and the same cursor.
         let guard = q.inner.lock();
@@ -1158,17 +1246,24 @@ mod tests {
 
     /// `cancel_task` is the speculation cleanup path: when one sharer finishes the
     /// shared range it aborts the others, sparing the caller.
+    ///
+    /// The caller must own the task it passes. Worker 1 becomes a genuine twin by
+    /// aliasing worker 0's cursor: its own crumb cannot be split under the large
+    /// `min_chunk_size`, so `steal` takes the speculative-share branch.
     #[test]
     fn cancel_task_aborts_twins_but_spares_the_caller() {
         let ex = SyncExecutor::new();
         let q = TaskQueue::new([0..1, 100..101].into_iter());
         q.set_threads(2, 1, Some(&ex)).unwrap();
-        let mut t0 = ex.task_of(0);
-        assert!(q.steal(&0, &mut t0, 1, 2));
-        ex.rebind(0, &t0);
+
+        // Worker 1 shares worker 0's cursor rather than stealing a half range.
+        let mut t1 = ex.task_of(1);
+        assert_eq!(q.steal(&1, &mut t1, 10, 2), StealOutcome::Refilled);
+        ex.rebind(1, &t1);
+        assert_eq!(t1, ex.task_of(0), "worker 1 aliases worker 0's cursor");
 
         // Worker 1 finished the shared range and cancels its twins.
-        q.cancel_task(&t0, &1);
+        q.cancel_task(&t1, &1);
         assert_eq!(ex.aborted(), [0], "only the peer sharer is aborted");
         // The aborted twin is now deregistered, leaving only the
         // caller's own entry. (Previously it lingered in `running`.)
@@ -1182,15 +1277,25 @@ mod tests {
     /// `cancel_task` aborts and deregisters the twin but does **not** reclaim the
     /// remaining range into `waiting`: the caller's still-live task already owns
     /// that cursor, so reclaiming would double-execute. Called before the shared
-    /// range is finished (i.e. on live work) it strands the remainder by design.
+    /// range is finished (i.e. on live work) it loses nothing, because the caller
+    /// keeps the whole remainder.
     #[test]
     fn cancel_task_does_not_reclaim_unfinished_work() {
         let ex = SyncExecutor::new();
         let q = TaskQueue::new([0..1, 100..200].into_iter());
         q.set_threads(2, 1, Some(&ex)).unwrap();
-        let victim = ex.task_of(1);
-        assert_eq!(victim.remain(), 100);
-        q.cancel_task(&victim, &0);
+
+        // Worker 0 aliases worker 1's 100..200 cursor instead of splitting it:
+        // `min_chunk_size = 60` makes `remain < min_chunk_size * 2`, so
+        // `split_two` refuses and the speculative-share branch runs.
+        let mut t0 = ex.task_of(0);
+        assert_eq!(q.steal(&0, &mut t0, 60, 2), StealOutcome::Refilled);
+        ex.rebind(0, &t0);
+        assert_eq!(t0, ex.task_of(1), "worker 0 aliases worker 1's cursor");
+        assert_eq!(t0.remain(), 100);
+
+        // Worker 0 cancels its twin while the shared range is still unfinished.
+        q.cancel_task(&t0, &0);
         assert_eq!(ex.aborted(), [1]);
         assert_eq!(
             q.inner.lock().running.len(),
@@ -1201,6 +1306,41 @@ mod tests {
             q.inner.lock().waiting.len(),
             0,
             "100 units of unfinished work were intentionally NOT reclaimed (would double-execute)"
+        );
+        assert_eq!(
+            t0.remain(),
+            100,
+            "the caller's cursor still owns every remaining unit"
+        );
+    }
+
+    /// A registered worker that passes *another* worker's task must not be able to
+    /// cancel it.
+    ///
+    /// Without the ownership guard, `retain_mut` aborts and deregisters that peer
+    /// on the caller's behalf, and the peer's remaining range is neither
+    /// reclaimed into `waiting` nor kept by anyone: it is simply lost.
+    #[test]
+    fn cancel_task_ignores_a_peer_task_passed_by_a_registered_caller() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new([0..1, 100..200].into_iter());
+        q.set_threads(2, 1, Some(&ex)).unwrap();
+
+        let peer = ex.task_of(1);
+        assert_eq!(peer.remain(), 100);
+        // Worker 0 does not own `peer`'s cursor, so this must be a complete no-op.
+        q.cancel_task(&peer, &0);
+
+        assert!(
+            ex.aborted().is_empty(),
+            "a caller that does not own the task must not abort its owner"
+        );
+        assert_eq!(q.inner.lock().running.len(), 2, "no worker deregistered");
+        assert_eq!(q.inner.lock().waiting.len(), 0, "nothing was reclaimed");
+        assert_eq!(
+            ex.task_of(1).remain(),
+            100,
+            "the peer keeps its whole range"
         );
     }
 
@@ -1261,16 +1401,17 @@ mod tests {
         q.set_threads(1, 1, Some(&ex)).unwrap();
 
         let mut t = ex.task_of(0);
-        // No work anywhere: steal fails and deregisters worker 0.
-        assert!(!q.steal(&0, &mut t, 1, 1));
+        // No work anywhere: steal reports `NoWork` and deregisters worker 0.
+        assert_eq!(q.steal(&0, &mut t, 1, 1), StealOutcome::NoWork);
         assert_eq!(q.inner.lock().running.len(), 0, "worker deregistered");
 
         // Add fresh work to waiting.
         let _ = q.add(Task::new(100..200));
         assert_eq!(q.inner.lock().waiting.len(), 1);
 
-        // The deregistered worker still cannot steal.
-        assert!(!q.steal(&0, &mut t, 1, 1));
+        // The deregistered worker still cannot steal -- and now says so
+        // explicitly instead of reporting the same `NoWork` as an empty queue.
+        assert_eq!(q.steal(&0, &mut t, 1, 1), StealOutcome::Unregistered);
         assert_eq!(
             q.inner.lock().waiting.len(),
             1,
@@ -1304,8 +1445,8 @@ mod tests {
             let q = q.clone();
             let mut t = ex.task_of(id);
             handles.push(thread::spawn(move || {
-                let ok = q.steal(&id, &mut t, 1, 1);
-                (id, ok, t.get())
+                let outcome = q.steal(&id, &mut t, 1, 1);
+                (id, outcome, t.get())
             }));
         }
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
@@ -1313,7 +1454,7 @@ mod tests {
         // All 4 succeed (4 waiting tasks available).
         let stolen: Vec<_> = results
             .iter()
-            .filter(|(_, ok, _)| *ok)
+            .filter(|(_, outcome, _)| *outcome == StealOutcome::Refilled)
             .map(|(_, _, r)| r.clone())
             .collect();
         assert_eq!(stolen.len(), 4, "all 4 workers got work from waiting");
@@ -1350,15 +1491,19 @@ mod tests {
             let q = q.clone();
             let mut t = ex.task_of(id);
             handles.push(thread::spawn(move || {
-                let ok = q.steal(&id, &mut t, 1, 1);
-                (id, ok, t.get())
+                let outcome = q.steal(&id, &mut t, 1, 1);
+                (id, outcome, t.get())
             }));
         }
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         // All 3 must succeed by splitting the fat peer.
-        for (id, ok, range) in &results {
-            assert!(ok, "worker {id} failed to steal via split");
+        for (id, outcome, range) in &results {
+            assert_eq!(
+                *outcome,
+                StealOutcome::Refilled,
+                "worker {id} failed to steal via split"
+            );
             assert!(range.end - range.start > 0, "worker {id} got empty range");
         }
 
@@ -1418,7 +1563,7 @@ mod tests {
 
         // Worker 0 speculatively aliases worker 1's cursor (5..10).
         let mut t0 = ex.task_of(0);
-        assert!(q.steal(&0, &mut t0, 10, 2));
+        assert_eq!(q.steal(&0, &mut t0, 10, 2), StealOutcome::Refilled);
         ex.rebind(0, &t0);
         assert_eq!(t0, ex.task_of(1), "worker 0 now aliases worker 1's cursor");
 

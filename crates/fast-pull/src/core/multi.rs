@@ -8,7 +8,7 @@ use core::{
     time::Duration,
 };
 use crossfire::{MAsyncTx, MTx, RecvTimeoutError, WeakTx, mpmc, mpsc};
-use fast_steal::{Executor, Handle, Task, TaskQueue};
+use fast_steal::{Executor, Handle, StealOutcome, Task, TaskQueue};
 use futures::TryStreamExt;
 use std::sync::{Arc, OnceLock};
 use tokio_util::sync::CancellationToken;
@@ -252,7 +252,9 @@ where
                 let mut start = task.start();
                 if start >= task.end() {
                     let current_min = min_chunk_size.load(Ordering::Relaxed);
-                    if task_queue.steal(&id, &mut task, current_min, max_speculative) {
+                    if task_queue.steal(&id, &mut task, current_min, max_speculative)
+                        == StealOutcome::Refilled
+                    {
                         continue 'task;
                     }
                     break 'task;

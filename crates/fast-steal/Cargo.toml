@@ -25,8 +25,11 @@ spin = { version = "0.12", default-features = false, features = [
 
 [features]
 default = ["std"]
-# Exactly one lock backend must be selected (they are mutually exclusive; CI
-# passes `--mutually-exclusive-features std,spin --at-least-one-of std,spin`).
+# One lock backend must be selected: `task_queue` emits a `compile_error!` when
+# neither is on. Select exactly one -- with both enabled `std` wins and the
+# `spin` path is not compiled at all, which builds and tests fine while silently
+# leaving `spin` untested. CI therefore runs the matrix with
+# `--mutually-exclusive-features std,spin --at-least-one-of std,spin`.
 #
 # `std` (default) backs the queue with `parking_lot::Mutex`, a blocking lock that
 # parks waiting threads. On `no_std`, disable default features and enable `spin`
