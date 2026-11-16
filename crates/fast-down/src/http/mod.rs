@@ -84,6 +84,71 @@ pub type GetHeader<Client> = <GetResponse<Client> as HttpResponse>::Headers;
 /// Projected header-get error type for a given client.
 pub type GetHeaderError<Client> = <GetHeader<Client> as HttpHeaders>::GetHeaderError;
 
+/// A byte-range `Content-Range` header value (RFC 9110 §14.4).
+///
+/// The downloader and the prefetch probe ask different questions about the same
+/// header, so they share this one parser: the downloader needs the body's first
+/// byte, the probe needs to know whether the answer is the `bytes 0-0/<size>` it
+/// asked for. One parser keeps the two answers consistent, so any value the
+/// downloader reads an offset from also counts as range support.
+///
+/// The range unit is matched case-insensitively and whitespace is tolerated
+/// around both the unit and the byte offsets, because servers in the wild send
+/// `Bytes 0-0/1024`, `bytes  0-0/1024`, and `bytes 0-0 / 1024`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ContentRange {
+    /// The first byte offset of the enclosed range; `None` for the unsatisfied
+    /// form `bytes */<size>`.
+    first: Option<u64>,
+    /// The last byte offset of the enclosed range, together with `first`.
+    last: Option<u64>,
+}
+
+impl ContentRange {
+    /// Parse `raw`. `None` means "not a byte range at all": a different or
+    /// missing range unit, or a value with no `first-last` part.
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        // The unit is the leading run of ASCII letters. Finding it by character
+        // instead of by a fixed byte index keeps every slice on a UTF-8
+        // boundary, so a multi-byte header value can never panic the parser.
+        let unit_end = trimmed
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(trimmed.len());
+        if !trimmed[..unit_end].eq_ignore_ascii_case("bytes") {
+            return None;
+        }
+        let rest = trimmed[unit_end..].trim_start();
+        // Neither caller uses the complete length, so its presence is not
+        // required: a truncated value still yields the offsets it does carry.
+        let (range, _size) = rest.split_once('/').unwrap_or((rest, ""));
+        // `bytes */<size>` answers an unsatisfiable range: a valid value, but
+        // it describes no body offset.
+        if range.trim() == "*" {
+            return Some(Self {
+                first: None,
+                last: None,
+            });
+        }
+        let (first, last) = range.split_once('-')?;
+        Some(Self {
+            first: Some(first.trim().parse().ok()?),
+            last: Some(last.trim().parse().ok()?),
+        })
+    }
+
+    /// The first byte offset the response body starts at.
+    pub(crate) const fn first_byte(self) -> Option<u64> {
+        self.first
+    }
+
+    /// Whether this is the `bytes 0-0/<size>` answer to a `Range: bytes=0-0`
+    /// probe: a `bytes` range enclosing exactly byte 0.
+    pub(crate) const fn is_zero_probe(self) -> bool {
+        matches!((self.first, self.last), (Some(0), Some(0)))
+    }
+}
+
 /// Errors that can occur during HTTP download operations.
 ///
 /// Maps to the various stages of an HTTP request: building, streaming chunks,
@@ -143,12 +208,101 @@ impl<C: HttpClient> PullerError for HttpError<C> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use super::{HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse};
+    use super::{
+        ContentRange, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse,
+        prefetch::advertises_zero_range, puller::content_range_start,
+    };
     use crate::url_info::FileId;
     use bytes::Bytes;
     use fast_pull::{PullResult, PullerError};
     use std::{borrow::Cow, future::Future};
     use url::Url;
+
+    /// A header map holding a single `content-range` value; every other header
+    /// reads as absent.
+    struct RangeHeader(&'static str);
+    impl HttpHeaders for RangeHeader {
+        type GetHeaderError = std::convert::Infallible;
+        fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
+            Ok(Cow::Borrowed(if header == "content-range" {
+                self.0
+            } else {
+                ""
+            }))
+        }
+    }
+
+    /// The shared parser's own contract, independent of either call site.
+    #[test]
+    fn content_range_parser_reads_units_and_offsets() {
+        for raw in [
+            "bytes 0-0/1024",
+            "Bytes 0-0/1024",
+            "bytes  0-0/1024",
+            "bytes\t0-0/1024",
+            " bytes 0-0/1024 ",
+            "bytes 0 - 0 / 1024",
+            "bytes0-0/1024",
+        ] {
+            let parsed = ContentRange::parse(raw).unwrap();
+            assert_eq!(parsed.first_byte(), Some(0), "start offset of {raw:?}");
+            assert!(parsed.is_zero_probe(), "{raw:?} encloses byte 0 only");
+        }
+
+        // The complete length is irrelevant to both answers, and so is the last
+        // offset beyond its use in `is_zero_probe`.
+        let ranged = ContentRange::parse("bytes 5-9/20").unwrap();
+        assert_eq!(ranged.first_byte(), Some(5));
+        assert!(!ranged.is_zero_probe());
+
+        // The unsatisfied form is a valid value that names no body offset.
+        let unsatisfied = ContentRange::parse("bytes */1024").unwrap();
+        assert_eq!(unsatisfied.first_byte(), None);
+        assert!(!unsatisfied.is_zero_probe());
+
+        // A different unit is not a byte range at all.
+        assert_eq!(ContentRange::parse("items 0-0/1024"), None);
+        // Nor is a value with no range part.
+        assert_eq!(ContentRange::parse("bytes"), None);
+        assert_eq!(ContentRange::parse(""), None);
+
+        // Multi-byte UTF-8 must be rejected, never sliced mid-character.
+        assert_eq!(ContentRange::parse("字节 0-0/1024"), None);
+        assert_eq!(ContentRange::parse("bytes 😀"), None);
+    }
+
+    /// Both call sites read the same header for the same server, so for every
+    /// value they must agree on whether a `bytes 0-0` probe was answered: the
+    /// probe is true exactly when the downloader sees an offset of 0.
+    ///
+    /// The bug this guards: the probe used to require the literal prefix
+    /// `bytes 0-0/`, so `bytes  0-0/1024` was range-capable for the downloader
+    /// and not for the probe, and a large file silently degraded to one stream.
+    #[test]
+    fn both_content_range_call_sites_agree() {
+        let cases: &[(&str, Option<u64>)] = &[
+            ("bytes 0-0/1024", Some(0)),
+            ("Bytes 0-0/1024", Some(0)),
+            ("bytes  0-0/1024", Some(0)),
+            ("bytes\t0-0/1024", Some(0)),
+            (" bytes 0-0/1024 ", Some(0)),
+            ("bytes */1024", None),
+            ("bytes 5-9/20", Some(5)),
+            ("items 0-0/1024", None),
+            ("", None),
+            ("字节 0-0/1024", None),
+        ];
+        for &(raw, expected_start) in cases {
+            let headers = RangeHeader(raw);
+            let start = content_range_start(&headers);
+            assert_eq!(start, expected_start, "downloader's offset for {raw:?}");
+            assert_eq!(
+                advertises_zero_range(&headers),
+                expected_start == Some(0),
+                "the probe must accept exactly the 0-0 values the downloader accepts, for {raw:?}"
+            );
+        }
+    }
 
     #[derive(Clone, Debug)]
     struct MockClient;

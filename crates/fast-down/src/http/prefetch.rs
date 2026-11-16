@@ -8,8 +8,8 @@
 use crate::{
     UrlInfo,
     http::{
-        ContentDisposition, GetRequestError, GetResponse, HttpClient, HttpError, HttpHeaders,
-        HttpRequestBuilder, HttpResponse,
+        ContentDisposition, ContentRange, GetRequestError, GetResponse, HttpClient, HttpError,
+        HttpHeaders, HttpRequestBuilder, HttpResponse,
     },
     url_info::FileId,
 };
@@ -104,6 +104,20 @@ async fn prefetch_no_range<Client: HttpClient>(
     ))
 }
 
+/// Whether a probe response advertises the `bytes 0-0/<size>` answer to a
+/// `Range: bytes=0-0` request.
+///
+/// Uses the same `ContentRange` parser as the downloader: a value the
+/// downloader reads an offset from must also count as range support here, or a
+/// large file silently degrades to a single stream.
+pub(super) fn advertises_zero_range(headers: &impl HttpHeaders) -> bool {
+    headers
+        .get("content-range")
+        .ok()
+        .and_then(|raw| ContentRange::parse(&raw))
+        .is_some_and(ContentRange::is_zero_probe)
+}
+
 async fn is_support_range<Client: HttpClient>(
     client: &Client,
     url: Url,
@@ -113,11 +127,7 @@ async fn is_support_range<Client: HttpClient>(
         .send()
         .await
         .map_err(|(e, d)| (HttpError::Request(e), d))?;
-    let headers = resp.headers();
-    let supports_range = headers
-        .get("content-range")
-        .is_ok_and(|v| v.trim_start().to_lowercase().starts_with("bytes 0-0/"));
-    Ok(supports_range)
+    Ok(advertises_zero_range(resp.headers()))
 }
 
 #[cfg(test)]
@@ -132,6 +142,75 @@ mod tests {
         type GetHeaderError = std::convert::Infallible;
         fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
             Ok(Cow::Borrowed(self.0.get(header).map_or("", String::as_str)))
+        }
+    }
+
+    /// A client whose single response carries exactly the given `content-range`
+    /// value; every other header reads as absent.
+    #[derive(Clone, Debug)]
+    struct RangeClient(&'static str);
+    impl HttpClient for RangeClient {
+        type RequestBuilder = RangeRequestBuilder;
+        fn get(&self, _url: Url, _range: Option<fast_pull::ProgressEntry>) -> Self::RequestBuilder {
+            RangeRequestBuilder(self.0)
+        }
+    }
+    struct RangeRequestBuilder(&'static str);
+    impl HttpRequestBuilder for RangeRequestBuilder {
+        type Response = RangeResponse;
+        type RequestError = std::convert::Infallible;
+        fn send(
+            self,
+        ) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> + Send {
+            std::future::ready(Ok(RangeResponse {
+                headers: RangeHeaders(self.0),
+                url: Url::parse("http://mock-url/").unwrap(),
+            }))
+        }
+    }
+    #[derive(Debug)]
+    struct RangeResponse {
+        headers: RangeHeaders,
+        url: Url,
+    }
+    impl HttpResponse for RangeResponse {
+        type Headers = RangeHeaders;
+        type ChunkError = std::convert::Infallible;
+        fn headers(&self) -> &Self::Headers {
+            &self.headers
+        }
+        fn url(&self) -> &Url {
+            &self.url
+        }
+        fn chunk(
+            &mut self,
+        ) -> impl Future<Output = Result<Option<bytes::Bytes>, Self::ChunkError>> + Send {
+            std::future::ready(Ok(None))
+        }
+    }
+    #[derive(Debug)]
+    struct RangeHeaders(&'static str);
+    impl HttpHeaders for RangeHeaders {
+        type GetHeaderError = std::convert::Infallible;
+        fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
+            Ok(Cow::Borrowed(if header == "content-range" {
+                self.0
+            } else {
+                ""
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_accepts_every_zero_start_content_range() {
+        let url = Url::parse("http://localhost/").unwrap();
+        for value in ["bytes 0-0/1024", "Bytes 0-0/1024", "bytes  0-0/1024"] {
+            assert!(
+                is_support_range(&RangeClient(value), url.clone())
+                    .await
+                    .unwrap(),
+                "{value:?} advertises the range support the downloader accepts"
+            );
         }
     }
 

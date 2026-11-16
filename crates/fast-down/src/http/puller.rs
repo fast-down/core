@@ -9,7 +9,8 @@
 //! `Range` cannot have its whole-file body written at the requested offset.
 
 use crate::http::{
-    FileId, GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse,
+    ContentRange, FileId, GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder,
+    HttpResponse,
 };
 use async_stream::stream;
 use fast_pull::{ProgressEntry, PullResult, PullStream, Puller};
@@ -65,16 +66,12 @@ impl<Client: HttpClient> HttpPuller<Client> {
 /// The first byte offset a response body starts at, read from `Content-Range`.
 ///
 /// Accepts `bytes <start>-<end>/<size>`; the `bytes */<size>` form (no body
-/// range) and any malformed value yield `None`. The range unit is a
-/// case-insensitive token, so `Bytes 0-` is accepted too.
-fn content_range_start(headers: &impl HttpHeaders) -> Option<u64> {
+/// range) and any malformed value yield `None`. The parsing rules — the
+/// case-insensitive unit and the tolerated whitespace — live in `ContentRange`,
+/// shared with the prefetch probe so the two cannot disagree.
+pub(super) fn content_range_start(headers: &impl HttpHeaders) -> Option<u64> {
     let raw = headers.get("content-range").ok()?;
-    let trimmed = raw.trim();
-    if !trimmed.as_bytes().get(..5)?.eq_ignore_ascii_case(b"bytes") {
-        return None;
-    }
-    let (start, _) = trimmed[5..].trim_start().split_once('-')?;
-    start.trim().parse().ok()
+    ContentRange::parse(&raw)?.first_byte()
 }
 
 impl<Client: HttpClient> Debug for HttpPuller<Client> {
