@@ -75,6 +75,29 @@ jobs:
       - name: Run Tests (all features)
         run: cargo test --all-features --verbose
 
+  bare-metal:
+    name: No-std Build (thumbv7em-none-eabi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add bare-metal target
+        run: rustup target add thumbv7em-none-eabi
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "ubuntu-stable-bare-metal"
+          add-job-id-key: "false"
+          cache-on-failure: "true"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+      # A bare-metal target has no `std` to run a test harness on, so this job
+      # only proves the `no_std` path compiles: `std` off, `spin` backend on.
+      # It is a separate job so it can be dropped or pinned to nightly on its
+      # own if the target ever needs it.
+      - name: Build fast-steal (no_std, spin backend)
+        run: cargo build -p fast-steal --no-default-features --features spin --target thumbv7em-none-eabi
+
   deny:
     name: Cargo Deny
     runs-on: ubuntu-latest
