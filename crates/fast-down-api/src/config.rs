@@ -32,7 +32,36 @@ pub struct Config {
     pub parse_filename: bool,
 
     /// Output file name. Used as-is unless [`Config::parse_filename`] also
-    /// expands it as a `{...}` template.
+    /// treats it as a template.
+    ///
+    /// With [`Config::parse_filename`] enabled, the template is expanded in two
+    /// passes:
+    ///
+    /// 1. chrono `strftime` `%`-sequences against the **local** time, so
+    ///    `%Y-%m-%d` becomes the current date.
+    /// 2. The `{host}`, `{parent_path}`, `{file_name}`, `{file_stem}` and
+    ///    `{file_ext}` placeholders, in that order, over the already
+    ///    time-expanded string.
+    ///
+    /// Time expansion is all-or-nothing: if any `%`-sequence is invalid (`%Q`,
+    /// a lone trailing `%`), the time pass is skipped and the template is kept
+    /// verbatim, while the `{...}` placeholders still expand. A `%` inside a
+    /// placeholder's value is never re-expanded, because placeholders are
+    /// substituted after the time pass.
+    ///
+    /// # Time-dependent names and resume
+    ///
+    /// The default state file is `<final>.fd`, derived from the resolved output
+    /// path. A `%`-bearing template therefore makes that location depend on the
+    /// moment the path is resolved: state written yesterday lands under
+    /// yesterday's date, today's [`crate::State::new`] probes today's path,
+    /// finds nothing, and silently restarts a full download. The same template
+    /// also resolves differently in different time zones and on different days,
+    /// so callers must not cache the resolved path across such a change.
+    ///
+    /// To resume a run that used a `%`-bearing template, pin the state file
+    /// with [`crate::State::at_path`] instead of relying on the default
+    /// `<final>.fd` location.
     pub filename: String,
 
     /// Number of threads. Recommended: `32` / `16` / `8`. More threads does not always mean faster.

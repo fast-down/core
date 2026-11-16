@@ -81,6 +81,53 @@ println!("ended: {:?}", handle.await);
 # }
 ```
 
+### Naming the output file
+
+`PartialConfig::filename` is used verbatim unless `parse_filename` is also set.
+With `parse_filename`, it becomes a template expanded in two passes:
+
+1. chrono `strftime` `%`-sequences against the **local** time — `%Y-%m-%d`
+   becomes today's date.
+2. The `{...}` placeholders below, over the already-expanded string.
+
+| Placeholder | Expands to |
+| ----------- | ---------- |
+| `{host}` | The URL's host, or `unknown` when it has none. |
+| `{parent_path}` | The URL's directory segments joined with the platform separator (`.` when there are none). |
+| `{file_name}` | The remote file name. |
+| `{file_stem}` | `{file_name}` without its last extension. |
+| `{file_ext}` | The last extension, including its dot. |
+
+`{parent_path}` may add subdirectories under `save_dir`; a template can never
+resolve outside it.
+
+Time expansion is all-or-nothing: an invalid sequence (`%Q`, a lone trailing
+`%`) skips the time pass and survives literally, while the placeholders still
+expand. A `%` inside a placeholder's value stays literal too, because the
+placeholders are substituted after the time pass.
+
+> **A `%` in the template makes resume time-dependent.** The default state file
+> is `<final>.fd`, derived from the resolved path, so a run started yesterday
+> records its state under yesterday's date; today's `State::new` probes today's
+> path, finds nothing, and silently downloads the whole file again. The same
+> template also resolves differently in another time zone or on another day, so
+> do not cache the resolved path. To resume such a run, pin its state file with
+> `State::at_path`.
+
+```rust,no_run
+use fast_down_api::PartialConfig;
+use std::path::PathBuf;
+
+let config = PartialConfig {
+    save_dir: Some(PathBuf::from("./downloads")),
+    // e.g. ./downloads/2026/11/15/example.com/report.pdf
+    filename: Some("%Y/%m/%d/{host}/{file_name}".to_string()),
+    parse_filename: Some(true),
+    ..Default::default()
+};
+# let _ = config;
+```
+
 ### Resuming a specific `.fd`
 
 When you already know where a state file lives — a UI rebuilding a list of
@@ -275,6 +322,11 @@ Resolving a download against the remote:
    - matching identity and a long-enough `.part` → `Resumable`,
    - a changed remote or a truncated `.part` → `Mismatch`,
    - no `.fd` (or a missing `.part`) → `Fresh`.
+
+The default `<final>.fd` is derived from the resolved output path, so a
+`filename` template containing `%`-sequences moves it with the date (see
+[Naming the output file](#naming-the-output-file)). Pin the state file with
+`State::at_path` when resuming such a template.
 
 Cancellation leaves both files in place, so a later resolve can pick up exactly
 where the run stopped. A run cancelled before any byte was recorded removes the
