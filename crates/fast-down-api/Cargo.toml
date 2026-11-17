@@ -58,7 +58,7 @@ humantime-serde = "1"
 [dev-dependencies]
 bytes = { workspace = true }
 futures = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
 http-body-util = "0.1"

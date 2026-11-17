@@ -137,7 +137,10 @@ pub struct Config {
 
     /// Default retry interval after a request failure. Recommended: `500ms`
     ///
-    /// If the server returns a `Retry-After` header, that value takes precedence.
+    /// If the server returns a `Retry-After` header, that value takes precedence,
+    /// clamped to one minute: the header is untrusted, and the prefetch attempt
+    /// it delays cannot be cancelled. This gap is the caller's own choice and is
+    /// used as configured.
     #[config(default = Duration::from_millis(500))]
     #[config(partial_attr(serde(with = "humantime_serde::option")))]
     #[config(partial_attr(serde(default)))]

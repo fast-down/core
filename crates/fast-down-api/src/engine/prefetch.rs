@@ -5,7 +5,33 @@ use fast_down::{
     http::Prefetch,
 };
 use reqwest::Response;
+use std::time::Duration;
 use url::Url;
+
+/// Longest wait a single retry may take when the server sends `Retry-After`.
+///
+/// `Retry-After` is untrusted input, and nothing can interrupt
+/// [`prefetch`] once it is awaiting: [`State::build`](crate::State::build) is
+/// only ever stopped by dropping its future, and the queue holds the slot for
+/// the whole build. A server answering `503 + Retry-After: 3600` would park the
+/// build — and that slot — for an hour. The header is therefore honoured up to
+/// this ceiling and no further. There is deliberately no give-up path: the
+/// download must eventually finish, and retrying is how it gets there; the cap
+/// only makes the next attempt come sooner.
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(60);
+
+/// How long to wait before the next metadata attempt.
+///
+/// A server-provided `Retry-After` is clamped to [`MAX_RETRY_WAIT`];
+/// [`Config::retry_gap`] is the caller's own knob and is used as configured.
+#[must_use]
+fn retry_wait(retry_after: Option<Duration>, gap: Duration) -> Duration {
+    match retry_after {
+        Some(server) if server > MAX_RETRY_WAIT => MAX_RETRY_WAIT,
+        Some(server) => server,
+        None => gap,
+    }
+}
 
 /// Resolve the remote file's metadata, retrying up to
 /// [`Config::retry_times`](crate::Config::retry_times).
@@ -58,7 +84,7 @@ pub async fn prefetch(
                     return Err(PlanError::Prefetch(e));
                 }
                 let _ = tx.send(Event::PrefetchError(e));
-                tokio::time::sleep(t.unwrap_or(config.retry_gap)).await;
+                tokio::time::sleep(retry_wait(t, config.retry_gap)).await;
             }
         }
     }
@@ -77,6 +103,7 @@ mod tests {
     use hyper::body::Incoming;
     use hyper::header::{
         ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, LAST_MODIFIED, RANGE,
+        RETRY_AFTER,
     };
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
@@ -84,6 +111,7 @@ mod tests {
     use hyper_util::rt::TokioIo;
     use std::convert::Infallible;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn prefetch_gives_up_after_retries_on_transport_error() {
@@ -238,6 +266,111 @@ mod tests {
         assert!(
             saw_prefetch,
             "prefetch must emit Event::Prefetch on the success path"
+        );
+    }
+
+    /// A server that rejects every request with `503` and the given
+    /// `Retry-After`, counting how many requests it served.
+    async fn retry_after_server(
+        retry_after: &'static str,
+    ) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let served = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let hits = served.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |_req: Request<Incoming>| {
+                        let hits = hits.clone();
+                        async move {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, Infallible>(
+                                Response::builder()
+                                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                                    .header(RETRY_AFTER, retry_after)
+                                    .body(Full::new(Bytes::new()))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (addr, hits)
+    }
+
+    #[test]
+    fn retry_wait_caps_the_server_header() {
+        // `Retry-After` is untrusted and the attempt it delays cannot be
+        // interrupted, so an hour-long header must not be slept verbatim.
+        assert_eq!(
+            retry_wait(Some(Duration::from_secs(3600)), Duration::from_millis(500)),
+            MAX_RETRY_WAIT,
+            "a hostile Retry-After must be clamped to the documented ceiling"
+        );
+        assert_eq!(
+            retry_wait(Some(Duration::from_secs(5)), Duration::from_millis(500)),
+            Duration::from_secs(5),
+            "a Retry-After below the ceiling is still honoured as sent"
+        );
+        assert_eq!(
+            retry_wait(None, Duration::from_millis(500)),
+            Duration::from_millis(500),
+            "without the header the configured gap is used as configured"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hostile_retry_after_does_not_park_the_build_for_an_hour() {
+        // `Retry-After: 3600` on a 503 is a single header away from parking
+        // `State::build` (and its queue slot) for an hour, because nothing can
+        // interrupt the future it is awaiting. The retry must happen, and the
+        // wait must be the documented ceiling instead of the server's hour.
+        let (addr, hits) = retry_after_server("3600").await;
+        let url = Url::parse(&format!("http://{addr}/blocked")).unwrap();
+        let config = Config {
+            proxy: Proxy::No,
+            retry_times: 2,
+            retry_gap: Duration::ZERO,
+            ..Config::default()
+        };
+        let (tx, rx) = create_channel();
+        let started = tokio::time::Instant::now();
+        let result = prefetch(&url, &config, &CookieStore::default(), &tx).await;
+        let waited = started.elapsed();
+        drop(tx);
+
+        let mut errors = 0;
+        while let Ok(e) = rx.recv().await {
+            if matches!(e, Event::PrefetchError(_)) {
+                errors += 1;
+            }
+        }
+        assert_eq!(errors, 1, "the retryable attempt must be reported");
+        assert!(
+            hits.load(Ordering::SeqCst) >= 2,
+            "the retry must reach the server: {} requests",
+            hits.load(Ordering::SeqCst)
+        );
+        match result {
+            Err(PlanError::Prefetch(e)) => assert_eq!(
+                e.status_code(),
+                Some(503),
+                "every attempt must have been answered by the server, not cut \
+                 short locally"
+            ),
+            other => panic!("the exhausting attempt is returned, got {other:?}"),
+        }
+        assert!(
+            waited >= MAX_RETRY_WAIT && waited <= MAX_RETRY_WAIT + Duration::from_secs(5),
+            "one retry must wait the {MAX_RETRY_WAIT:?} ceiling, not the \
+             server's hour, waited {waited:?}"
         );
     }
 }
