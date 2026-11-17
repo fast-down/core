@@ -16,7 +16,7 @@ categories = ["asynchronous", "concurrency", "network-programming"]
 all-features = true
 
 [dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
 bytes.workspace = true
 fast-pull.workspace = true
 futures.workspace = true
