@@ -1056,11 +1056,20 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // A finished session must not be marked aborted just because the caller
+    // keeps its handle alive past the stall window: the push driver cancels the
+    // watch when it reaches the flush phase.
+    //
+    // Time is paused so that waiting out the window cannot depend on how busy
+    // the machine is. The watchdog has two inputs, and both are handled here:
+    // its tick is a tokio timer, which paused time freezes until this test
+    // advances the clock, while its idle measurement uses `std::time::Instant`,
+    // so real time alone would still be needed to cross the window. Paused time
+    // also keeps the tick from firing during the download: on a current-thread
+    // runtime tokio inhibits auto-advance while a `spawn_blocking` task (the
+    // push driver) is alive, so the clock can only move when this test moves it.
+    #[tokio::test(start_paused = true)]
     async fn test_single_completed_session_is_not_stalled() {
-        // A finished session must not be marked aborted just because the caller
-        // keeps its handle alive past the stall window. The push driver cancels
-        // the watch when it reaches the flush phase.
         let mock_data = build_mock_data(3 * 1024);
         let puller = MockPuller::new(&mock_data);
         let pusher = MemPusher::with_capacity(mock_data.len());
@@ -1074,7 +1083,18 @@ mod tests {
             },
         );
         while result.event_chain().recv().await.is_ok() {}
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The window is measured with `std::time::Instant` from the last
+        // accepted chunk, so real time, not virtual time, has to cover it; a
+        // sleep longer than the window is a lower bound, never a race. Keeping
+        // the idle check real is what makes the advance below meaningful: a
+        // watchdog that woke while still inside the window would return without
+        // consulting `stop` at all, and the assertion would hold however the
+        // watch is wired.
+        std::thread::sleep(Duration::from_millis(100));
+        // Complete the watchdog's sleep on the virtual clock, then let it run:
+        // a finished session must not come back aborted.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
         assert!(
             !result.is_aborted(),
             "a completed session must stay complete"
