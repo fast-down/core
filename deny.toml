@@ -1,5 +1,12 @@
 [advisories]
 version = 2
+# Unmaintained, not vulnerable: both crates work and have no drop-in successor
+# here. `chrono` expands the `%`-strftime filename template, and `humantime`
+# comes in through `humantime-serde` for `Duration` serialisation.
+ignore = [
+  "RUSTSEC-2026-0542", # humantime
+  "RUSTSEC-2026-0543", # chrono
+]
 
 [licenses]
 version = 2
