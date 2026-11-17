@@ -142,12 +142,21 @@ pub enum Event {
     /// [`StartMode::Forced`](crate::StartMode::Forced) when a forced resume
     /// would be unsound) report it here so the caller can decide what to do.
     ResumeError(StateError),
-    /// Another run in this process already owns the same `.fd`/`.part` pair.
+    /// Another run already owns the same `.fd`/`.part` pair, in this process or
+    /// in another one.
     ///
     /// Only one run may write a given state file: a second run would interleave
-    /// writes to the `.part` and overwrite the `.fd` progress. The claim is
-    /// process-local, so another process can still open the same pair.
+    /// writes to the `.part` and overwrite the `.fd` progress. The claim
+    /// combines an in-process registry with an advisory OS lock on a file under
+    /// the system temp directory.
     AlreadyRunning(PathBuf),
+    /// The claim's OS lock could not be set up: its lock file could not be
+    /// created, opened, or locked.
+    ///
+    /// Fatal for this run, because without the lock a second process could
+    /// write the same pair. Unlike [`Event::AlreadyRunning`], retrying later can
+    /// succeed.
+    ClaimUnavailable(std::io::Error),
 
     /// Worker `id` started fetching its assigned byte range from the network.
     Pulling(WorkerId),

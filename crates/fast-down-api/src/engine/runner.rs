@@ -511,10 +511,18 @@ async fn resolve_target(
 
     // Only one run may drive a given pair: a second would interleave writes to
     // the `.part` and overwrite this run's `.fd`.
-    let Some(claim) = claim::claim(&fd_path) else {
-        discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
-        let _ = tx.send(Event::AlreadyRunning(fd_path));
-        return Err(TerminationReason::Failed);
+    let claim = match claim::claim(&fd_path) {
+        Ok(Some(claim)) => claim,
+        Ok(None) => {
+            discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
+            let _ = tx.send(Event::AlreadyRunning(fd_path));
+            return Err(TerminationReason::Failed);
+        }
+        Err(e) => {
+            discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
+            let _ = tx.send(Event::ClaimUnavailable(e));
+            return Err(TerminationReason::Failed);
+        }
     };
 
     // Fold the configuration into a difference against the crate defaults before
