@@ -7,10 +7,11 @@
 [![Documentation](https://docs.rs/fast-down-api/badge.svg)](https://docs.rs/fast-down-api)
 [![License](https://img.shields.io/crates/l/fast-down-api.svg)](https://github.com/fast-down/core/blob/main/LICENSE)
 
-A convenient, high-level wrapper around [`fast-down`](https://github.com/fast-down/fast-down)
-that turns the pull/push engine into a few lines of async code: resolve a
-download against the remote, inspect what it will do, run it, drain progress
-events, and cancel cooperatively.
+A convenient, high-level wrapper around
+[`fast-down`](https://github.com/fast-down/core/tree/main/crates/fast-down) that
+turns the pull/push engine into a few lines of async code: resolve a download
+against the remote, inspect what it will do, run it, drain progress events, and
+cancel cooperatively.
 
 - **Concurrent, resumable downloads** powered by the `fast-down` engine (work-stealing, range requests).
 - **One state type, one source of truth**: a [`Record`] is the `.fd` file itself, and every entry point resolves into the same [`Ready`] value before anything is written.

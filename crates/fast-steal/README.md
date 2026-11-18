@@ -20,7 +20,8 @@
 
 - `std` (default) — backs the queue's lock with `parking_lot::Mutex`.
 - `spin` — for `no_std`: build with `--no-default-features --features spin` to use
-  `spin::Mutex`; the crate then needs `alloc` (and `spin`) only.
+  `spin::Mutex`; the crate then needs `alloc` too, and `portable-atomic` is a
+  dependency either way (`spin` only swaps the queue's lock).
 
 Exactly one lock backend must be enabled; with both, `std` wins.
 

@@ -1,9 +1,11 @@
-//! Cancellable, lock-free units of work.
+//! Cancellable units of work.
 //!
 //! A [`Task`] stores its remaining work as a single atomic `u128` packing the
 //! `start` (high 64 bits) and `end` (low 64 bits) bounds, which lets multiple
-//! worker threads advance the same task without locking. Because the crate is
-//! `no_std`, only `alloc` is required for the reference-counted state.
+//! worker threads advance the same task without locking on targets that provide
+//! native 128-bit atomics; `portable-atomic` falls back to a lock where they are
+//! missing (`thumbv7em-none-eabi`, for example). Because the crate is `no_std`,
+//! only `alloc` is required for the reference-counted state.
 
 extern crate alloc;
 use alloc::sync::{Arc, Weak};
@@ -19,8 +21,9 @@ use portable_atomic::AtomicU128;
 /// worker is reclaimed regardless of how many twins still reference its cursor.
 ///
 /// The range is stored as a single atomic `u128` inside `TaskInner`, allowing
-/// lock-free reads and fine-grained progress updates. Multiple workers can
-/// safely steal sub-ranges from the same task via [`split_two`](Task::split_two).
+/// lock-free reads and fine-grained progress updates on targets with native
+/// 128-bit atomics (`portable-atomic` uses a lock elsewhere). Multiple workers
+/// can safely steal sub-ranges from the same task via [`split_two`](Task::split_two).
 ///
 /// Two `Task`s are equal iff they point to the same underlying state (see the
 /// `PartialEq` impl, which uses `Arc::ptr_eq`).

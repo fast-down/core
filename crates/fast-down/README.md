@@ -61,7 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let url = Url::parse("https://example.com/large.bin")?;
     let file = tokio::fs::File::create("large.bin").await?;
-    // Pre-size the file; pass `true` to fsync on flush.
+    // `0` lets the file grow as chunks land; pass `info.size` from the resolved
+    // `UrlInfo` to pre-size it instead. The last argument fsyncs on flush.
     let pusher = StdFilePusher::new(file, /* size */ 0, /* sync_all */ false).await?;
 
     let puller = FastDownPuller::new(FastDownPullerOptions {

@@ -2,12 +2,12 @@
 //! `fast_down_api`.
 //!
 //! These tests stand up a minimal ranged HTTP server (built on `hyper`) and drive
-//! the public `download`/`resume` functions through real, resumable
-//! scenarios: a successful resume after a mid-download cancel, a remote file
-//! change (both the `download` silent-fallback and `resume` error-reporting
-//! branches), a missing `.fd` state file, a server that does not support range
-//! requests, and the core "cancel keeps `.part`/`.fd` so it can be resumed"
-//! contract.
+//! the public entry points — `State::build` followed by `Ready::start` — through
+//! real, resumable scenarios: a successful resume after a mid-download cancel, a
+//! remote file change (both the `StartMode::Auto` silent-fallback and
+//! `StartMode::Resume` error-reporting branches), a missing `.fd` state file, a
+//! server that does not support range requests, and the core "cancel keeps
+//! `.part`/`.fd` so it can be resumed" contract.
 #![allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,

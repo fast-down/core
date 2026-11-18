@@ -15,8 +15,9 @@ byte ranges from any source to any sink.
 ## Features
 
 1. **⚡️ Concurrent pull/push**
-   Built on [`fast-steal`](https://github.com/fast-down/fast-steal) with optimized
-   work-stealing across worker tasks, plus a single-threaded sequential path
+   Built on
+   [`fast-steal`](https://github.com/fast-down/core/tree/main/crates/fast-steal) with
+   optimized work-stealing across worker tasks, plus a single-threaded sequential path
    (`download_single`).
 2. **🔌 `Puller` / `Pusher` abstractions**
    A download is just a `Puller` (source) feeding a `Pusher` (sink). Bring your
