@@ -368,13 +368,14 @@ mod tests {
             other => panic!("the exhausting attempt is returned, got {other:?}"),
         }
         // The paused clock advances to the *next* pending timer when the
-        // runtime goes idle, so other timers can push this past the ceiling
-        // (macOS stable measured 86s). What must not happen is an hour: the
-        // raw header would make this ~3600s.
+        // runtime goes idle, so `waited` is not the slept duration: it can
+        // undershoot (nightly measured 27s for a 60s sleep) and can be pushed
+        // past the ceiling by other timers (macOS stable measured 86s). What
+        // must not happen is an hour — the raw header would make this ~3600s —
+        // and the ceiling itself is pinned by `retry_wait_caps_the_server_header`.
         assert!(
-            waited >= MAX_RETRY_WAIT && waited < Duration::from_secs(600),
-            "one retry must wait at most the {MAX_RETRY_WAIT:?} ceiling, not the \
-             server's hour, waited {waited:?}"
+            waited < Duration::from_secs(600),
+            "one retry must not wait the server's hour, waited {waited:?}"
         );
     }
 }
