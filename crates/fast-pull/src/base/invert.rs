@@ -54,14 +54,18 @@ where
                 return Some(gap_start..range.start);
             }
         }
+        // Every path ends the iteration here, so the cursor always reaches the
+        // end: a later `next` must not fabricate a gap from a stale `prev_end`.
+        self.prev_end = self.total_size;
         if gap_start < self.total_size {
-            self.prev_end = self.total_size;
             Some(gap_start..self.total_size)
         } else {
             None
         }
     }
 }
+
+impl<I> std::iter::FusedIterator for InvertIter<I> where I: Iterator<Item = ProgressEntry> {}
 
 /// `window`: when a [`ProgressEntry`] length is less than `window`, it is merged into the gap to reduce progress fragmentation.
 pub const fn invert<I>(progress: I, total_size: u64, window: u64) -> InvertIter<I>
@@ -182,6 +186,24 @@ mod tests {
         let mut it = invert([0..5, 10..20, 25..30].iter().cloned(), 30, 1);
         assert_eq!(it.next(), Some(5..10));
         assert_eq!(it.next(), Some(20..25));
+        assert_eq!(it.next(), None);
+    }
+
+    #[test]
+    fn invert_stays_none_after_exhaustion() {
+        // `InvertIter` is fused: once exhausted it keeps returning `None`.
+        let mut it = invert([0..10, 21..30].iter().cloned(), 30, 1);
+        assert_eq!(it.next(), Some(10..21));
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next(), None);
+    }
+
+    #[test]
+    fn invert_full_cover_is_fused() {
+        // Regression: with everything downloaded `prev_end` used to stay at 0,
+        // so a call after the first `None` fabricated a whole-file gap.
+        let mut it = invert(std::iter::once(0..30), 30, 1);
+        assert_eq!(it.next(), None);
         assert_eq!(it.next(), None);
     }
 
