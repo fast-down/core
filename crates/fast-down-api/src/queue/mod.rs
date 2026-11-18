@@ -14,6 +14,7 @@
 //! use fast_down_api::{
 //!     Event, PartialConfig, Queue, QueueEvent, StartMode, State, create_queue_channel,
 //! };
+//! use std::path::PathBuf;
 //! use url::Url;
 //!
 //! # #[tokio::main]
@@ -21,15 +22,20 @@
 //! let (tx, rx) = create_queue_channel::<i32>();
 //! let queue = Queue::<i32>::new(2, tx); // at most two downloads at a time
 //!
+//! // Every task here is a *new* download, so `save_dir` is required;
+//! // only a pinned `.fd` (`State::at_path`) takes its directory from the
+//! // state file instead.
+//! let config = PartialConfig {
+//!     save_dir: Some(PathBuf::from("./downloads")),
+//!     ..Default::default()
+//! };
+//!
 //! for (gid, url) in ["https://example.com/a.bin", "https://example.com/b.bin"]
 //!     .into_iter()
 //!     .enumerate()
 //! {
-//!     queue.push(
-//!         gid as i32,
-//!         State::new(Url::parse(url)?, PartialConfig::default()),
-//!         StartMode::Auto,
-//!     )?;
+//!     let state = State::new(Url::parse(url)?, config.clone());
+//!     queue.push(gid as i32, state, StartMode::Auto)?;
 //! }
 //!
 //! // One stream carries every task's events, tagged with its key.

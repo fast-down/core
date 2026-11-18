@@ -137,10 +137,21 @@ pub struct Config {
 
     /// Default retry interval after a request failure. Recommended: `500ms`
     ///
-    /// If the server returns a `Retry-After` header, that value takes precedence,
-    /// clamped to one minute: the header is untrusted, and the prefetch attempt
-    /// it delays cannot be cancelled. This gap is the caller's own choice and is
-    /// used as configured.
+    /// This gap is the caller's own choice and is used as configured whenever the
+    /// server gives no `Retry-After`. How a server-provided value is applied
+    /// depends on the phase:
+    ///
+    /// - **Prefetch** ([`crate::State::build`]): the header takes precedence and
+    ///   is clamped to one minute. The header is untrusted, and the attempt it
+    ///   delays cannot be cancelled, so an unclamped `503 + Retry-After: 3600`
+    ///   would park the build — and, in a [`crate::Queue`], the slot — for an
+    ///   hour.
+    /// - **Download** (the `fast-pull` engines): the header is used verbatim,
+    ///   with no ceiling of its own. A wait longer than
+    ///   [`Config::stall_timeout`] is simply a period with no accepted chunk, so
+    ///   such a run ends as [`Event::Stalled`](crate::Event::Stalled) rather
+    ///   than sleeping indefinitely; set `stall_timeout` (or `Duration::ZERO`
+    ///   to disable that guard) with this in mind.
     #[config(default = Duration::from_millis(500))]
     #[config(partial_attr(serde(with = "humantime_serde::option")))]
     #[config(partial_attr(serde(default)))]

@@ -243,6 +243,7 @@ outcome are each task's own [`Event`]s on that stream.
 use fast_down_api::{
     Event, PartialConfig, Queue, QueueEvent, StartMode, State, create_queue_channel,
 };
+use std::path::PathBuf;
 use url::Url;
 
 # #[tokio::main]
@@ -250,11 +251,19 @@ use url::Url;
 let (tx, rx) = create_queue_channel::<i32>();
 let queue = Queue::<i32>::new(3, tx); // at most three downloads in flight
 
+// `State::new` starts a *new* download, so it needs a `save_dir`; only a
+// pinned `.fd` (`State::at_path`) takes its directory from the state file.
+let config = PartialConfig {
+    save_dir: Some(PathBuf::from("./downloads")),
+    ..Default::default()
+};
+
 for (gid, url) in ["https://example.com/a.bin", "https://example.com/b.bin"]
     .into_iter()
     .enumerate()
 {
-    queue.push(gid as i32, State::new(Url::parse(url)?, PartialConfig::default()), StartMode::Auto)?;
+    let state = State::new(Url::parse(url)?, config.clone());
+    queue.push(gid as i32, state, StartMode::Auto)?;
 }
 
 // Drop the last handle and the stream ends once every task has.
