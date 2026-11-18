@@ -34,20 +34,44 @@ pub trait Puller: Send + Sync + Clone + 'static {
     /// [`PullStream`] yields [`Bytes`] chunks; each error carries an optional
     /// retry delay that the engine honors via its retry backoff. Implementors
     /// must be `Clone` so workers can be spawned and work can be stolen/retried.
+    ///
+    /// # Contracts the engines rely on
+    ///
+    /// * The returned future may be **dropped before it completes**: once
+    ///   [`pull_timeout`](crate::multi::DownloadOptions::pull_timeout) elapses
+    ///   the engine abandons the request without waiting for the stream, so
+    ///   dropping it has to cancel the request cleanly and leave nothing behind
+    ///   that assumes a matching completion.
+    /// * The same `range` may be **requested more than once** — back-to-back
+    ///   after a failed or abandoned attempt, and concurrently when workers
+    ///   steal or speculate on each other's ranges. Every call must start at the
+    ///   beginning of `range` and must not depend on state left by an earlier,
+    ///   abandoned call.
     fn pull(
         &mut self,
         range: Option<&ProgressEntry>,
     ) -> impl Future<Output = PullResult<impl PullStream<Self::Error>, Self::Error>> + Send;
 }
 
-/// Extension trait for pull errors, distinguishing recoverable from irrecoverable failures.
+/// Extension trait for pull errors, distinguishing recoverable failures from ones
+/// that leave the current stream unusable.
 pub trait PullerError: std::error::Error + Send + Sync + Unpin + 'static {
-    /// Whether an error is fatal and must **not** be retried.
+    /// Whether the error makes the current attempt's stream unusable.
     ///
-    /// The default (`false`) means the error is recoverable and the engine will
-    /// retry after the configured backoff. Implementors **must** override this to
-    /// return `true` for fatal errors: forgetting to do so lets the engine retry
-    /// indefinitely until its backoff gives up.
+    /// This does **not** end the session and does **not** mean the error is
+    /// "fatal". The engine responds by abandoning the current attempt — it drops
+    /// the stream and rebuilds the puller (fresh client, next local source IP) —
+    /// and then requests the range again after the configured backoff, exactly
+    /// as it does for a recoverable error. The difference is only that the
+    /// broken stream is discarded instead of being polled again.
+    ///
+    /// There is no attempt limit on that path: a puller that fails forever keeps
+    /// being retried until the session is cancelled or the stall watchdog
+    /// ([`stall_timeout`](crate::multi::DownloadOptions::stall_timeout)) ends it.
+    ///
+    /// The default (`false`) means the error is recoverable and the stream is
+    /// polled again after the backoff. Implementors **must** override this to
+    /// return `true` for errors that leave the stream unusable.
     fn is_irrecoverable(&self) -> bool {
         false
     }
@@ -84,7 +108,8 @@ mod tests {
         assert_eq!(format!("{DefaultErr}"), "default error");
     }
 
-    /// A `PullerError` that overrides `is_irrecoverable` to report a fatal error.
+    /// A `PullerError` that overrides `is_irrecoverable` to report that the
+    /// current stream is unusable.
     #[derive(Debug)]
     struct FatalErr;
     impl std::fmt::Display for FatalErr {
@@ -101,8 +126,9 @@ mod tests {
 
     #[test]
     fn override_is_irrecoverable_is_true() {
-        // An error that overrides the method reports `true`, which is how the
-        // engine learns to stop retrying. Pinned alongside the default `false`.
+        // An error that overrides the method reports `true`, which tells the
+        // engine to drop the current stream instead of polling it again. Pinned
+        // alongside the default `false`.
         assert!(FatalErr.is_irrecoverable());
         assert!(!DefaultErr.is_irrecoverable());
     }

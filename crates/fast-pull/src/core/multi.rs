@@ -395,9 +395,11 @@ where
                                 () = tokio::time::sleep(retry_gap.unwrap_or(cfg_retry_gap)) => {}
                             };
                             if is_irrecoverable {
-                                // Nothing left in this stream: the attempt is spent.
-                                // Rebuild the puller so the retry leaves the current
-                                // client and source IP behind.
+                                // Nothing left in this stream: the attempt is
+                                // abandoned. Rebuild the puller so the retry leaves
+                                // the current client and source IP behind. As with a
+                                // recoverable error this only re-requests the range;
+                                // it does not end the session.
                                 drop(stream);
                                 puller = puller.clone();
                                 continue 'task;

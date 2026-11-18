@@ -183,9 +183,12 @@ pub fn download_single<R: Puller, W: Pusher>(
                         let _ = tx.send(Event::PullError(ID, e));
                         tokio::time::sleep(retry_gap.unwrap_or(options.retry_gap)).await;
                         if is_irrecoverable {
-                            // The attempt is spent; restart it on a rebuilt puller
+                            // The error left this stream unusable, so the attempt
+                            // is abandoned: drop it and restart on a rebuilt puller
                             // (fresh client, next local source IP) instead of
-                            // reusing the one that just failed.
+                            // reusing the one that just failed. Like a recoverable
+                            // error this only re-requests the range after the
+                            // backoff; it does not end the session.
                             drop(stream);
                             puller = puller.clone();
                             continue 'redownload;
