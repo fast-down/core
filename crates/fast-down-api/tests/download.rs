@@ -387,6 +387,61 @@ async fn fresh_download_completes_and_renames() {
     );
 }
 
+/// A `.fd` left behind without its `.part` has nothing safe to continue, but it
+/// still names the pair. A fresh start must reuse that `.fd` instead of leaving
+/// it orphaned under a new `name (1)` stem.
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_start_reuses_the_fd_whose_part_is_missing() {
+    let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 233) as u8).collect();
+    let (_server, url) = start_server(payload.clone(), "v1", true).await;
+    let dir = temp_dir("missing_part");
+    let (final_path, info) = probe(&url, &dir).await;
+    let fd = final_path.with_added_extension("fd");
+    let part = fd.with_extension("part");
+
+    let mut record = Record::new(Url::parse(&url).unwrap(), make_config(&dir));
+    record.size = info.size;
+    record.last_modified = info.file_id.last_modified.clone();
+    record.etag = Some("v1".into());
+    record.set_progress(vec![0..PARTIAL]);
+    record.store(&fd).await.expect("seed .fd");
+    assert!(!part.exists(), "the seed must not leave a `.part`");
+
+    let (tx, rx) = create_channel();
+    let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    assert!(matches!(&ready.outcome, ResumeOutcome::Fresh));
+    assert_eq!(
+        ready.fd_path.as_deref(),
+        Some(fd.as_path()),
+        "the known `.fd` keeps its location even without a `.part`"
+    );
+
+    let ctx = Ctx::new();
+    let _handle = ready.start(StartMode::Auto, tx, &ctx);
+    let mut started_fd = None;
+    let mut outcome = None;
+    while let Some(event) = next_event(&rx).await {
+        match event {
+            Event::Start { fd_path, .. } => started_fd = Some(fd_path),
+            Event::Terminated(reason) => {
+                outcome = Some(reason);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(outcome, Some(TerminationReason::Completed));
+    assert_eq!(
+        started_fd.as_deref(),
+        Some(fd.as_path()),
+        "the run must drive the `.fd` it probed, not a new stem"
+    );
+    assert_eq!(std::fs::read(&final_path).unwrap(), payload);
+}
+
 /// A source that sends headers and then never delivers a body must end the run
 /// with [`Event::Stalled`] instead of retrying forever. Since it never records a
 /// byte, it must not leave a 0% "resumable" pair behind either.

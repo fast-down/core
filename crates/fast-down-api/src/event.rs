@@ -146,16 +146,18 @@ pub enum Event {
     /// in another one.
     ///
     /// Only one run may write a given state file: a second run would interleave
-    /// writes to the `.part` and overwrite the `.fd` progress. The claim
-    /// combines an in-process registry with an advisory OS lock on a file under
-    /// the system temp directory.
+    /// writes to the `.part` and overwrite the `.fd` progress. The claim is one
+    /// advisory OS lock per normalized `.fd` path (a file under the system temp
+    /// directory), so a run in another process is refused exactly like a second
+    /// run in this one.
     AlreadyRunning(PathBuf),
-    /// The claim's OS lock could not be set up: its lock file could not be
-    /// created, opened, or locked.
+    /// The claim's OS lock could not be acquired: its lock file under the system
+    /// temp directory could not be created, opened, or locked.
     ///
     /// Fatal for this run, because without the lock a second process could
-    /// write the same pair. Unlike [`Event::AlreadyRunning`], retrying later can
-    /// succeed.
+    /// write the same pair. Distinct from [`Event::AlreadyRunning`], which says
+    /// a live owner holds the lock for an unknown time: retrying this run later
+    /// can succeed.
     ClaimUnavailable(std::io::Error),
 
     /// Worker `id` started fetching its assigned byte range from the network.

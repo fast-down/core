@@ -11,8 +11,9 @@ use std::path::PathBuf;
 /// What a resolved download will do when started, reported by [`crate::State::build`].
 #[derive(Debug)]
 pub enum ResumeOutcome {
-    /// Nothing to continue from: `start` claims a free `.fd`/`.part` pair and
-    /// downloads the whole file.
+    /// Nothing to continue from: `start` downloads the whole file, reusing the
+    /// known `.fd` location when there is one and claiming a free `.fd`/`.part`
+    /// pair otherwise.
     Fresh,
     /// A validated `.fd` with a usable `.part`: `start` continues from the
     /// recorded progress.
@@ -36,8 +37,9 @@ pub struct Ready {
     /// The record to persist: identity refreshed, config merged, progress kept
     /// only when resuming.
     pub record: Record,
-    /// `Some` when resuming a known `.fd` and its location should be reused;
-    /// `None` when `start` must claim a free `.fd`/`.part` pair.
+    /// `Some` when a known `.fd`'s location should be reused (resuming, or a
+    /// `.fd` whose `.part` is gone); `None` when `start` must claim a free
+    /// `.fd`/`.part` pair.
     pub fd_path: Option<PathBuf>,
     /// The base output path from `gen_path`, **before** the final-name
     /// uniquification that [`Ready::start`] performs when `overwrite` is off.

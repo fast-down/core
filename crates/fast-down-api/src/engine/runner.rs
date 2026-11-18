@@ -484,45 +484,34 @@ async fn resolve_target(
         return Err(TerminationReason::Failed);
     }
 
-    // Resolve the `.fd`/`.part` pair.
-    let (fd_path, tmp_path, fresh) = if resuming {
+    // Resolve the `.fd`/`.part` pair. The claim for it is taken before either
+    // file is created (here, or inside `claim_pair` for a new stem): a losing
+    // run must not have touched anything, let alone delete a pair the winner may
+    // already be writing to.
+    let (claim, fd_path, tmp_path, fresh) = if resuming {
         // A resumable/mismatched state always carries its location.
         let Some(fd_path) = fd_path else {
             let _ = tx.send(Event::ResumeError(StateError::NotResumable));
             return Err(TerminationReason::Failed);
         };
         let tmp = crate::utils::part_path(&fd_path);
-        (fd_path, tmp, false)
+        let claim = claim_or_report(&fd_path, tx)?;
+        (claim, fd_path, tmp, false)
     } else if let Some(fd_path) = fd_path {
         // Fresh over an existing pair: reuse the location and the `.part`, but
         // start from byte zero. This is how a pinned `.fd` (from `State::at_path`)
         // is reused even when its `.part` is missing.
+        let claim = claim_or_report(&fd_path, tx)?;
         let tmp = crate::utils::part_path(&fd_path);
         if let Err(e) = open_create().open(&tmp).await {
             let _ = tx.send(Event::BuildPusherError(e));
             return Err(TerminationReason::Failed);
         }
         record = fresh_over(&record, origin_config, info);
-        (fd_path, tmp, false)
+        (claim, fd_path, tmp, false)
     } else {
-        let (fd_path, tmp_path) = paths::claim_pair(final_path, tx).await?;
-        (fd_path, tmp_path, true)
-    };
-
-    // Only one run may drive a given pair: a second would interleave writes to
-    // the `.part` and overwrite this run's `.fd`.
-    let claim = match claim::claim(&fd_path) {
-        Ok(Some(claim)) => claim,
-        Ok(None) => {
-            discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
-            let _ = tx.send(Event::AlreadyRunning(fd_path));
-            return Err(TerminationReason::Failed);
-        }
-        Err(e) => {
-            discard_unused_pair(fresh, &record, &fd_path, &tmp_path).await;
-            let _ = tx.send(Event::ClaimUnavailable(e));
-            return Err(TerminationReason::Failed);
-        }
+        let (claim, fd_path, tmp_path) = paths::claim_pair(final_path, tx).await?;
+        (claim, fd_path, tmp_path, true)
     };
 
     // Fold the configuration into a difference against the crate defaults before
@@ -548,6 +537,26 @@ async fn resolve_target(
         _claim: claim,
         fresh,
     })
+}
+
+/// Take the claim for `fd_path`, reporting why it failed.
+///
+/// [`Event::AlreadyRunning`] means a live run owns the pair;
+/// [`Event::ClaimUnavailable`] means the lock itself could not be set up.
+/// Neither leaves anything for the caller to clean up: nothing has been created
+/// under that path yet.
+fn claim_or_report(fd_path: &Path, tx: &Tx) -> Result<Claim, TerminationReason> {
+    match claim::claim(fd_path) {
+        Ok(Some(claim)) => Ok(claim),
+        Ok(None) => {
+            let _ = tx.send(Event::AlreadyRunning(fd_path.to_path_buf()));
+            Err(TerminationReason::Failed)
+        }
+        Err(e) => {
+            let _ = tx.send(Event::ClaimUnavailable(e));
+            Err(TerminationReason::Failed)
+        }
+    }
 }
 
 /// The concrete engine session both `download_single` and `download_multi`

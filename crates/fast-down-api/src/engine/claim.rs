@@ -9,8 +9,8 @@
 //! in the *same* process is refused just like another process would be; there
 //! is no separate in-process registry to keep in step with it.
 //!
-//! Keys are normalized first (`soft_canonicalize`, plus case folding on
-//! Windows), so `./out.fd`, `dir/../out.fd` and `OUT.FD` all name one pair.
+//! Keys are normalized first (`soft_canonicalize`, plus case folding on Windows
+//! and macOS), so `./out.fd`, `dir/../out.fd` and `OUT.FD` all name one pair.
 //!
 //! The locked file lives under `<temp>/fast-down-locks` and is named after a
 //! hash of the key, so a download directory never gains a stray `.lock`. It is
@@ -41,9 +41,9 @@ pub struct Claim {
 /// Normalize `fd_path` into the key the lock file is derived from.
 fn key_of(fd_path: &Path) -> PathBuf {
     let key = soft_canonicalize(fd_path).unwrap_or_else(|_| fd_path.to_path_buf());
-    // Windows compares paths case-insensitively, so `OUT.FD` and `out.fd` name
-    // the same pair and must share one lock.
-    #[cfg(windows)]
+    // Windows and macOS compare paths case-insensitively by default, so `OUT.FD`
+    // and `out.fd` name the same pair and must share one lock.
+    #[cfg(any(windows, target_os = "macos"))]
     let key = PathBuf::from(key.to_string_lossy().to_lowercase());
     key
 }
@@ -151,6 +151,21 @@ mod tests {
         assert!(
             claim(&upper).unwrap().is_none(),
             "Windows paths are case-insensitive, so the pair is already claimed"
+        );
+        drop(first);
+    }
+
+    /// The default macOS filesystem (APFS) is case-insensitive too, and the
+    /// lock keys follow that so two spellings cannot open one pair twice.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn case_variants_share_one_claim_on_macos() {
+        let path = fd_path("case");
+        let upper = PathBuf::from(path.to_string_lossy().to_uppercase());
+        let first = claim(&path).unwrap().expect("first claim");
+        assert!(
+            claim(&upper).unwrap().is_none(),
+            "macOS paths are case-insensitive by default, so the pair is already claimed"
         );
         drop(first);
     }

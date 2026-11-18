@@ -17,10 +17,10 @@ use url::Url;
 ///
 /// This is the single input phase: it holds the URL and configuration and,
 /// optionally, where the `.fd` lives. `fd_path = None` means "no state file
-/// picked yet" — [`State::build`] probes the base `<final>.fd`, and [`Ready`]
-/// carries `None` through so `start` claims a free name. `fd_path = Some` pins
-/// the location, either because the caller located an existing `.fd` or chose
-/// one explicitly.
+/// picked yet" — [`State::build`] probes the base `<final>.fd` and keeps that
+/// path when a `.fd` is there; with no file to keep, [`Ready`] carries `None`
+/// through so `start` claims a free name. `fd_path = Some` pins the location,
+/// either because the caller located an existing `.fd` or chose one explicitly.
 ///
 /// **`State` never reads the disk.** Reading is the whole job of
 /// [`State::build`], which reads the pinned (or default) `.fd` exactly once and
@@ -76,8 +76,9 @@ impl State {
     ///
     /// * [`ResumeOutcome::Resumable`] — a valid `.fd` with a usable `.part`.
     /// * [`ResumeOutcome::Mismatch`] — state exists but cannot be continued.
-    /// * [`ResumeOutcome::Fresh`] — nothing to continue from; `start` claims a
-    ///   free `.fd`/`.part` pair.
+    /// * [`ResumeOutcome::Fresh`] — nothing to continue from; `start` reuses the
+    ///   known `.fd` location, or claims a free `.fd`/`.part` pair when there is
+    ///   none.
     ///
     /// A pinned `fd_path` is probed exactly; otherwise the base `<final>.fd` is
     /// tried. Resume is skipped entirely when the server does not support
@@ -130,7 +131,9 @@ impl State {
         let final_path = gen_path(url, &info, &config).map_err(PlanError::GenPath)?;
 
         // Whether the caller pinned a specific `.fd` (via [`State::at_path`]). A
-        // `Fresh` outcome keeps that pin; without one, `start` claims a free pair.
+        // `Fresh` outcome keeps that pin, and a `.fd` whose `.part` is missing
+        // keeps its own location even unpinned; otherwise `start` claims a free
+        // pair.
         let caller_pinned = fd_path.is_some();
         // The `.fd` to probe: the pinned one, or the default `<final>.fd`. No
         // clone: the resume paths move it into the result, and a fresh path only
@@ -179,15 +182,13 @@ impl State {
                             }),
                             Some(probe_fd_path),
                         ),
-                        // The `.part` is gone: nothing safe to continue. A pinned
-                        // `.fd` (from `State::at_path`) keeps its location so a
-                        // later start can reuse it; otherwise start claims a free
-                        // pair.
-                        (Ok(()), PartState::Missing) => (
-                            fresh_record(),
-                            ResumeOutcome::Fresh,
-                            caller_pinned.then_some(probe_fd_path),
-                        ),
+                        // The `.part` is gone: nothing safe to continue, but the
+                        // `.fd` still names the pair and remembers its progress.
+                        // Keep that location so a later start reuses it instead
+                        // of orphaning it under a new `name (1)` stem.
+                        (Ok(()), PartState::Missing) => {
+                            (fresh_record(), ResumeOutcome::Fresh, Some(probe_fd_path))
+                        }
                     }
                 }
                 // A `.fd` exists, but the server cannot serve ranges: resume is
