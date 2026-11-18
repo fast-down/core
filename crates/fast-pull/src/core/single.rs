@@ -15,6 +15,13 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Copy)]
 pub struct DownloadOptions {
     /// Delay before retrying a failed pull or push.
+    ///
+    /// [`Duration::ZERO`] disables the backoff: a failed pull or push is retried
+    /// immediately, as fast as the loop can spin. Combined with a zero
+    /// [`stall_timeout`](Self::stall_timeout), which turns the watchdog off, a
+    /// sink or puller that fails permanently leaves the session with no
+    /// terminating condition, and the unbounded event channel grows at memory
+    /// speed for as long as the caller does not drain it.
     pub retry_gap: Duration,
     /// Capacity of the bounded pull→push queue; backpressure when full.
     pub push_queue_cap: usize,
@@ -31,9 +38,18 @@ pub struct DownloadOptions {
 ///
 /// The puller fetches the entire file sequentially, chunk by chunk.
 /// Supports retries and progress events via [`DownloadResult`].
+///
 /// # Completion
 ///
-/// The download is finished once the push driver has drained `rx_push` and
+/// The end of the pull stream — `Ok(None)` from `try_next` — **is** the end of
+/// the download: the pull task breaks out of its redownload loop, and no byte
+/// count is compared against anything. A stream that ends early, or returns
+/// nothing at all, is therefore reported as a completed download rather than an
+/// error, and the push driver flushes whatever it was given. This is the
+/// opposite of [`download_multi`](crate::multi::download_multi), where an ended
+/// stream only ends the pull attempt and the same range is requested again.
+///
+/// The session is finished once the push driver has drained `rx_push` and
 /// flushed; the `event_chain` sender lives inside that driver, so it is dropped
 /// when the driver returns and the receiver disconnects. Draining
 /// `event_chain` is therefore the way to await completion. A panic in the
@@ -43,6 +59,13 @@ pub struct DownloadOptions {
 /// returns without flushing, so any buffered bytes are discarded and the file
 /// is left incomplete. Completion is still detected by draining `event_chain`,
 /// because the senders are dropped when both sides exit.
+///
+/// # Panics
+///
+/// Must be called from within a tokio runtime: the pull task, the supervisor
+/// and (unless [`stall_timeout`](DownloadOptions::stall_timeout) is
+/// [`Duration::ZERO`]) the stall watchdog are `tokio::spawn`ed, and the push
+/// driver runs on `spawn_blocking`. All of those panic outside a runtime.
 #[allow(clippy::too_many_lines)]
 pub fn download_single<R: Puller, W: Pusher>(
     mut puller: R,

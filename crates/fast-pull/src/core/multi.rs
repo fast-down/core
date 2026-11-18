@@ -23,6 +23,13 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
     /// Number of concurrent workers.
     pub concurrent: usize,
     /// Delay before retrying a failed pull or push.
+    ///
+    /// [`Duration::ZERO`] disables the backoff: a failed pull or push is retried
+    /// immediately, as fast as the loop can spin. Combined with a zero
+    /// [`stall_timeout`](Self::stall_timeout), which turns the watchdog off, a
+    /// sink or puller that fails permanently leaves the session with no
+    /// terminating condition, and the unbounded event channel grows at memory
+    /// speed for as long as the caller does not drain it.
     pub retry_gap: Duration,
     /// Maximum time to wait for bytes before aborting and re-pulling a range.
     pub pull_timeout: Duration,
@@ -42,6 +49,43 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
 }
 
 /// Start a multi-threaded concurrent download with work-stealing.
+///
+/// # Completion
+///
+/// The session ends when every worker has exited: a worker is done with its
+/// range once the cursor reaches the range end, it steals fresh work when the
+/// queue still has some, and otherwise leaves. Each worker drops its `tx_push`
+/// sender on the way out, so the push driver sees the channel disconnect, breaks
+/// out of its receive loop and flushes; the `event_chain` sender lives inside
+/// that driver, so draining the receiver is how completion is awaited.
+///
+/// An ended pull stream (`Ok(None)`) does **not** finish the download — it only
+/// ends that pull attempt. The worker continues its task loop with the cursor
+/// where it stopped (re-reading it, since a speculative twin may have advanced
+/// it) and requests the same range again. If the server keeps answering with an
+/// empty body, that loop has no attempt limit: no chunk is accepted, so the
+/// progress clock never beats and only
+/// [`stall_timeout`](DownloadOptions::stall_timeout) can end the session. With
+/// [`Duration::ZERO`] there the watchdog is not even spawned, so the worker
+/// re-requests the range forever. This is the opposite of
+/// [`download_single`](crate::single::download_single), where `Ok(None)` ends the
+/// whole download.
+///
+/// A panic in the blocking push driver cancels the session instead of letting
+/// the workers feed a closed channel; normal cancellation via `abort()` makes
+/// every worker leave its range and the push driver return without flushing, so
+/// buffered bytes are discarded and the file is left incomplete. Either ending
+/// is observed by draining `event_chain`, because the senders are dropped when
+/// the last side exits.
+///
+/// # Panics
+///
+/// Must be called from within a tokio runtime: the worker pool, the supervisor
+/// and (unless [`stall_timeout`](DownloadOptions::stall_timeout) is
+/// [`Duration::ZERO`]) the stall watchdog are `tokio::spawn`ed, and the push
+/// driver runs on `spawn_blocking`. All of those panic outside a runtime, as do
+/// the workers a later [`DownloadResult::set_threads`](crate::DownloadResult::set_threads)
+/// spawns.
 #[allow(clippy::too_many_lines)]
 pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
     puller: R,

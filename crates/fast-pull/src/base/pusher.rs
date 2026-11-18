@@ -26,6 +26,29 @@ pub trait Pusher: Send + 'static {
     /// still owns: either the bytes to retry, or empty when the decorator kept
     /// them internally for a later flush. A decorator that returns empty must
     /// therefore never drop them silently.
+    ///
+    /// # What a partial result promises
+    ///
+    /// The engine never counts written bytes itself. On failure it derives them
+    /// as `content.len() - bytes.len()`, adds that to `range.start`, and pushes
+    /// the returned `bytes` again at the shifted offset, so an implementation
+    /// must satisfy all of:
+    ///
+    /// 1. `bytes` is a contiguous **suffix** of `content`; the leading
+    ///    `content.len() - bytes.len()` bytes are taken as written.
+    /// 2. The destination really holds that prefix at `range.start` before the
+    ///    call returns, because the retry resumes at `range.start + written` and
+    ///    the engine will never write that prefix again.
+    /// 3. An **empty** `bytes` means "the whole chunk was accepted". For a
+    ///    decorator that is the promise that its next `flush` writes the data it
+    ///    kept; for the engine it is indistinguishable from success, so the
+    ///    range is recorded as written and the session moves on.
+    ///
+    /// Requirement 3 is the sharp edge behind "never drop them silently": a
+    /// failure reported with empty `bytes` is counted as success even if the
+    /// decorator actually dropped the data. None of the three requirements can
+    /// be checked by the engine — breaking one shows up as missing or duplicated
+    /// bytes in the destination, not as an error.
     #[allow(clippy::missing_errors_doc)]
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)>;
     /// Flush any buffered data to the destination.
