@@ -60,13 +60,21 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
 }
 
 async fn prefetch<Client: HttpClient>(client: &Client, url: Url) -> PrefetchResult<Client> {
-    let (result_no_range, supports_range) = tokio::join!(
+    let (result_no_range, range) = tokio::join!(
         prefetch_no_range(client, url.clone()),
         is_support_range(client, url)
     );
     let mut res = result_no_range?;
-    if supports_range {
+    if let Some(range) = range {
         res.0.supports_range = true;
+        // A chunked metadata response declares no length, so the only size on
+        // offer is the one the probe's `Content-Range` names. Without it the
+        // fast path would stay closed even though the server honours ranges.
+        if res.0.size == 0
+            && let Some(complete) = range.complete_length()
+        {
+            res.0.size = complete;
+        }
         if res.0.size != 0 {
             res.0.fast_download = true;
         }
@@ -118,10 +126,11 @@ const RANGE_PROBE_ATTEMPTS: usize = 3;
 /// metadata request, so a short gap is enough to ride out a reset or a blip.
 const RANGE_PROBE_GAP: Duration = Duration::from_millis(200);
 
-/// Whether the server honours a `bytes=0-0` range request.
+/// Whether the server honours a `bytes=0-0` range request, returning the
+/// `Content-Range` answer it gave when it does.
 ///
 /// A server that genuinely ignores ranges answers with a success status and no
-/// `Content-Range`, which resolves to `false` without any retry: degrading to a
+/// `Content-Range`, which resolves to `None` without any retry: degrading to a
 /// single stream stays a valid outcome. A probe that *fails* is not that
 /// answer, so the failure is never folded into the "no ranges" result: the
 /// cheap probe is retried up to [`RANGE_PROBE_ATTEMPTS`] times, mirroring the
@@ -129,39 +138,41 @@ const RANGE_PROBE_GAP: Duration = Duration::from_millis(200);
 /// keeps failing for every attempt falls back to the conservative
 /// single-stream download.
 ///
+/// The parsed value is returned rather than a bare `true` because the probe's
+/// `Content-Range` is also where a chunked metadata response's size comes from.
+///
 /// Retrying is the handling here rather than reporting on
 /// `Event::PrefetchError`, because this layer has no event channel: that event
 /// carries a `ReqwestResponseError`, which only the `reqwest` backend can
 /// build, while `prefetch` is generic over [`HttpClient`]. Fabricating one is
 /// exactly what this probe must stop doing.
-async fn is_support_range<Client: HttpClient>(client: &Client, url: Url) -> bool {
+async fn is_support_range<Client: HttpClient>(client: &Client, url: Url) -> Option<ContentRange> {
     let mut attempt = 1;
     loop {
         match client.get(url.clone(), Some(0..1)).send().await {
-            Ok(resp) => return advertises_zero_range(resp.headers()),
+            Ok(resp) => return zero_range_answer(resp.headers()),
             Err(_) if attempt < RANGE_PROBE_ATTEMPTS => {
                 tokio::time::sleep(RANGE_PROBE_GAP).await;
                 attempt += 1;
             }
             // Retries exhausted: the caller keeps the download alive as a
             // single stream instead of failing on an advisory probe.
-            Err(_) => return false,
+            Err(_) => return None,
         }
     }
 }
 
-/// Whether a probe response advertises the `bytes 0-0/<size>` answer to a
-/// `Range: bytes=0-0` request.
+/// The `bytes 0-0/<size>` value a probe response carries, if any.
 ///
 /// Uses the same `ContentRange` parser as the downloader: a value the
 /// downloader reads an offset from must also count as range support here, or a
 /// large file silently degrades to a single stream.
-pub(super) fn advertises_zero_range(headers: &impl HttpHeaders) -> bool {
+pub(super) fn zero_range_answer(headers: &impl HttpHeaders) -> Option<ContentRange> {
     headers
         .get("content-range")
         .ok()
         .and_then(|raw| ContentRange::parse(&raw))
-        .is_some_and(ContentRange::is_zero_probe)
+        .filter(|range| range.is_zero_probe())
 }
 
 #[cfg(test)]
@@ -287,6 +298,9 @@ mod tests {
         failing_probes: usize,
         /// Whether an answered ranged request carries a `Content-Range` header.
         serves_ranges: bool,
+        /// The `Content-Length` the metadata response carries; `None` is the
+        /// chunked case, where the metadata response declares no length at all.
+        metadata_length: Option<&'static str>,
     }
 
     impl ProbeFixture {
@@ -295,7 +309,14 @@ mod tests {
                 probe_attempts: Arc::new(AtomicUsize::new(0)),
                 failing_probes,
                 serves_ranges,
+                metadata_length: Some("1024"),
             }
+        }
+
+        /// A metadata response with no `Content-Length`, as a chunked one has.
+        fn chunked_metadata(mut self) -> Self {
+            self.metadata_length = None;
+            self
         }
 
         fn probes(&self) -> usize {
@@ -335,8 +356,8 @@ mod tests {
                 if self.fixture.serves_ranges {
                     headers.insert("content-range".to_string(), "bytes 0-0/1024".to_string());
                 }
-            } else {
-                headers.insert("content-length".to_string(), "1024".to_string());
+            } else if let Some(length) = self.fixture.metadata_length {
+                headers.insert("content-length".to_string(), length.to_string());
             }
             Ok(FixtureResponse {
                 url: self.url,
@@ -424,6 +445,48 @@ mod tests {
         assert_eq!(client.probes(), 1, "an answer must not be retried");
         assert!(!info.supports_range);
         assert!(!info.fast_download);
+    }
+
+    #[tokio::test]
+    async fn chunked_metadata_takes_its_size_from_the_range_probe() {
+        // A chunked metadata response carries no `Content-Length`, so the size
+        // is 0 after the metadata request alone. The probe's `bytes 0-0/1024`
+        // still names the complete length, and without it the download would
+        // silently degrade to a single stream even though the server supports
+        // ranges — exactly what the fast path exists for.
+        let client = ProbeFixture::new(0, true).chunked_metadata();
+        let url = Url::parse("http://example.com/file.bin").unwrap();
+
+        let (info, _resp) = prefetch(&client, url).await.unwrap();
+
+        assert!(info.supports_range, "the probe answered `bytes 0-0/1024`");
+        assert_eq!(
+            info.size, 1024,
+            "the complete length must come from the probe's Content-Range"
+        );
+        assert!(
+            info.fast_download,
+            "a known size plus range support must keep the multi-chunk fast path"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunked_metadata_without_ranges_stays_sizeless_and_single_stream() {
+        // Control: neither response declares a length, and the ranged request
+        // is answered with a plain `200` and no `Content-Range`. Nothing may be
+        // invented: the size stays unknown and the download stays single-stream.
+        let client = ProbeFixture::new(0, false).chunked_metadata();
+        let url = Url::parse("http://example.com/file.bin").unwrap();
+
+        let (info, _resp) = prefetch(&client, url).await.unwrap();
+
+        assert_eq!(client.probes(), 1, "an answer must not be retried");
+        assert!(!info.supports_range);
+        assert!(!info.fast_download);
+        assert_eq!(
+            info.size, 0,
+            "a server that says no ranges declares no size"
+        );
     }
 
     #[tokio::test]

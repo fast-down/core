@@ -95,6 +95,10 @@ pub type GetHeaderError<Client> = <GetHeader<Client> as HttpHeaders>::GetHeaderE
 /// The range unit is matched case-insensitively and whitespace is tolerated
 /// around both the unit and the byte offsets, because servers in the wild send
 /// `Bytes 0-0/1024`, `bytes  0-0/1024`, and `bytes 0-0 / 1024`.
+///
+/// The complete length after the slash is kept for both forms. It is the only
+/// size a chunked `200` leaves behind: with no `Content-Length` to read, the
+/// `bytes 0-0/<size>` answer to the probe is where the size comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ContentRange {
     /// The first byte offset of the enclosed range; `None` for the unsatisfied
@@ -102,6 +106,9 @@ pub(crate) struct ContentRange {
     first: Option<u64>,
     /// The last byte offset of the enclosed range, together with `first`.
     last: Option<u64>,
+    /// The complete length the range is a part of, when the value names one;
+    /// `None` for `bytes 0-0/*` or a value with no `/` part.
+    complete: Option<u64>,
 }
 
 impl ContentRange {
@@ -119,27 +126,36 @@ impl ContentRange {
             return None;
         }
         let rest = trimmed[unit_end..].trim_start();
-        // Neither caller uses the complete length, so its presence is not
-        // required: a truncated value still yields the offsets it does carry.
-        let (range, _size) = rest.split_once('/').unwrap_or((rest, ""));
+        // The complete length is optional: a truncated value still yields the
+        // offsets it does carry, and `*` names no length at all.
+        let (range, complete) = rest.split_once('/').unwrap_or((rest, ""));
+        let complete = complete.trim().parse().ok();
         // `bytes */<size>` answers an unsatisfiable range: a valid value, but
         // it describes no body offset.
         if range.trim() == "*" {
             return Some(Self {
                 first: None,
                 last: None,
+                complete,
             });
         }
         let (first, last) = range.split_once('-')?;
         Some(Self {
             first: Some(first.trim().parse().ok()?),
             last: Some(last.trim().parse().ok()?),
+            complete,
         })
     }
 
     /// The first byte offset the response body starts at.
     pub(crate) const fn first_byte(self) -> Option<u64> {
         self.first
+    }
+
+    /// The complete length of the resource this range belongs to, when the
+    /// header names one.
+    pub(crate) const fn complete_length(self) -> Option<u64> {
+        self.complete
     }
 
     /// Whether this is the `bytes 0-0/<size>` answer to a `Range: bytes=0-0`
@@ -157,10 +173,10 @@ impl ContentRange {
 pub enum HttpError<Client: HttpClient> {
     /// The HTTP request failed to send.
     #[error("HTTP request failed: {0}")]
-    Request(GetRequestError<Client>),
+    Request(#[source] GetRequestError<Client>),
     /// Reading a response body chunk failed.
     #[error("HTTP chunk read failed: {0}\n  response: {1:?}")]
-    Chunk(GetChunkError<Client>, GetResponse<Client>),
+    Chunk(#[source] GetChunkError<Client>, GetResponse<Client>),
     /// A pull failure the engine must not retry.
     #[error("irrecoverable pull error")]
     Irrecoverable,
@@ -210,7 +226,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::{
         ContentRange, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse,
-        prefetch::advertises_zero_range, puller::content_range_start,
+        prefetch::zero_range_answer, puller::content_range_start,
     };
     use crate::url_info::FileId;
     use bytes::Bytes;
@@ -249,16 +265,30 @@ mod tests {
             assert!(parsed.is_zero_probe(), "{raw:?} encloses byte 0 only");
         }
 
-        // The complete length is irrelevant to both answers, and so is the last
-        // offset beyond its use in `is_zero_probe`.
+        // The complete length is not part of either answer, but it must survive
+        // parsing: it is the size a chunked metadata response otherwise lacks.
         let ranged = ContentRange::parse("bytes 5-9/20").unwrap();
         assert_eq!(ranged.first_byte(), Some(5));
+        assert_eq!(ranged.complete_length(), Some(20));
         assert!(!ranged.is_zero_probe());
 
         // The unsatisfied form is a valid value that names no body offset.
         let unsatisfied = ContentRange::parse("bytes */1024").unwrap();
         assert_eq!(unsatisfied.first_byte(), None);
+        assert_eq!(unsatisfied.complete_length(), Some(1024));
         assert!(!unsatisfied.is_zero_probe());
+
+        // A wildcard or absent length parses as "unknown", never as 0.
+        assert_eq!(
+            ContentRange::parse("bytes 0-0/*")
+                .unwrap()
+                .complete_length(),
+            None
+        );
+        assert_eq!(
+            ContentRange::parse("bytes 0-0").unwrap().complete_length(),
+            None
+        );
 
         // A different unit is not a byte range at all.
         assert_eq!(ContentRange::parse("items 0-0/1024"), None);
@@ -297,7 +327,7 @@ mod tests {
             let start = content_range_start(&headers);
             assert_eq!(start, expected_start, "downloader's offset for {raw:?}");
             assert_eq!(
-                advertises_zero_range(&headers),
+                zero_range_answer(&headers).is_some(),
                 expected_start == Some(0),
                 "the probe must accept exactly the 0-0 values the downloader accepts, for {raw:?}"
             );
@@ -382,6 +412,18 @@ mod tests {
             resp: MockResponse::new(),
         };
         assert!(format!("{range_ignored:?}").contains("RangeIgnored"));
+    }
+
+    #[test]
+    fn request_error_exposes_the_backend_error_as_source() {
+        // `fast-down-api` walks the error chain to report the underlying cause;
+        // an `HttpError::Request` with no `source()` truncates that chain to a
+        // bare "HTTP request failed", losing what the backend actually said.
+        let error = HttpError::<MockClient>::Request(MockErr);
+        assert!(
+            std::error::Error::source(&error).is_some(),
+            "the request error must be reachable through std::error::Error::source"
+        );
     }
 
     #[test]
