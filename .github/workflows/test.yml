@@ -20,6 +20,28 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # `rust-version` in Cargo.toml promises that 1.91 builds the crates; stable
+  # is newer than that, so only this job can catch a newer API or a dependency
+  # bump that silently raises the real minimum.
+  msrv:
+    name: MSRV (1.91)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "ubuntu-msrv"
+          add-job-id-key: "false"
+          cache-on-failure: "true"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+      - name: Check (all features)
+        run: cargo check --workspace --all-features --locked
+      - name: Check fast-steal (no_std, spin backend)
+        run: cargo check -p fast-steal --no-default-features --features spin --locked
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
