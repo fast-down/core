@@ -36,7 +36,7 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Generate coverage (lcov)
-        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info --locked
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7

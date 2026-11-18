@@ -43,7 +43,14 @@ jobs:
       - name: Run Clippy
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo hack clippy --all-targets --feature-powerset --mutually-exclusive-features std,spin --at-least-one-of std,spin
+        run: cargo hack clippy --all-targets --feature-powerset --exclude fast-steal --locked
+      # `--at-least-one-of std,spin` filters the empty feature set for *every*
+      # package, not just the one that needs a backend, so `fast-steal` runs on
+      # its own and the rest of the workspace keeps the unfiltered powerset.
+      - name: Run Clippy (fast-steal backends)
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo hack clippy -p fast-steal --all-targets --feature-powerset --mutually-exclusive-features std,spin --at-least-one-of std,spin --locked
 
   test:
     name: Test (${{ matrix.os }} - ${{ matrix.channel }})
@@ -71,9 +78,11 @@ jobs:
         with:
           tool: cargo-hack
       - name: Run Tests
-        run: cargo hack test --feature-powerset --depth 1 --verbose --mutually-exclusive-features std,spin --at-least-one-of std,spin
+        run: cargo hack test --feature-powerset --depth 1 --verbose --exclude fast-steal --locked
+      - name: Run Tests (fast-steal backends)
+        run: cargo hack test -p fast-steal --feature-powerset --depth 1 --verbose --mutually-exclusive-features std,spin --at-least-one-of std,spin --locked
       - name: Run Tests (all features)
-        run: cargo test --all-features --verbose
+        run: cargo test --all-features --verbose --locked
 
   bare-metal:
     name: No-std Build (thumbv7em-none-eabi)
@@ -96,7 +105,7 @@ jobs:
       # It is a separate job so it can be dropped or pinned to nightly on its
       # own if the target ever needs it.
       - name: Build fast-steal (no_std, spin backend)
-        run: cargo build -p fast-steal --no-default-features --features spin --target thumbv7em-none-eabi
+        run: cargo build -p fast-steal --no-default-features --features spin --target thumbv7em-none-eabi --locked
 
   deny:
     name: Cargo Deny
@@ -117,7 +126,7 @@ jobs:
         with:
           tool: cargo-deny
       - name: Run Deny
-        run: cargo deny --all-features check
+        run: cargo deny --locked --all-features check
 
   udeps:
     name: Unused Deps
@@ -138,7 +147,9 @@ jobs:
         with:
           tool: cargo-hack,cargo-udeps
       - name: Run Udeps
-        run: cargo hack udeps --feature-powerset --mutually-exclusive-features std,spin --at-least-one-of std,spin
+        run: cargo hack udeps --feature-powerset --exclude fast-steal --locked
+      - name: Run Udeps (fast-steal backends)
+        run: cargo hack udeps -p fast-steal --feature-powerset --mutually-exclusive-features std,spin --at-least-one-of std,spin --locked
 
   docs:
     name: Doc Check
@@ -161,11 +172,15 @@ jobs:
       - name: Run Doc Check
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo hack doc --feature-powerset --depth 1 --no-deps --mutually-exclusive-features std,spin --at-least-one-of std,spin
+        run: cargo hack doc --feature-powerset --depth 1 --no-deps --exclude fast-steal --locked
+      - name: Run Doc Check (fast-steal backends)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo hack doc -p fast-steal --feature-powerset --depth 1 --no-deps --mutually-exclusive-features std,spin --at-least-one-of std,spin --locked
       - name: Run Doc Check (all features)
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --all-features --no-deps
+        run: cargo doc --all-features --no-deps --locked
 
   # minimal-versions:
   #   name: Minimal Versions Check
