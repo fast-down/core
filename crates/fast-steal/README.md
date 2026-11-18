@@ -16,6 +16,14 @@
 3. Safe Rust — no `unsafe` code
 4. Core paths covered by tests for stability and reliability
 
+## Features
+
+- `std` (default) — backs the queue's lock with `parking_lot::Mutex`.
+- `spin` — for `no_std`: build with `--no-default-features --features spin` to use
+  `spin::Mutex`; the crate then needs `alloc` (and `spin`) only.
+
+Exactly one lock backend must be enabled; with both, `std` wins.
+
 ```rust,no_run
 extern crate std;
 use fast_steal::{Executor, Handle, StealOutcome, Task, TaskQueue};

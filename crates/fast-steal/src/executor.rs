@@ -29,6 +29,26 @@ pub trait Executor {
     ///   key. If it fails to match, `steal` reports
     ///   [`StealOutcome::Unregistered`](crate::StealOutcome::Unregistered) and the
     ///   worker exits while work may still be waiting.
+    /// - **The spawned worker must keep `task` alive until it exits.** `task`
+    ///   arrives by value, and the queue keeps only a `WeakTask` to it (taken
+    ///   *before* this call), so the strong reference moved in here is the sole
+    ///   record of the worker's identity *and* of its range. Moving it into the
+    ///   spawned future is what makes the worker look alive to the liveness sweep
+    ///   in [`TaskQueue::set_threads`](TaskQueue::set_threads) and what lets a
+    ///   shrink recover its unclaimed range; dropping it instead (spawning
+    ///   nothing, running the work elsewhere, forgetting to move it into the
+    ///   future) deallocates the identity, makes `WeakTask::upgrade` fail, and
+    ///   silently strands the range — the queue cannot hand out or reclaim a
+    ///   task nobody holds.
+    /// - **Do not panic.** `set_threads` calls this *after* draining tasks out of
+    ///   `waiting` into a local buffer and *while holding the queue lock*; an
+    ///   unwind drops those already-drained tasks on the floor (they are gone from
+    ///   `waiting` and were never registered), so the loss is silent and
+    ///   unrecoverable, and the panic escapes a queue operation whose callers have
+    ///   no reason to expect it to be fallible. A spawn failure must be handled
+    ///   inside the executor — e.g. by returning a handle for a worker that will
+    ///   not run, which keeps the queue's bookkeeping consistent — never by
+    ///   asserting.
     fn execute(&self, task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle;
 }
 
@@ -43,8 +63,23 @@ pub trait Handle {
     /// Invoked by [`TaskQueue`](crate::TaskQueue) *while its internal lock is
     /// held* — the same reentrancy prohibition as [`Executor::execute`] applies:
     /// do not synchronously call back into the queue. Cancellation may be
-    /// cooperative (a signal the worker observes at its next await point);
-    /// the queue does not require the worker to have stopped when this returns.
+    /// cooperative (a signal the worker observes at its next await point); the
+    /// queue does not require the worker to have stopped when this returns.
+    ///
+    /// **Cancellation must not lose progress the worker already claimed but has
+    /// not published yet.** A worker advances its cursor with
+    /// [`Task::safe_add_start`](crate::Task::safe_add_start) (claiming a span) and
+    /// only afterwards publishes the result of that span — a write, a send, an
+    /// `await`. A hard abort (e.g. `AbortHandle::abort`) takes effect at the
+    /// worker's next await point, which is typically inside that very publish, so
+    /// the span is claimed and then dropped: the cursor has already moved past it,
+    /// [`TaskQueue::set_threads`](TaskQueue::set_threads) can only reclaim what is
+    /// still unclaimed, and no worker can ever claim the span again. Implementations
+    /// must therefore either cancel cooperatively (observe the signal only between
+    /// publishing one unit and claiming the next) or make the claim itself the
+    /// publish point, so no await sits between "claimed" and "published". An `abort`
+    /// that simply drops the worker mid-unit silently truncates the range it was
+    /// working on.
     fn abort(&mut self);
     /// Returns whether `id` identifies the worker this handle was returned for.
     ///

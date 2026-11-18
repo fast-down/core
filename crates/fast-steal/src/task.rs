@@ -36,8 +36,10 @@ pub struct Task(Arc<TaskInner>);
 struct TaskInner {
     /// Atomic state packing `start` (high 64 bits) and `end` (low 64 bits).
     ///
-    /// Prefer the safe accessors ([`Task::start`], [`Task::end`], [`Task::get`],
-    /// [`Task::safe_add_start`]); this field is exposed for advanced use.
+    /// Private to this module, as is [`TaskInner`] itself: the only way in is
+    /// through [`Task`]'s accessors ([`Task::start`], [`Task::end`],
+    /// [`Task::get`], [`Task::safe_add_start`], ...), which is what keeps the
+    /// packed encoding an implementation detail.
     state: Arc<AtomicU128>,
 }
 
@@ -211,15 +213,28 @@ impl Task {
     /// `min_chunk_size`. When the range is too small to split under
     /// `min_chunk_size`, returns `Ok(None)` without modifying `self`.
     ///
+    /// `min_chunk_size == 0` is refused with the same `Ok(None)`: a zero minimum
+    /// makes the size test vacuous, and on an empty range `midpoint` collapses to
+    /// `start`, so the split would report success while returning the empty
+    /// `start..start` and leaving `self` unchanged — a public
+    /// `while task.split_two(0)?.is_some() {}` drain loop would never terminate.
+    /// The refusal is unconditional for `0` so that "a reported split always
+    /// consumed something" stays a property of the whole API; callers that want to
+    /// split down to single items pass `1`.
+    ///
     /// # Errors
     /// 1. Returns [`RangeError`] when `start > end`
-    /// 2. Returns `None` when `remain < min_chunk_size * 2` without modifying itself
+    /// 2. Returns `None` when `min_chunk_size == 0` or `remain < min_chunk_size * 2`,
+    ///    without modifying itself
     pub fn split_two(&self, min_chunk_size: u64) -> Result<Option<Range<u64>>, RangeError> {
         let mut old_state = self.0.state.load(Ordering::Acquire);
         loop {
             let range = Self::unpack(old_state);
             if range.start > range.end {
                 return Err(RangeError);
+            }
+            if min_chunk_size == 0 {
+                return Ok(None);
             }
             if range.end - range.start < min_chunk_size.saturating_mul(2) {
                 return Ok(None);
@@ -472,6 +487,41 @@ mod tests {
         // A chunk smaller than `min` is never handed out.
         let task = Task::new(0..10);
         assert_eq!(task.split_two(8), Ok(None));
+    }
+
+    /// A zero `min_chunk_size` is refused instead of "succeeding" with an empty
+    /// half. Before the guard, the `remain < min * 2` threshold was vacuous
+    /// (`min * 2 == 0`), so an empty range returned `Ok(Some(start..start))` while
+    /// leaving `self` unchanged -- and `while task.split_two(0)?.is_some() {}`
+    /// spun forever. The queue hid this behind its own `.max(1)`; the public API
+    /// must terminate on its own.
+    #[test]
+    fn split_two_refuses_a_zero_min_chunk_size() {
+        // The sharp case: an empty range, where `midpoint` collapses to `start`.
+        let task = Task::new(5..5);
+        assert_eq!(task.split_two(0), Ok(None));
+        assert_eq!(
+            task.get(),
+            5..5,
+            "a refused split leaves the task untouched"
+        );
+
+        // A non-empty range is refused too, so the outcome never depends on
+        // whether the range happens to be empty.
+        let task = Task::new(0..100);
+        assert_eq!(task.split_two(0), Ok(None));
+        assert_eq!(task.get(), 0..100);
+
+        let task = Task::new(0..1);
+        assert_eq!(task.split_two(0), Ok(None));
+
+        // Termination itself is the contract: this loop must end immediately.
+        let task = Task::new(7..7);
+        let mut rounds = 0u32;
+        while task.split_two(0).unwrap().is_some() {
+            rounds += 1;
+            assert!(rounds < 4, "split_two(0) kept reporting a successful split");
+        }
     }
 
     #[test]

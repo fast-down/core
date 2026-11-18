@@ -113,21 +113,49 @@ impl<H: Handle> TaskQueue<H> {
     /// pending task from the waiting queue; if none is available it steals a half
     /// range from the busiest running task via [`Task::split_two`](crate::Task::split_two)
     /// (when at least `min_chunk_size * 2` work remains), or, if `max_speculative > 1`
-    /// and the stolen task has few enough strong references, shares that same task
-    /// speculatively.
+    /// and fewer than `max_speculative` workers already share that task's progress
+    /// cursor, shares that same task speculatively.
+    ///
+    /// `min_chunk_size` is clamped to at least 1, so a caller passing `0` (e.g. an
+    /// option that was never set) still splits down to single items rather than
+    /// reaching [`Task::split_two`](crate::Task::split_two)'s zero-minimum refusal.
+    ///
+    /// `max_speculative` caps the number of workers that share one progress cursor.
+    /// It is compared against the count of strong references *to that cursor*
+    /// (`Task::sharer_count`, bumped only by `share_state`), not against
+    /// [`Task::strong_count`](crate::Task::strong_count): a plain `Task::clone` shares
+    /// the worker identity and leaves the speculative cap untouched. `<= 1`
+    /// disables speculation entirely, so a peer too small to split is left alone.
+    ///
+    /// # Preconditions
+    ///
+    /// - **`task` must already be exhausted** for this worker. Every path that
+    ///   reports [`Refilled`](StealOutcome::Refilled) **overwrites `*task`** with
+    ///   the new work, dropping the `Task` the caller passed in — and with it the
+    ///   worker's identity (and, for a speculative sharer, its reference to the
+    ///   shared cursor). Calling `steal` with work still remaining therefore
+    ///   silently discards that remaining range: the queue cannot reclaim it,
+    ///   because the advancing cursor is the only record of it.
+    /// - `id` must be the id of a worker the queue registered (a handle returned
+    ///   by [`Executor::execute`](crate::Executor::execute) from this queue), and
+    ///   that entry must still be registered. `steal` authenticates the caller
+    ///   solely through [`Handle::is_self`](crate::Handle::is_self).
     ///
     /// Returns a [`StealOutcome`] describing the three possible outcomes:
-    /// - [`Refilled`](StealOutcome::Refilled): `task` now holds fresh work and
-    ///   the worker is registered against it.
+    /// - [`Refilled`](StealOutcome::Refilled): `*task` now holds fresh work (the
+    ///   previous value is overwritten, see above) and the worker's registration
+    ///   is re-pointed at it.
     /// - [`NoWork`](StealOutcome::NoWork): the worker was registered, but
     ///   nothing was stealable. It is *deregistered* as a side effect — finding
     ///   no work means it is leaving — and only
-    ///   [`set_threads`](TaskQueue::set_threads) registers it again.
+    ///   [`set_threads`](TaskQueue::set_threads) registers it again. `*task` is
+    ///   left as the caller passed it.
     /// - [`Unregistered`](StealOutcome::Unregistered): `id` matches no
     ///   registered worker, e.g. because
-    ///   [`Handle::is_self`](crate::Handle::is_self) misidentifies its worker.
-    ///   Nothing is changed: no queue state is touched and no worker is
-    ///   deregistered.
+    ///   [`Handle::is_self`](crate::Handle::is_self) misidentifies its worker or
+    ///   because a previous `NoWork` already deregistered it. Nothing is
+    ///   changed: no queue state is touched, no worker is deregistered, no work
+    ///   is handed out, and `*task` keeps its previous value.
     pub fn steal(
         &self,
         id: &H::Id,
@@ -177,7 +205,38 @@ impl<H: Handle> TaskQueue<H> {
             StealOutcome::NoWork
         }
     }
-    /// Returns `None` when threads need to be increased but the executor is `None`
+    /// Adjusts the number of registered workers, spawning or aborting as needed.
+    ///
+    /// # What it actually does
+    ///
+    /// - **`threads` is clamped to at least 1** (`threads.max(1)`), so
+    ///   `set_threads(0, ..)` keeps one worker rather than pausing the pool.
+    ///   `min_chunk_size` is likewise clamped to at least 1.
+    /// - It first sweeps dead workers out of `running` (`WeakTask::is_alive`), then
+    ///   grows or shrinks toward the requested count.
+    /// - **Returning `Some(())` does not mean `threads` was reached.** Growth is
+    ///   fed from `waiting` and from halves split off the fattest running task; when
+    ///   both run dry (an empty `waiting` plus a single unsplittable task) it
+    ///   returns `Ok` having spawned fewer workers, leaving the shortfall for a
+    ///   later call to fill. It returns `None` only when growth is needed *right
+    ///   now* and no `executor` was supplied.
+    /// - **Shrink puts the aborted workers' unclaimed ranges back into `waiting`.**
+    ///   Every worker beyond `threads` is upgraded to a strong `Task` and has
+    ///   [`Handle::abort`] called on it; once the drain is done those tasks are
+    ///   pushed onto `waiting`, so a surviving worker can `take` the range an aborted
+    ///   worker had not claimed yet. Only *unclaimed* work is recoverable: whatever
+    ///   the aborted worker had already claimed (moved the cursor past) before it
+    ///   observed the abort is gone, which is exactly why [`Handle::abort`] carries
+    ///   its own contract. A speculative sharer's reclaimed `Task` aliases its
+    ///   surviving twin's cursor, and `steal`'s `take` handshake partitions that
+    ///   cursor safely instead of executing it twice.
+    /// - **[`Executor::execute`] is called while the queue's lock is held** (both for
+    ///   the `waiting` drain and for each split), so an executor must not re-enter
+    ///   the queue synchronously from it.
+    ///
+    /// Returns `None` when growth is needed and no `executor` was supplied;
+    /// `Some(())` otherwise, including when the request was already satisfied or no
+    /// work was available to spawn for.
     #[must_use]
     pub fn set_threads<E: Executor<Handle = H>>(
         &self,
