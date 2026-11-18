@@ -382,12 +382,21 @@ async fn events_are_tagged_with_the_callers_key() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_resolve_failure_still_terminates_once() {
     let dir = temp_dir("resolve-fail");
-    // Bind then drop the listener: the address is valid but nothing accepts, so
-    // the prefetch fails fast without leaving a server behind.
-    let addr = {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        listener.local_addr().expect("addr")
-    };
+    // A listener that accepts and immediately drops every connection: the
+    // request fails with a transport error within a millisecond, and the port
+    // stays ours for the whole test. Releasing the port instead (bind, then drop
+    // the listener) made the address reassignable, and another task in this
+    // binary could bind it and answer `/never.bin` with a payload: the prefetch
+    // then succeeded, the download completed, and no failure event was emitted.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.expect("accept");
+            // Drop without a response: the client sees the connection close.
+            drop(stream);
+        }
+    });
     let url = Url::parse(&format!("http://{addr}/never.bin")).unwrap();
 
     // Fail fast: one attempt, a 1ms retry gap, a short connect timeout. The
@@ -407,16 +416,24 @@ async fn a_resolve_failure_still_terminates_once() {
     let mut errors = 0usize;
     let mut terminated = 0usize;
     let mut reason = None;
+    // Every event seen, so a failure says which path the run took instead of
+    // only that a count was off.
+    let mut trace = Vec::new();
     let watch = async {
         while let Ok(event) = rx.recv().await {
             match event {
-                QueueEvent::Task(_, Event::PrefetchError(_)) => errors += 1,
+                QueueEvent::Task(_, Event::PrefetchError(_)) => {
+                    errors += 1;
+                    trace.push("PrefetchError".to_string());
+                }
                 QueueEvent::Task(_, Event::Terminated(r)) => {
                     terminated += 1;
                     reason = Some(r);
+                    trace.push(format!("Terminated({r:?})"));
                     break;
                 }
-                _ => {}
+                QueueEvent::Task(_, other) => trace.push(format!("{other:?}")),
+                other => trace.push(format!("{other:?}")),
             }
         }
     };
@@ -424,9 +441,15 @@ async fn a_resolve_failure_still_terminates_once() {
         .await
         .expect("a failed resolve must still terminate the task");
 
-    assert_eq!(errors, 1, "the resolve failure must be reported");
-    assert_eq!(terminated, 1, "a failed task must terminate exactly once");
-    assert_eq!(reason, Some(TerminationReason::Failed));
+    assert_eq!(
+        errors, 1,
+        "the resolve failure must be reported; events: {trace:?}"
+    );
+    assert_eq!(
+        terminated, 1,
+        "a failed task must terminate exactly once; events: {trace:?}"
+    );
+    assert_eq!(reason, Some(TerminationReason::Failed), "events: {trace:?}");
 }
 
 /// A task still waiting for a slot that is cancelled reports `Cancelled` and
