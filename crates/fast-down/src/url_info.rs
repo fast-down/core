@@ -71,6 +71,27 @@ impl FileId {
             last_modified: last_modified.map(Arc::from),
         }
     }
+
+    /// Whether this identity can still describe the same resource as `other`.
+    ///
+    /// Neither header has to appear on every response: a server may send
+    /// `Last-Modified` on the metadata `200` and omit it from the ranged `206`
+    /// replies, or send no validator at all. A field is therefore compared only
+    /// when both sides carry one — an absent value says nothing about the
+    /// resource while a present one that differs says it changed. When neither
+    /// field exists on both sides there is nothing to compare, so the two
+    /// identities match.
+    #[must_use]
+    pub fn matches(&self, other: &Self) -> bool {
+        fn field_matches(left: Option<&Arc<str>>, right: Option<&Arc<str>>) -> bool {
+            match (left, right) {
+                (Some(left), Some(right)) => left == right,
+                _ => true,
+            }
+        }
+        field_matches(self.etag.as_ref(), other.etag.as_ref())
+            && field_matches(self.last_modified.as_ref(), other.last_modified.as_ref())
+    }
 }
 
 #[cfg(test)]
@@ -99,6 +120,27 @@ mod tests {
             FileId::new(Some("x"), None),
             FileId::new(Some("x"), Some("y"))
         );
+    }
+
+    #[test]
+    fn file_id_matches_compares_only_the_fields_both_sides_carry() {
+        // A validator present on one side only says nothing about the resource:
+        // servers routinely send `Last-Modified` on the `200` and omit it from the
+        // ranged `206` replies.
+        assert!(FileId::new(None, Some("lm")).matches(&FileId::new(None, None)));
+        assert!(FileId::new(None, None).matches(&FileId::new(Some("v1"), None)));
+        // A field both sides carry must be equal.
+        assert!(FileId::new(Some("v1"), Some("lm")).matches(&FileId::new(Some("v1"), None)));
+        assert!(!FileId::new(Some("v1"), None).matches(&FileId::new(Some("v2"), None)));
+        assert!(
+            !FileId::new(Some("v1"), Some("lm")).matches(&FileId::new(Some("v1"), Some("lm2")))
+        );
+        // With no validator on either side there is nothing to compare, so the
+        // identities match.
+        assert!(FileId::new(None, None).matches(&FileId::new(None, None)));
+        // It is symmetric.
+        assert!(FileId::new(None, Some("lm")).matches(&FileId::new(None, None)));
+        assert!(FileId::new(None, None).matches(&FileId::new(None, Some("lm"))));
     }
 
     #[test]

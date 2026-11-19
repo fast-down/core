@@ -120,12 +120,16 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
         };
 
         // File identity is verified for every response — the reused one and every
-        // freshly requested one.
+        // freshly requested one. Only the validators both sides carry take part:
+        // a server may send `Last-Modified` on the metadata `200` and omit it from
+        // the ranged `206` replies, and a whole-identity comparison read that
+        // omission as a changed file (`MismatchedBody` is retryable, so the
+        // download would never finish).
         let new_file_id = FileId::new(
             current.headers().get("etag").ok().as_deref(),
             current.headers().get("last-modified").ok().as_deref(),
         );
-        if new_file_id != self.file_id {
+        if !self.file_id.matches(&new_file_id) {
             // Content changed underneath us. Surface it instead of streaming a body
             // that belongs to a different resource.
             return Err((HttpError::MismatchedBody(new_file_id, current), None));
@@ -450,10 +454,11 @@ mod tests {
     #[tokio::test]
     async fn test_http_puller_mismatched_body() {
         // The identity check runs on the response head, so a changed resource is
-        // reported by `pull` itself rather than by the stream.
+        // reported by `pull` itself rather than by the stream. Both sides name an
+        // `ETag` and the values differ, which is the case the check exists for.
         let url = Url::parse("http://localhost").unwrap();
         let client = MismatchClient;
-        let file_id = FileId::new(None, None);
+        let file_id = FileId::new(Some("etag-expected"), None);
         let mut puller = HttpPuller::new(Arc::new(url), client, None, file_id);
         let result = Puller::pull(&mut puller, None).await;
         assert!(matches!(
@@ -747,5 +752,137 @@ mod tests {
             Puller::pull(&mut puller, Some(&range)).await.is_ok(),
             "a range starting at 0 must not require Content-Range"
         );
+    }
+
+    /// A response carrying the given validators, so the identity check can be
+    /// exercised field by field.
+    #[derive(Clone, Debug)]
+    struct IdentityClient {
+        etag: Option<&'static str>,
+        last_modified: Option<&'static str>,
+    }
+    impl HttpClient for IdentityClient {
+        type RequestBuilder = IdentityRequestBuilder;
+        fn get(&self, _url: Url, _range: Option<ProgressEntry>) -> Self::RequestBuilder {
+            IdentityRequestBuilder(self.clone())
+        }
+    }
+    struct IdentityRequestBuilder(IdentityClient);
+    impl HttpRequestBuilder for IdentityRequestBuilder {
+        type Response = IdentityResponse;
+        type RequestError = MockError;
+        fn send(
+            self,
+        ) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> + Send {
+            std::future::ready(Ok(IdentityResponse::new(self.0.etag, self.0.last_modified)))
+        }
+    }
+    #[derive(Debug)]
+    struct IdentityResponse {
+        url: Url,
+        headers: IdentityHeaders,
+    }
+    impl IdentityResponse {
+        fn new(etag: Option<&'static str>, last_modified: Option<&'static str>) -> Self {
+            Self {
+                url: Url::parse("http://mock-url").unwrap(),
+                headers: IdentityHeaders {
+                    etag,
+                    last_modified,
+                },
+            }
+        }
+    }
+    impl HttpResponse for IdentityResponse {
+        type Headers = IdentityHeaders;
+        type ChunkError = MockError;
+        fn headers(&self) -> &Self::Headers {
+            &self.headers
+        }
+        fn url(&self) -> &Url {
+            &self.url
+        }
+        fn chunk(
+            &mut self,
+        ) -> impl Future<Output = Result<Option<Bytes>, Self::ChunkError>> + Send {
+            std::future::ready(Ok(None))
+        }
+    }
+    /// Only the two validators are ever present.
+    #[derive(Debug)]
+    struct IdentityHeaders {
+        etag: Option<&'static str>,
+        last_modified: Option<&'static str>,
+    }
+    impl HttpHeaders for IdentityHeaders {
+        type GetHeaderError = MockError;
+        fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
+            match header {
+                "etag" => self.etag.map(Cow::Borrowed).ok_or(MockError),
+                "last-modified" => self.last_modified.map(Cow::Borrowed).ok_or(MockError),
+                _ => Err(MockError),
+            }
+        }
+    }
+
+    /// The metadata `200` carries `Last-Modified`; the ranged `206` the puller
+    /// sees for a slice does not. A whole-identity comparison reported that
+    /// omission as a changed file, and since `MismatchedBody` is retryable the
+    /// download never finished.
+    #[tokio::test]
+    async fn a_validator_missing_from_the_ranged_reply_is_not_a_mismatch() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            IdentityClient {
+                etag: None,
+                last_modified: None,
+            },
+            None,
+            FileId::new(None, Some("Mon, 01 Jan 2024 00:00:00 GMT")),
+        );
+        let range = 0..20;
+        assert!(
+            Puller::pull(&mut puller, Some(&range)).await.is_ok(),
+            "a validator the 206 omits must not read as a changed file"
+        );
+    }
+
+    /// A validator both sides carry and that differs is the case the check
+    /// exists for: the body belongs to another resource.
+    #[tokio::test]
+    async fn a_different_etag_is_a_mismatch() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            IdentityClient {
+                etag: Some("v2"),
+                last_modified: None,
+            },
+            None,
+            FileId::new(Some("v1"), None),
+        );
+        let result = Puller::pull(&mut puller, None).await;
+        assert!(matches!(
+            result,
+            Err((HttpError::MismatchedBody(_, _), None))
+        ));
+    }
+
+    /// Neither side names a validator: nothing changed as far as the headers can
+    /// tell, so the body is streamed rather than refused.
+    #[tokio::test]
+    async fn identities_without_validators_match() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            IdentityClient {
+                etag: None,
+                last_modified: None,
+            },
+            None,
+            FileId::new(None, None),
+        );
+        assert!(Puller::pull(&mut puller, None).await.is_ok());
     }
 }
