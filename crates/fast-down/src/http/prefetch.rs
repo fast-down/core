@@ -60,9 +60,21 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
 }
 
 async fn prefetch<Client: HttpClient>(client: &Client, url: Url) -> PrefetchResult<Client> {
+    prefetch_within(client, url, RANGE_PROBE_TIMEOUT).await
+}
+
+/// [`prefetch`] with the range probe bounded by `probe_timeout`.
+///
+/// Split out so a test can drive the timeout path with a short budget instead of
+/// waiting out the production constant.
+async fn prefetch_within<Client: HttpClient>(
+    client: &Client,
+    url: Url,
+    probe_timeout: Duration,
+) -> PrefetchResult<Client> {
     let (result_no_range, range) = tokio::join!(
         prefetch_no_range(client, url.clone()),
-        is_support_range(client, url)
+        is_support_range(client, url, probe_timeout)
     );
     let mut res = result_no_range?;
     if let Some(range) = range {
@@ -126,17 +138,27 @@ const RANGE_PROBE_ATTEMPTS: usize = 3;
 /// metadata request, so a short gap is enough to ride out a reset or a blip.
 const RANGE_PROBE_GAP: Duration = Duration::from_millis(200);
 
+/// Upper bound on one range-probe request.
+///
+/// The probe runs in parallel with the metadata request and only decides whether
+/// the multi-chunk fast path may be used, so a server that accepts the request
+/// and then never answers must not keep `prefetch` waiting forever. A timed-out
+/// attempt counts as one failed attempt, exactly like a reset: the probe retries
+/// and, once the attempts are exhausted, the download degrades to a single
+/// stream.
+const RANGE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Whether the server honours a `bytes=0-0` range request, returning the
 /// `Content-Range` answer it gave when it does.
 ///
 /// A server that genuinely ignores ranges answers with a success status and no
 /// `Content-Range`, which resolves to `None` without any retry: degrading to a
-/// single stream stays a valid outcome. A probe that *fails* is not that
-/// answer, so the failure is never folded into the "no ranges" result: the
-/// cheap probe is retried up to [`RANGE_PROBE_ATTEMPTS`] times, mirroring the
-/// retries the whole prefetch already gets a layer up, and only a probe that
-/// keeps failing for every attempt falls back to the conservative
-/// single-stream download.
+/// single stream stays a valid outcome. A probe that *fails* — an error, or a
+/// request that outlives [`RANGE_PROBE_TIMEOUT`] — is not that answer, so the
+/// failure is never folded into the "no ranges" result: the cheap probe is
+/// retried up to [`RANGE_PROBE_ATTEMPTS`] times, mirroring the retries the whole
+/// prefetch already gets a layer up, and only a probe that keeps failing for
+/// every attempt falls back to the conservative single-stream download.
 ///
 /// The parsed value is returned rather than a bare `true` because the probe's
 /// `Content-Range` is also where a chunked metadata response's size comes from.
@@ -146,18 +168,26 @@ const RANGE_PROBE_GAP: Duration = Duration::from_millis(200);
 /// carries a `ReqwestResponseError`, which only the `reqwest` backend can
 /// build, while `prefetch` is generic over [`HttpClient`]. Fabricating one is
 /// exactly what this probe must stop doing.
-async fn is_support_range<Client: HttpClient>(client: &Client, url: Url) -> Option<ContentRange> {
+async fn is_support_range<Client: HttpClient>(
+    client: &Client,
+    url: Url,
+    timeout: Duration,
+) -> Option<ContentRange> {
     let mut attempt = 1;
     loop {
-        match client.get(url.clone(), Some(0..1)).send().await {
-            Ok(resp) => return zero_range_answer(resp.headers()),
-            Err(_) if attempt < RANGE_PROBE_ATTEMPTS => {
+        // The request and the wait for an answer share one budget: a server that
+        // accepts the connection and then stays silent has to end the attempt
+        // rather than pin the whole `prefetch` to a dead socket.
+        let probe = tokio::time::timeout(timeout, client.get(url.clone(), Some(0..1)).send()).await;
+        match probe {
+            Ok(Ok(resp)) => return zero_range_answer(resp.headers()),
+            Ok(Err(_)) | Err(_) if attempt < RANGE_PROBE_ATTEMPTS => {
                 tokio::time::sleep(RANGE_PROBE_GAP).await;
                 attempt += 1;
             }
             // Retries exhausted: the caller keeps the download alive as a
             // single stream instead of failing on an advisory probe.
-            Err(_) => return None,
+            Ok(Err(_)) | Err(_) => return None,
         }
     }
 }
@@ -506,5 +536,136 @@ mod tests {
         );
         assert!(!info.supports_range);
         assert!(!info.fast_download);
+    }
+
+    /// Answers the metadata request from memory and lets the ranged probe reach a
+    /// real server that accepts the connection and then never replies: the case
+    /// where the request is delivered but no answer ever arrives.
+    #[cfg(feature = "reqwest")]
+    #[derive(Clone, Debug)]
+    struct HangingProbeClient {
+        /// Address of the server that accepts and stays silent.
+        addr: std::net::SocketAddr,
+        /// Ranged requests sent so far, including the ones that timed out.
+        attempts: Arc<AtomicUsize>,
+    }
+
+    #[cfg(feature = "reqwest")]
+    impl HangingProbeClient {
+        fn new(addr: std::net::SocketAddr) -> Self {
+            Self {
+                addr,
+                attempts: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn probes(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(feature = "reqwest")]
+    impl HttpClient for HangingProbeClient {
+        type RequestBuilder = HangingProbeRequestBuilder;
+
+        fn get(&self, url: Url, range: Option<fast_pull::ProgressEntry>) -> Self::RequestBuilder {
+            HangingProbeRequestBuilder {
+                url,
+                ranged: range.is_some(),
+                client: self.clone(),
+            }
+        }
+    }
+
+    #[cfg(feature = "reqwest")]
+    struct HangingProbeRequestBuilder {
+        url: Url,
+        ranged: bool,
+        client: HangingProbeClient,
+    }
+
+    #[cfg(feature = "reqwest")]
+    impl HttpRequestBuilder for HangingProbeRequestBuilder {
+        type Response = FixtureResponse;
+        type RequestError = FixtureError;
+
+        async fn send(self) -> PullResult<Self::Response, Self::RequestError> {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            if !self.ranged {
+                let mut headers = HashMap::new();
+                headers.insert("content-length".to_string(), "1024".to_string());
+                return Ok(FixtureResponse {
+                    url: self.url,
+                    headers: MapHeaders(headers),
+                });
+            }
+
+            self.client.attempts.fetch_add(1, Ordering::SeqCst);
+            let mut stream = tokio::net::TcpStream::connect(self.client.addr)
+                .await
+                .map_err(|_| (FixtureError, None))?;
+            stream
+                .write_all(b"GET /probe HTTP/1.1\r\nRange: bytes=0-0\r\n\r\n")
+                .await
+                .map_err(|_| (FixtureError, None))?;
+            // The server holds the connection open without answering, so this
+            // read stays pending and only the probe's timeout can end the
+            // attempt.
+            let mut buf = [0u8; 64];
+            let _ = stream.read(&mut buf).await;
+            Err((FixtureError, None))
+        }
+    }
+
+    /// A server that accepts a connection and never answers must not keep the
+    /// prefetch waiting forever: the probe is bounded by its timeout, retried the
+    /// usual number of times, and then reported as no range support.
+    #[cfg(feature = "reqwest")]
+    #[tokio::test]
+    async fn a_probe_that_never_answers_times_out_into_a_single_stream() {
+        use tokio::net::TcpListener;
+
+        // Hold every accepted connection open without writing a byte.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                // Keep the connection open without answering: the probe waits for
+                // a response that never comes.
+                tokio::spawn(async move {
+                    let _socket = socket;
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+
+        let client = HangingProbeClient::new(addr);
+        let url = Url::parse(&format!("http://{addr}/file.bin")).unwrap();
+        let started = std::time::Instant::now();
+        let (info, _resp) = prefetch_within(&client, url, Duration::from_millis(100))
+            .await
+            .expect("a hanging probe must not fail a prefetch whose metadata arrived");
+        let elapsed = started.elapsed();
+
+        assert!(
+            !info.supports_range,
+            "a probe that never answered cannot claim range support"
+        );
+        assert!(!info.fast_download, "the fast path needs a range answer");
+        assert_eq!(
+            info.size, 1024,
+            "the metadata request still supplies the size"
+        );
+        assert_eq!(
+            client.probes(),
+            RANGE_PROBE_ATTEMPTS,
+            "a timed-out attempt must be retried like a reset"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the probe must end once its timeout budget is spent, took {elapsed:?}"
+        );
+        server.abort();
     }
 }
