@@ -36,8 +36,9 @@ use portable_atomic::AtomicU128;
 /// 128-bit atomics (`portable-atomic` uses a lock elsewhere). Multiple workers
 /// can safely steal sub-ranges from the same task via `split_two`.
 ///
-/// Two `Task`s are equal iff they point to the same underlying state (see the
-/// `PartialEq` impl, which uses `Arc::ptr_eq`).
+/// `Task` deliberately implements neither `PartialEq` nor `Eq`: equality had two
+/// meanings (same progress cursor, same worker identity) that callers kept
+/// confusing. Ask for one explicitly with `same_cursor` or `same_identity`.
 #[derive(Debug)]
 pub struct Task {
     inner: Arc<TaskInner>,
@@ -334,6 +335,26 @@ impl Task {
     pub(crate) fn sharer_count(&self) -> usize {
         Arc::strong_count(&self.inner.state)
     }
+    /// Returns `true` when both handles share the same progress cursor.
+    ///
+    /// This is the relation `Task` used to express through `PartialEq`. It is now
+    /// a named question because the other one — [`same_identity`](Task::same_identity)
+    /// — has the same shape but a different answer for a speculative twin.
+    #[must_use]
+    pub(crate) fn same_cursor(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner.state, &other.inner.state)
+    }
+    /// Returns `true` when both handles point at the same worker identity rather
+    /// than merely sharing a progress cursor.
+    ///
+    /// [`same_cursor`](Task::same_cursor) answers the weaker question and treats
+    /// a speculative twin as equal to its peer. This is the stricter one a
+    /// registration asks: is this the exact handle the queue handed to that
+    /// worker? A `clone` shares the identity; a twin does not.
+    #[must_use]
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
     /// Rebinds this task to share `other`'s progress cursor while keeping its own
     /// distinct liveness identity.
     ///
@@ -366,13 +387,6 @@ impl Clone for Task {
         }
     }
 }
-
-impl PartialEq for Task {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.inner.state, &other.inner.state)
-    }
-}
-impl Eq for Task {}
 
 #[cfg(test)]
 mod tests {
@@ -480,9 +494,9 @@ mod tests {
     fn test_partial_eq_by_ptr() {
         let a = Task::new(1..10);
         let b = a.clone();
-        assert_eq!(a, b);
+        assert!(a.same_cursor(&b));
         let c = Task::new(1..10);
-        assert_ne!(a, c);
+        assert!(!a.same_cursor(&c));
     }
 
     #[test]
@@ -782,7 +796,10 @@ mod tests {
             2,
             "the twin holds a strong ref to the cursor"
         );
-        assert_eq!(twin, task, "twins compare equal via the shared cursor");
+        assert!(
+            twin.same_cursor(&task),
+            "twins share the cursor but not the identity"
+        );
         drop(twin);
         assert_eq!(
             task.sharer_count(),

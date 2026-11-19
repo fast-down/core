@@ -112,15 +112,22 @@ mod tests {
     //! Contract tests: these pin the *requirements* [`TaskQueue`] places on
     //! implementors of [`Executor`] / [`Handle`], which the trait signatures
     //! alone cannot express.
+    extern crate std;
     use crate::{Executor, Handle, StealOutcome, Task, TaskQueue};
-    use core::cell::Cell;
+    use core::cell::{Cell, RefCell};
+    use std::vec::Vec;
 
-    /// A runtime-free stub: `execute` spawns nothing and just returns a handle
-    /// carrying a sequential id. `honest` controls whether `is_self` upholds
-    /// its contract or violates it (always `false`).
+    /// A runtime-free stub: `execute` spawns nothing, keeps each handed `Task`
+    /// alive in `tasks` (honouring the keep-alive contract) and returns a handle
+    /// carrying a sequential id. `honest` controls whether `is_self` upholds its
+    /// contract or violates it (always `false`).
     struct StubExecutor {
         honest: bool,
         next_id: Cell<usize>,
+        /// The armed `Task` each spawned worker was handed, held for the
+        /// duration of the test: dropping it clears the worker's liveness guard,
+        /// so the queue would treat the worker as dead.
+        tasks: RefCell<Vec<Task>>,
     }
     struct StubHandle {
         honest: bool,
@@ -135,30 +142,48 @@ mod tests {
     }
     impl Executor for StubExecutor {
         type Handle = StubHandle;
-        fn execute(&self, _task: Task, _queue: TaskQueue<Self::Handle>) -> Self::Handle {
+        fn execute(&self, task: Task, _queue: TaskQueue<Self::Handle>) -> Self::Handle {
             let id = self.next_id.get();
             self.next_id.set(id + 1);
+            self.tasks.borrow_mut().push(task);
             StubHandle {
                 honest: self.honest,
                 id,
             }
         }
     }
+    impl StubExecutor {
+        /// The task worker `id` holds, advanced to `end..end` exactly as a real
+        /// worker leaves its cursor before calling `steal`.
+        fn drained_task_of(&self, id: usize) -> Task {
+            let task = self.tasks.borrow()[id].clone();
+            let range = task.get();
+            assert!(range.start < range.end, "worker {id} had no work to drain");
+            task.safe_add_start(range.start, range.end - range.start)
+                .expect("range invariant holds");
+            task
+        }
+    }
 
-    fn queue_with_one_worker(honest: bool) -> TaskQueue<StubHandle> {
+    /// Returns the queue together with its executor: the test must keep the
+    /// executor (and with it the retained `Task`s) alive for as long as the
+    /// queue's registration is used.
+    fn queue_with_one_worker(honest: bool) -> (StubExecutor, TaskQueue<StubHandle>) {
         let executor = StubExecutor {
             honest,
             next_id: Cell::new(0),
+            tasks: RefCell::new(Vec::new()),
         };
         let queue = TaskQueue::new(core::iter::once(0..10));
-        // Registers worker 0: its task is handed to `execute` and its handle is
-        // stored in `running`. The stub spawns nothing, so nothing consumes the
-        // `10..20` we enqueue next -- by construction it stays in `waiting`.
+        // Registers worker 0: its task is handed to `execute`, which retains it,
+        // and its handle is stored in `running`. The stub spawns nothing, so
+        // nothing consumes the `10..20` we enqueue next -- by construction it
+        // stays in `waiting`.
         queue
             .set_threads(1, 1, Some(&executor))
             .expect("executor provided");
         let _ = queue.add(Task::new(10..20));
-        queue
+        (executor, queue)
     }
 
     /// CONTRACT (`is_self`): the handle returned by `execute` MUST report `true`
@@ -166,8 +191,8 @@ mod tests {
     /// registration key `steal` has.
     #[test]
     fn honest_is_self_lets_the_worker_steal_waiting_work() {
-        let queue = queue_with_one_worker(true);
-        let mut task = Task::new(0..0);
+        let (executor, queue) = queue_with_one_worker(true);
+        let mut task = executor.drained_task_of(0);
         assert_eq!(queue.steal(&0, &mut task, 1, 1), StealOutcome::Refilled);
         assert_eq!(task.get(), 10..20);
     }
@@ -179,12 +204,12 @@ mod tests {
     /// "no work left" exits and silently strands that work.
     #[test]
     fn broken_is_self_strands_waiting_work() {
-        let queue = queue_with_one_worker(false);
-        let mut task = Task::new(0..0);
+        let (executor, queue) = queue_with_one_worker(false);
+        let mut task = executor.drained_task_of(0);
         // Same queue state as the honest twin above; only `is_self` differs.
         assert_eq!(queue.steal(&0, &mut task, 1, 1), StealOutcome::Unregistered);
         // The caller's task was not refilled, yet 10..20 was never handed out.
-        assert_eq!(task.get(), 0..0);
+        assert_eq!(task.get(), 10..10);
     }
 
     /// CONTRACT (id pairing): an id that no registered handle recognises is
@@ -192,10 +217,10 @@ mod tests {
     /// with an honest `is_self` and work available.
     #[test]
     fn unregistered_id_cannot_steal() {
-        let queue = queue_with_one_worker(true);
-        let mut task = Task::new(0..0);
+        let (executor, queue) = queue_with_one_worker(true);
+        let mut task = executor.drained_task_of(0);
         // Worker ids handed out so far: only 0. Id 7 was never registered.
         assert_eq!(queue.steal(&7, &mut task, 1, 1), StealOutcome::Unregistered);
-        assert_eq!(task.get(), 0..0);
+        assert_eq!(task.get(), 10..10);
     }
 }
