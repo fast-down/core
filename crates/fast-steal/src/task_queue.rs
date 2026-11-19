@@ -112,20 +112,19 @@ impl<H: Handle> TaskQueue<H> {
     /// The caller must pass its own currently-held [`Task`] plus `id` (compared via
     /// [`Handle::is_self`](crate::Handle::is_self)). The function first hands out a
     /// pending task from the waiting queue; if none is available it steals a half
-    /// range from the busiest running task via [`Task::split_two`](crate::Task::split_two)
+    /// range from the busiest running task via `Task::split_two`
     /// (when at least `min_chunk_size * 2` work remains), or, if `max_speculative > 1`
     /// and fewer than `max_speculative` workers already share that task's progress
     /// cursor, shares that same task speculatively.
     ///
     /// `min_chunk_size` is clamped to at least 1, so a caller passing `0` (e.g. an
     /// option that was never set) still splits down to single items rather than
-    /// reaching [`Task::split_two`](crate::Task::split_two)'s zero-minimum refusal.
+    /// reaching `Task::split_two`'s zero-minimum refusal.
     ///
     /// `max_speculative` caps the number of workers that share one progress cursor.
     /// It is compared against the count of strong references *to that cursor*
-    /// (`Task::sharer_count`, bumped only by `share_state`), not against
-    /// [`Task::strong_count`](crate::Task::strong_count): a plain `Task::clone` shares
-    /// the worker identity and leaves the speculative cap untouched. `<= 1`
+    /// (`Task::sharer_count`, bumped only by `share_state`): a plain `Task::clone`
+    /// shares the worker identity and leaves the speculative cap untouched. `<= 1`
     /// disables speculation entirely, so a peer too small to split is left alone.
     ///
     /// # Preconditions
@@ -239,8 +238,8 @@ impl<H: Handle> TaskQueue<H> {
     ///   its own contract. A speculative sharer's reclaimed `Task` aliases its
     ///   surviving twin's cursor, and `steal`'s `take` handshake partitions that
     ///   cursor safely instead of executing it twice. **This is the only path that
-    ///   reclaims**: aborting through [`handles`](TaskQueue::handles) leaves the
-    ///   aborted workers' unclaimed ranges lost.
+    ///   reclaims**: aborting a worker's handle alone leaves its unclaimed range
+    ///   lost with the task.
     /// - **[`Executor::execute`] is called while the queue's lock is held** (both for
     ///   the `waiting` drain and for each split), so an executor must not re-enter
     ///   the queue synchronously from it.
@@ -295,33 +294,6 @@ impl<H: Handle> TaskQueue<H> {
         }
         Some(())
     }
-    /// Provides mutable access to the handles of all running tasks, e.g. to abort
-    /// or inspect them.
-    ///
-    /// # Liveness / deadlock contract
-    /// The closure `f` is invoked *while the queue lock is held*. It must **not**
-    /// re-enter `TaskQueue` (e.g. call [`steal`](TaskQueue::steal),
-    /// [`add`](TaskQueue::add), [`set_threads`](TaskQueue::set_threads), or
-    /// [`handles`](TaskQueue::handles) again) — doing so deadlocks. Keep `f`
-    /// short: it blocks every other queue operation until it returns.
-    ///
-    /// # Reclaiming aborted work
-    /// Aborting a handle here does **not** reclaim that worker's unclaimed range.
-    /// Only [`set_threads`](TaskQueue::set_threads) shrink takes the aborted
-    /// workers' tasks and pushes them back into `waiting`; an abort through this
-    /// iterator just signals cancellation, and the range the worker had not
-    /// claimed yet is lost together with its [`Task`] (see [`Handle::abort`]'s
-    /// contract for what "already claimed" costs). To abort workers and keep
-    /// their remaining work, shrink the pool with `set_threads` instead.
-    pub fn handles<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut dyn Iterator<Item = &mut H>) -> R,
-    {
-        let mut guard = self.inner.lock();
-        let mut iter = guard.running.iter_mut().map(|w| &mut w.1);
-        f(&mut iter)
-    }
-
     /// Aborts every running task equal to `task` that does not belong to the
     /// worker `id`.
     ///
@@ -1069,15 +1041,11 @@ mod tests {
         q.set_threads(1, 1, Some(&ex)).unwrap();
 
         // An observer's clone: it shares the identity but carries no guard.
-        let observer = ex.task_of(0);
+        let _observer = ex.task_of(0);
         assert!(q.inner.lock().running[0].0.is_alive());
 
         // The worker exits: the executor drops the armed task it was handed.
         ex.kill(0);
-        assert!(
-            observer.strong_count() > 0,
-            "the observer's clone is still alive"
-        );
         assert!(
             !q.inner.lock().running[0].0.is_alive(),
             "an observer's clone must not keep the exited worker alive"
@@ -1096,7 +1064,7 @@ mod tests {
         let ex = SyncExecutor::new();
         let q = TaskQueue::new(core::iter::once(0..10));
         q.set_threads(1, 1, Some(&ex)).unwrap();
-        let observer = ex.task_of(0);
+        let _observer = ex.task_of(0);
         assert!(
             q.add(Task::new(100..110)),
             "the registered worker is alive and will pick the task up"
@@ -1110,10 +1078,6 @@ mod tests {
         assert!(
             !q.inner.lock().running[0].0.is_alive(),
             "the worker is dead even though its identity is still referenced"
-        );
-        assert!(
-            observer.strong_count() >= 2,
-            "the queue keeps its own reference to the dead identity until it is swept"
         );
     }
 
@@ -1399,23 +1363,6 @@ mod tests {
             1,
             "dead worker reclaimed despite its speculative twin"
         );
-    }
-
-    /// `handles` exposes every running handle by mutable reference and hands the
-    /// closure's return value back out.
-    #[test]
-    fn handles_exposes_every_running_worker() {
-        let ex = SyncExecutor::new();
-        let q = TaskQueue::new([0..1, 1..2, 2..3].into_iter());
-        q.set_threads(3, 1, Some(&ex)).unwrap();
-        let ids = q.handles(|iter| iter.map(|h| h.id).collect::<Vec<_>>());
-        assert_eq!(ids, [0, 1, 2]);
-        q.handles(|iter| {
-            for h in iter {
-                h.abort();
-            }
-        });
-        assert_eq!(ex.aborted(), [0, 1, 2]);
     }
 
     /// `cancel_task` is the speculation cleanup path: when one sharer finishes the

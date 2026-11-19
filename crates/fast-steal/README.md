@@ -77,18 +77,22 @@ impl Executor for TokioExecutor {
         // task, which starts after the lock is released.
         let handle = tokio::spawn(async move {
             loop {
-                while task.start() < task.end() {
-                    let i = task.start();
+                // One snapshot of the cursor per element: `start` and `end` move
+                // independently while other workers steal from this task.
+                let mut current = task.get();
+                while current.start < current.end {
+                    let i = current.start;
                     let res = fib(i);
                     // `safe_add_start` is what makes speculative sharing safe:
                     // if another worker already claimed `i`, this fails and we
                     // simply drop our (duplicate) result instead of sending it.
-                    let Ok(_) = task.safe_add_start(i, 1) else {
+                    if task.safe_add_start(i, 1).is_ok() {
+                        println!("task: {i} = {res}");
+                        tx.send((i, res)).unwrap();
+                    } else {
                         println!("task-failed: {i} = {res}");
-                        continue;
-                    };
-                    println!("task: {i} = {res}");
-                    tx.send((i, res)).unwrap();
+                    }
+                    current = task.get();
                 }
                 // `Refilled` is the only outcome that hands this worker more
                 // work; `NoWork` and `Unregistered` both end its loop.

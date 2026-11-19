@@ -20,7 +20,7 @@ pub trait Executor {
     /// - **Do not call back into the queue synchronously.** This method is
     ///   invoked by [`TaskQueue::set_threads`] *while the queue's internal lock
     ///   is held*; synchronously calling any `TaskQueue` method (`add`, `steal`,
-    ///   `set_threads`, `cancel_task`, `handles`) on `task_queue` from inside
+    ///   `set_threads`, `cancel_task`) on `task_queue` from inside
     ///   `execute` deadlocks. Defer all queue access to the spawned worker
     ///   (e.g. inside `tokio::spawn`), which runs after the lock is released.
     /// - **The returned handle must identify the spawned worker.** Its
@@ -102,8 +102,8 @@ pub trait Handle {
     ///   doing I/O or awaiting here serialises the queue; a lock that another
     ///   thread can hold while it waits for the queue deadlocks it outright.
     /// - **It must not call back into the queue** (nor into [`Handle::abort`]):
-    ///   any `TaskQueue` method (`add`, `steal`, `set_threads`, `cancel_task`,
-    ///   `handles`) re-takes the lock and deadlocks.
+    ///   any `TaskQueue` method (`add`, `steal`, `set_threads`, `cancel_task`)
+    ///   re-takes the lock and deadlocks.
     fn is_self(&self, id: &Self::Id) -> bool;
 }
 

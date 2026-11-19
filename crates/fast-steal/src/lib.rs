@@ -1,4 +1,6 @@
 #![no_std]
+#![deny(missing_docs)]
+#![deny(unreachable_pub)]
 //! `fast-steal` provides a `no_std`-compatible building block for work-stealing
 //! schedulers.
 //!
@@ -24,6 +26,6 @@ mod executor;
 mod task;
 mod task_queue;
 
-pub use executor::*;
-pub use task::*;
-pub use task_queue::*;
+pub use executor::{Executor, Handle};
+pub use task::{RangeError, Task};
+pub use task_queue::{StealOutcome, TaskQueue};

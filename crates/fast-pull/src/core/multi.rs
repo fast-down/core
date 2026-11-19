@@ -321,8 +321,11 @@ where
                 if worker_token.is_cancelled() {
                     break 'task;
                 }
-                let mut start = task.start();
-                if start >= task.end() {
+                // One load for both bounds: `start` and `end` move independently
+                // under a steal, so reading them separately can mix two snapshots.
+                let current = task.get();
+                let mut start = current.start;
+                if start >= current.end {
                     let current_min = min_chunk_size.load(Ordering::Relaxed);
                     if task_queue.steal(&id, &mut task, current_min, max_speculative)
                         == StealOutcome::Refilled
@@ -332,7 +335,7 @@ where
                     break 'task;
                 }
                 let _ = tx.send(Event::Pulling(id));
-                let download_range = start..task.end();
+                let download_range = start..task.get().end;
                 let mut stream = 'attempt: {
                     // The `select!` result may borrow `puller` through the stream it
                     // returns, so it lives in its own scope: that borrow ends here and
@@ -404,7 +407,7 @@ where
                                 start += len;
                                 continue;
                             };
-                            if span.end >= task.end() {
+                            if span.end >= task.get().end {
                                 task_queue.cancel_task(&task, &id);
                             }
                             #[allow(clippy::cast_possible_truncation)]
@@ -415,7 +418,7 @@ where
                             let _ = tx.send(Event::PullProgress(id, span.clone()));
                             clock.beat();
                             let _ = tx_push.send((id, span, chunk)).await;
-                            if start >= task.end() {
+                            if start >= task.get().end {
                                 continue 'task;
                             }
                         }

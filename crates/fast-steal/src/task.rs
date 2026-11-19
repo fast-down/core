@@ -34,7 +34,7 @@ use portable_atomic::AtomicU128;
 /// The range is stored as a single atomic `u128` inside `TaskInner`, allowing
 /// lock-free reads and fine-grained progress updates on targets with native
 /// 128-bit atomics (`portable-atomic` uses a lock elsewhere). Multiple workers
-/// can safely steal sub-ranges from the same task via [`split_two`](Task::split_two).
+/// can safely steal sub-ranges from the same task via `split_two`.
 ///
 /// Two `Task`s are equal iff they point to the same underlying state (see the
 /// `PartialEq` impl, which uses `Arc::ptr_eq`).
@@ -174,17 +174,18 @@ impl Task {
     ///
     /// Loads independently of [`end`](Task::end): combining the two
     /// (`task.end() - task.start()`) can observe a torn snapshot under
-    /// concurrency. Use [`get`](Task::get) or [`remain`](Task::remain) when a
+    /// concurrency. Use `get` or `remain` when a
     /// consistent view of both bounds is required.
+    #[cfg(test)]
     #[must_use]
-    pub fn start(&self) -> u64 {
+    pub(crate) fn start(&self) -> u64 {
         (self.inner.state.load(Ordering::Acquire) >> 64) as u64
     }
     /// Atomically advances `start` to `min(start + bias, end)`, but only if that
     /// makes forward progress; then returns the slice that was claimed.
     ///
     /// `start` must be a cursor value the caller actually observed via
-    /// [`start`](Task::start) or [`get`](Task::get); a `start` that runs *ahead*
+    /// `start` or `get`; a `start` that runs *ahead*
     /// of the task's real cursor is rejected, because honouring it would skip
     /// work no worker ever executed. A *stale* `start` is still accepted, but the
     /// returned span then begins at the real cursor and is shorter than `bias` —
@@ -227,15 +228,16 @@ impl Task {
     ///
     /// Loads independently of [`start`](Task::start); see that method for the
     /// torn-snapshot caveat when combining the two.
+    #[cfg(test)]
     #[must_use]
-    pub fn end(&self) -> u64 {
+    pub(crate) fn end(&self) -> u64 {
         #[allow(clippy::cast_possible_truncation)]
         let end = self.inner.state.load(Ordering::Acquire) as u64;
         end
     }
     /// Returns `end - start` (saturating), i.e. how much work is left.
     #[must_use]
-    pub fn remain(&self) -> u64 {
+    pub(crate) fn remain(&self) -> u64 {
         let range = self.get();
         range.end.saturating_sub(range.start)
     }
@@ -263,7 +265,7 @@ impl Task {
     /// 1. Returns [`RangeError`] when `start > end`
     /// 2. Returns `None` when `min_chunk_size == 0` or `remain < min_chunk_size * 2`,
     ///    without modifying itself
-    pub fn split_two(&self, min_chunk_size: u64) -> Result<Option<Range<u64>>, RangeError> {
+    pub(crate) fn split_two(&self, min_chunk_size: u64) -> Result<Option<Range<u64>>, RangeError> {
         let mut old_state = self.inner.state.load(Ordering::Acquire);
         loop {
             let range = Self::unpack(old_state);
@@ -299,7 +301,7 @@ impl Task {
     /// # Errors
     /// 1. Returns [`RangeError`] when `start > end`
     /// 2. Returns `Ok(None)` when the task is already empty, without modifying it
-    pub fn take(&self) -> Result<Option<Range<u64>>, RangeError> {
+    pub(crate) fn take(&self) -> Result<Option<Range<u64>>, RangeError> {
         let mut old_state = self.inner.state.load(Ordering::Acquire);
         loop {
             let range = Self::unpack(old_state);
@@ -321,25 +323,12 @@ impl Task {
             }
         }
     }
-    /// Returns the number of strong [`Task`] references to this worker's *identity*
-    /// (`TaskInner`).
-    ///
-    /// This is a plain reference count and says nothing about worker liveness
-    /// (see [`is_alive`](Task::is_alive)). The queue holds one reference for
-    /// every registered worker. The (different) cursor-sharer count that `steal`
-    /// caps on is exposed separately as the crate-internal `sharer_count`
-    /// accessor.
-    #[must_use]
-    pub fn strong_count(&self) -> usize {
-        Arc::strong_count(&self.inner)
-    }
     /// Returns the number of [`Task`] references currently sharing this task's
     /// progress *cursor* (the `state` `Arc<AtomicU128>`).
     ///
-    /// This is a *different* quantity from [`strong_count`](Task::strong_count):
-    /// the latter counts worker identities, whereas this counts how many workers
-    /// have aliased the same cursor via [`share_state`](Task::share_state)
-    /// (speculative sharing). Only `steal` consults it, to cap how many workers
+    /// A speculative twin bumps it (via [`share_state`](Task::share_state)); a
+    /// plain `clone` does not, because it copies the identity rather than adding
+    /// a cursor reference. Only `steal` consults it, to cap how many workers
     /// share one cursor.
     #[must_use]
     pub(crate) fn sharer_count(&self) -> usize {
@@ -809,28 +798,6 @@ mod tests {
             1,
             "clone shares identity, not a cursor ref"
         );
-    }
-
-    /// `strong_count` counts *worker identity*, never the shared cursor.
-    #[test]
-    fn task_strong_count_counts_identity_not_cursor() {
-        let task = Task::new(0..10);
-        assert_eq!(task.strong_count(), 1);
-
-        // A plain `clone` shares the identity, so it bumps `strong_count`...
-        let alias = task.clone();
-        assert_eq!(task.strong_count(), 2);
-
-        // ...but does NOT touch the cursor, so `sharer_count` is unchanged.
-        assert_eq!(task.sharer_count(), 1, "clone does not alias the cursor");
-        drop(alias);
-
-        // `share_state` aliases the cursor (new identity) and bumps `sharer_count`,
-        // but leaves `strong_count` (identity) untouched.
-        let mut twin = Task::new(0..0);
-        twin.share_state(&task);
-        assert_eq!(task.sharer_count(), 2, "share_state aliases the cursor");
-        assert_eq!(task.strong_count(), 1, "share_state keeps its own identity");
     }
 
     /// `is_alive` follows the worker's own guard, independent of how many twins
