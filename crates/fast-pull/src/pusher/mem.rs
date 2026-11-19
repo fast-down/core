@@ -9,6 +9,9 @@ use std::{sync::Arc, vec::Vec};
 ///
 /// All pushed data is stored in a shared `Vec<u8>` protected by a mutex.
 /// Supports random-access writes via `copy_from_slice` for non-sequential ranges.
+/// A chunk whose length does not match its range is rejected with
+/// [`std::io::ErrorKind::InvalidInput`] instead of being written truncated or
+/// panicking.
 #[derive(Default)]
 pub struct MemPusher {
     /// The shared buffer the pusher writes into.
@@ -49,22 +52,56 @@ impl std::fmt::Debug for MemPusher {
     }
 }
 impl Pusher for MemPusher {
-    type Error = std::convert::Infallible;
+    type Error = std::io::Error;
 
     fn set_listener(&mut self, cb: ProgressListener) {
         self.listener = Some(cb);
     }
 
     fn push(&mut self, range: &ProgressEntry, content: Bytes) -> Result<(), (Self::Error, Bytes)> {
-        #![allow(clippy::significant_drop_tightening, clippy::cast_possible_truncation)]
+        #![allow(clippy::significant_drop_tightening)]
+        // The engine derives written bytes from `content.len()` and the range,
+        // so a mismatch would slice the buffer at the wrong offsets (or panic in
+        // `copy_from_slice`). Reject it before touching the destination.
+        let (Ok(start), Ok(end)) = (usize::try_from(range.start), usize::try_from(range.end))
+        else {
+            return Err((
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("push range {range:?} does not fit in usize"),
+                ),
+                content,
+            ));
+        };
+        let Some(len) = end.checked_sub(start) else {
+            return Err((
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("push range {range:?} is reversed"),
+                ),
+                content,
+            ));
+        };
+        if content.len() != len {
+            return Err((
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "push range {range:?} covers {len} bytes but content has {}",
+                        content.len()
+                    ),
+                ),
+                content,
+            ));
+        }
         let mut guard = self.receive.lock();
-        if range.start as usize == guard.len() {
+        if start == guard.len() {
             guard.extend_from_slice(&content);
         } else {
-            if guard.len() < range.end as usize {
-                guard.resize(range.end as usize, 0);
+            if guard.len() < end {
+                guard.resize(end, 0);
             }
-            guard[range.start as usize..range.end as usize].copy_from_slice(&content);
+            guard[start..end].copy_from_slice(&content);
         }
         drop(guard);
         if let Some(l) = &mut self.listener {
@@ -132,5 +169,42 @@ mod tests {
         // the `Debug` impl for `MemPusher`.
         let p = MemPusher::new();
         let _ = format!("{p:?}");
+    }
+
+    #[test]
+    fn length_mismatch_returns_error_and_writes_nothing() {
+        // The engine indexes `content` by `range`, so a mismatched chunk must be
+        // rejected instead of panicking in `copy_from_slice` or writing a
+        // truncated range.
+        let mut p = MemPusher::new();
+        let payload = Bytes::copy_from_slice(b"abc");
+        let (err, returned) = p.push(&(0..5), payload.clone()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(returned, payload, "the caller keeps the rejected bytes");
+        assert!(
+            p.receive.lock().is_empty(),
+            "a rejected push must not touch the buffer"
+        );
+    }
+
+    #[test]
+    fn reversed_range_returns_error() {
+        let mut p = MemPusher::new();
+        let range = ProgressEntry { start: 5, end: 3 };
+        let (err, _) = p.push(&range, Bytes::new()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(p.receive.lock().is_empty());
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn range_beyond_usize_returns_error() {
+        // On a 32-bit target the range end cannot be narrowed to `usize`; the
+        // pusher must report that instead of truncating it.
+        let mut p = MemPusher::new();
+        let end = u64::from(u32::MAX) + 1;
+        let (err, _) = p.push(&(0..end), Bytes::new()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(p.receive.lock().is_empty());
     }
 }

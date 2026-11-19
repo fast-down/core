@@ -27,6 +27,16 @@ pub trait Pusher: Send + 'static {
     /// them internally for a later flush. A decorator that returns empty must
     /// therefore never drop them silently.
     ///
+    /// # Length contract
+    ///
+    /// `content.len()` must equal `range.end - range.start`. Everything below
+    /// assumes it: the range is the only record of where the chunk belongs, so a
+    /// shorter or longer `content` silently shifts every following byte (or makes
+    /// a sink that indexes by the range panic). The engine does not check it, so
+    /// an implementation that can afford to should reject the mismatch (as
+    /// [`MemPusher`](crate::MemPusher) does) instead of writing a truncated or
+    /// over-long chunk.
+    ///
     /// # What a partial result promises
     ///
     /// The engine never counts written bytes itself. On failure it derives them
