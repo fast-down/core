@@ -84,18 +84,30 @@ impl CookieStore {
 
 /// # Errors
 /// Returns [`BuildClientError`] if the HTTP client cannot be built (invalid
-/// proxy URL, TLS backend failure, or other `reqwest::ClientBuilder` errors).
+/// proxy URL, TLS backend failure, or other `reqwest::ClientBuilder` errors), or
+/// if `accept_invalid_certs` / `accept_invalid_hostnames` was requested without
+/// the `reqwest-tls` feature.
 #[allow(clippy::too_many_arguments)]
 pub fn build_client(
     mut headers: HeaderMap,
     proxy: Proxy<&str>,
-    #[allow(unused)] accept_invalid_certs: bool,
-    #[allow(unused)] accept_invalid_hostnames: bool,
+    accept_invalid_certs: bool,
+    accept_invalid_hostnames: bool,
     #[allow(unused)] cookie_store: &CookieStore,
     local_addr: Option<std::net::IpAddr>,
     max_redirects: usize,
     connect_timeout: Duration,
 ) -> Result<SmartRedirectClient, BuildClientError> {
+    // Without the TLS backend `reqwest` has no `danger_accept_invalid_certs` /
+    // `danger_accept_invalid_hostnames` at all, so the request cannot be honoured.
+    // Refusing beats silently validating the certificates the caller asked to
+    // skip: the mismatch would only surface as a failed handshake much later.
+    #[cfg(not(feature = "reqwest-tls"))]
+    if accept_invalid_certs || accept_invalid_hostnames {
+        return Err(BuildClientError::MissingFeature(
+            "accept_invalid_certs/accept_invalid_hostnames require the `reqwest-tls` feature",
+        ));
+    }
     let referer = headers.remove("referer");
     let referrer_policy = headers
         .remove("referrer-policy")
@@ -183,8 +195,15 @@ pub struct FastDownPullerOptions<'a> {
     /// Proxy selection (no / system / custom URL).
     pub proxy: Proxy<&'a str>,
     /// Accept invalid TLS certificates (requires the `reqwest-tls` feature).
+    ///
+    /// Without that feature the client cannot honour the flag:
+    /// [`FastDownPuller::new`] fails with [`BuildClientError`] instead of
+    /// silently validating the certificates anyway.
     pub accept_invalid_certs: bool,
     /// Accept invalid TLS hostnames (requires the `reqwest-tls` feature).
+    ///
+    /// Like [`accept_invalid_certs`](Self::accept_invalid_certs), a build without
+    /// `reqwest-tls` refuses the option rather than ignoring it.
     pub accept_invalid_hostnames: bool,
     /// The cookie store every client this puller builds shares (requires the
     /// `cookie-store` feature).
@@ -208,7 +227,8 @@ pub struct FastDownPullerOptions<'a> {
 impl FastDownPuller {
     /// # Errors
     /// Returns [`BuildClientError`] if the underlying HTTP client cannot be
-    /// built (invalid proxy, TLS setup failure, etc.).
+    /// built (invalid proxy, TLS setup failure, etc.), or if certificate
+    /// validation was disabled while the `reqwest-tls` feature is off.
     pub fn new(option: FastDownPullerOptions<'_>) -> Result<Self, BuildClientError> {
         let turn = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let available_ips = option.available_ips;
@@ -497,6 +517,49 @@ mod tests {
             Duration::from_secs(10),
         )
         .expect("build_client with the system proxy must succeed");
+        let _ = client;
+    }
+
+    /// Without the TLS backend the builder has no way to disable certificate
+    /// validation at all, so a silent success would validate exactly what the
+    /// caller asked to skip. The refusal must name the missing feature.
+    #[cfg(not(feature = "reqwest-tls"))]
+    #[test]
+    fn build_client_refuses_invalid_cert_settings_without_tls() {
+        let err = build_client(
+            HeaderMap::new(),
+            Proxy::No,
+            true,
+            false,
+            &CookieStore::new(false),
+            None,
+            10,
+            Duration::from_secs(10),
+        )
+        .expect_err("accept_invalid_certs needs the reqwest-tls feature");
+        assert!(matches!(err, BuildClientError::MissingFeature(_)));
+        assert!(
+            err.to_string().contains("reqwest-tls"),
+            "the error must name the feature that is missing, got: {err}"
+        );
+    }
+
+    /// The same flag is part of the build with the TLS backend, so the guard
+    /// above cannot be mistaken for a general refusal.
+    #[cfg(feature = "reqwest-tls")]
+    #[test]
+    fn build_client_honours_invalid_cert_settings_with_tls() {
+        let client = build_client(
+            HeaderMap::new(),
+            Proxy::No,
+            true,
+            true,
+            &CookieStore::new(false),
+            None,
+            10,
+            Duration::from_secs(10),
+        )
+        .expect("the TLS backend can accept invalid certificates and hostnames");
         let _ = client;
     }
 

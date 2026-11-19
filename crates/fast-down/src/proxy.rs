@@ -16,6 +16,11 @@ pub enum Proxy<T> {
     /// Never use a proxy.
     No,
     /// Use the platform-configured system proxy.
+    ///
+    /// Reading the platform settings (and the proxy environment variables) is
+    /// provided by the `reqwest` `system-proxy` feature, which the `fast-puller`
+    /// feature enables. Without it this variant builds a client that connects
+    /// directly.
     #[default]
     System,
     /// Use the given custom proxy URL.

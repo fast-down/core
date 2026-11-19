@@ -19,18 +19,19 @@ pub enum ReqwestGetHeaderError {
 /// A failure while building the underlying HTTP client: an invalid proxy URL, a
 /// TLS backend that failed to initialize, and so on.
 ///
-/// Transparent over the underlying client error: it renders and sources through
-/// to it, and derefs to it so its classification methods (for example
-/// `is_timeout`) are callable without naming the client crate.
+/// [`Client`](Self::Client) is transparent over the underlying client error: it
+/// renders and sources through to it. [`MissingFeature`](Self::MissingFeature)
+/// reports a configuration this build cannot honour at all, such as asking to
+/// skip certificate validation without the `reqwest-tls` feature.
 #[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-pub struct BuildClientError(#[from] reqwest::Error);
-
-impl std::ops::Deref for BuildClientError {
-    type Target = reqwest::Error;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+#[non_exhaustive]
+pub enum BuildClientError {
+    /// The underlying client builder rejected the configuration.
+    #[error(transparent)]
+    Client(#[from] reqwest::Error),
+    /// The configuration needs a feature that was not compiled in.
+    #[error("{0}")]
+    MissingFeature(&'static str),
 }
 
 /// A transport-level failure from the underlying HTTP client.

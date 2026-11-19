@@ -51,7 +51,7 @@ reqwest = ["dep:httpdate", "dep:reqwest", "http"]
 sanitize-filename = ["dep:path_helper"]
 serde = ["dep:serde", "url/serde"]
 getifaddrs = ["dep:getifaddrs"]
-fast-puller = ["reqwest"]
+fast-puller = ["reqwest", "reqwest/system-proxy"]
 reqwest-tls = ["fast-puller", "reqwest/default-tls"]
 cookie-store = ["fast-puller", "reqwest/cookies"]
 

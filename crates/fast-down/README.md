@@ -38,13 +38,35 @@ Supporting building blocks (behind feature flags) include the backend-agnostic
 `HttpError`) and the `reqwest` module (`SmartRedirectClient`,
 `ManualRedirectRequestBuilder`).
 
+## Features
+
+- `http` — the backend-agnostic `http` module: the `HttpClient` trait family,
+  `HttpPuller`, `Prefetch`, and `HttpError`. It ships no client of its own.
+- `reqwest` — the `reqwest` backend on top of `http`: `SmartRedirectClient` and
+  `ManualRedirectRequestBuilder`, with manual RFC 9110 redirect handling.
+- `fast-puller` — `FastDownPuller`, the default HTTP puller. Enables `reqwest`
+  and the `reqwest` `system-proxy` support that `Proxy::System` relies on, so the
+  system proxy is honoured as soon as this feature is on.
+- `reqwest-tls` — the TLS backend. **HTTPS downloads need it**: `fast-puller`
+  alone builds a client that speaks plain HTTP only, and
+  `accept_invalid_certs` / `accept_invalid_hostnames` fail client construction
+  instead of being silently ignored. TLS is opt-in so a build that only fetches
+  over plain HTTP stays small and free of a TLS stack.
+- `cookie-store` — a shared cookie jar for the clients a puller builds (enables
+  `fast-puller` and `reqwest`'s `cookies`).
+- `serde` — `Serialize` / `Deserialize` for `UrlInfo` and `FileId`.
+- `sanitize-filename` — `UrlInfo::filename()`.
+- `getifaddrs` — multi-interface source address rotation.
+- `file` — re-exports `fast-pull`'s file pushers such as `StdFilePusher`.
+
 ## Example
 
 Download a file concurrently to disk. This requires the `fast-puller` feature
-(which also enables `reqwest` and `http`), the `file` feature, and a network
-connection, so the block is marked `no_run` to compile it without making a real
-network request. The fallback `main` keeps the example compilable when rustdoc
-checks a feature combination that does not provide those APIs:
+(which also enables `reqwest` and `http`), the `file` feature, and — because the
+URL below is `https` — the `reqwest-tls` feature, plus a network connection, so
+the block is marked `no_run` to compile it without making a real network request.
+The fallback `main` keeps the example compilable when rustdoc checks a feature
+combination that does not provide those APIs:
 
 ```rust,no_run
 #[cfg(all(feature = "fast-puller", feature = "file"))]
