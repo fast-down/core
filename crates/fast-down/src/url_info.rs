@@ -14,7 +14,7 @@ use url::Url;
 /// Includes file size, filename, content type, range support, and file identity
 /// (`ETag` / `Last-Modified`) for incremental downloads.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct UrlInfo {
     /// Total size of the resource in bytes, taken from the `Content-Length` header (0 if absent).
     pub size: u64,
@@ -54,8 +54,13 @@ impl UrlInfo {
 /// Combines the `ETag` and `Last-Modified` headers into a stable identifier.
 /// Two downloads of the same logical file share a [`FileId`] only if neither
 /// header changed, which lets the engine resume instead of re-downloading.
+///
+/// Deliberately **not** `PartialEq`/`Eq`: two identities with the same content
+/// but different *presence* of a validator would compare unequal, which is not
+/// the question a caller should be asking. Use [`FileId::matches`], which
+/// compares a field only when both sides carry it.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct FileId {
     /// The `ETag` header value, if present.
     pub etag: Option<Arc<str>>,
@@ -111,15 +116,6 @@ mod tests {
         let f = FileId::new(None, None);
         assert_eq!(f.etag, None);
         assert_eq!(f.last_modified, None);
-    }
-
-    #[test]
-    fn file_id_equality() {
-        assert_eq!(FileId::new(Some("x"), None), FileId::new(Some("x"), None));
-        assert_ne!(
-            FileId::new(Some("x"), None),
-            FileId::new(Some("x"), Some("y"))
-        );
     }
 
     #[test]

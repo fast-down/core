@@ -83,16 +83,17 @@ impl Record {
     /// Check this record still describes `info`, so its progress can be resumed.
     ///
     /// A resume is only safe when the recorded size and identity headers match
-    /// the freshly prefetched ones. When *both* sides lack identity headers the
-    /// [`FileId`]s are equal (`None == None`), so a server that sends neither
-    /// `ETag` nor `Last-Modified` is treated as unchanged as long as the size
-    /// matches.
+    /// the freshly prefetched ones. The identity is compared field by field: a
+    /// header counts only when both sides carry it, so a server that omits
+    /// `Last-Modified` on one of the two answers does not make an unchanged file
+    /// look different. When *neither* side carries either header the identity
+    /// cannot be checked at all, and a matching size is treated as unchanged.
     ///
     /// # Errors
     /// Returns [`StateError::FileChanged`] when the size or identity differs.
     pub fn validate(&self, info: &UrlInfo) -> Result<(), StateError> {
         let local_file_id = self.file_id();
-        if self.size == info.size && local_file_id == info.file_id {
+        if self.size == info.size && local_file_id.matches(&info.file_id) {
             Ok(())
         } else {
             Err(StateError::FileChanged {
@@ -373,6 +374,34 @@ mod tests {
             ..info(100, "")
         };
         assert!(record.validate(&info).is_ok());
+    }
+
+    #[test]
+    fn validate_skips_a_header_only_one_side_carries() {
+        // A 200 that carries `Last-Modified` and a later one that omits it still
+        // describe the same file; the identity must not be called changed just
+        // because one answer was less complete.
+        let mut record = record_with(100, "e");
+        record.last_modified = Some("Mon, 01 Jan 2024 00:00:00 GMT".into());
+        let remote = info(100, "e");
+        assert!(record.validate(&remote).is_ok());
+
+        let record = record_with(100, "e");
+        let mut remote = info(100, "e");
+        remote.file_id.last_modified = Some("Tue, 02 Jan 2024 00:00:00 GMT".into());
+        assert!(record.validate(&remote).is_ok());
+    }
+
+    #[test]
+    fn validate_still_fails_when_both_sides_carry_the_header() {
+        let mut record = record_with(100, "e");
+        record.last_modified = Some("Mon, 01 Jan 2024 00:00:00 GMT".into());
+        let mut remote = info(100, "e");
+        remote.file_id.last_modified = Some("Tue, 02 Jan 2024 00:00:00 GMT".into());
+        assert!(
+            record.validate(&remote).is_err(),
+            "a value present on both sides and different means the file changed"
+        );
     }
 
     /// Guards the ordering bug `build` must avoid: refreshing the identity
