@@ -618,6 +618,78 @@ async fn truncated_part_is_mismatch() {
     );
 }
 
+/// A `.part` shorter than the recorded progress cannot be continued, even when
+/// the recorded identity also changed: `Forced` accepts the latter, and must not
+/// turn the former into a resume that pads the missing span with zeros and then
+/// reports completion.
+#[tokio::test(flavor = "multi_thread")]
+async fn forced_resume_refuses_a_truncated_part_when_the_identity_changed() {
+    let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 241) as u8).collect();
+    // Same size, different identity: that alone is exactly the case a forced
+    // resume is meant to accept.
+    let (_server, url) = start_server(payload.clone(), "v2", true).await;
+    let dir = temp_dir("forced_truncated");
+    let (final_path, info) = probe(&url, &dir).await;
+    let fd = seed_partial(&url, &dir, &final_path, &info, "v1", &payload, PARTIAL).await;
+    let part = fd.with_extension("part");
+    let short: Vec<u8> = (0..16u8).map(|b| b.wrapping_mul(17)).collect();
+    tokio::fs::write(&part, &short).await.unwrap();
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    assert!(
+        matches!(
+            &ready.outcome,
+            ResumeOutcome::Mismatch(StateError::Truncated { .. })
+        ),
+        "a short .part must be reported as truncated even when the identity \
+         changed too, got {:?}",
+        ready.outcome
+    );
+
+    let drain = tokio::spawn(run_to_end(rx));
+    let _handle = ready.start(StartMode::Forced, tx, &ctx);
+    assert_eq!(
+        drain.await.unwrap(),
+        TerminationReason::Failed,
+        "a forced resume must refuse a truncated .part"
+    );
+    assert_eq!(
+        tokio::fs::read(&part).await.unwrap(),
+        short,
+        "a refused forced resume must not touch the .part"
+    );
+    assert!(
+        !final_path.exists(),
+        "a refused forced resume must not rename anything into place"
+    );
+
+    // The same state is still a plain truncation for `Auto`, which re-downloads
+    // the whole file instead of failing.
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    assert!(matches!(
+        &ready.outcome,
+        ResumeOutcome::Mismatch(StateError::Truncated { .. })
+    ));
+    let drain = tokio::spawn(run_to_end(rx));
+    let _handle = ready.start(StartMode::Auto, tx, &ctx);
+    assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
+    assert_eq!(
+        tokio::fs::read(&final_path).await.unwrap(),
+        payload,
+        "Auto must still redownload the whole file"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn fresh_mode_redownloads_and_completes() {
     let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 97) as u8).collect();

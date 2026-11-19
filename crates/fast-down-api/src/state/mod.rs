@@ -186,11 +186,14 @@ impl State {
                     old.merge_config(&partial);
 
                     match (validation, part) {
-                        (Err(e), _) => (old, ResumeOutcome::Mismatch(e), Some(probe_fd_path)),
-                        (Ok(()), PartState::Ready) => {
-                            (old, ResumeOutcome::Resumable, Some(probe_fd_path))
-                        }
-                        (Ok(()), PartState::Short { actual, recorded }) => (
+                        // A `.part` shorter than the recorded progress is unsafe
+                        // to continue whatever the identity verdict says: the sink
+                        // would extend it with zeros over the missing span and the
+                        // run would still report completion. Report the truncation
+                        // (over a possible identity change) so a `Forced` policy,
+                        // which accepts a same-size identity change, cannot force a
+                        // resume over the missing bytes.
+                        (_, PartState::Short { actual, recorded }) => (
                             old,
                             ResumeOutcome::Mismatch(StateError::Truncated {
                                 actual_size: actual,
@@ -198,6 +201,10 @@ impl State {
                             }),
                             Some(probe_fd_path),
                         ),
+                        (Err(e), _) => (old, ResumeOutcome::Mismatch(e), Some(probe_fd_path)),
+                        (Ok(()), PartState::Ready) => {
+                            (old, ResumeOutcome::Resumable, Some(probe_fd_path))
+                        }
                         // The `.part` is gone: nothing safe to continue, but the
                         // `.fd` still names the pair and remembers its progress.
                         // Keep that location so a later start reuses it instead
