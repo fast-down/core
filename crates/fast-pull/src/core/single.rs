@@ -21,9 +21,14 @@ pub struct DownloadOptions {
     /// [`stall_timeout`](Self::stall_timeout), which turns the watchdog off, a
     /// sink or puller that fails permanently leaves the session with no
     /// terminating condition, and the unbounded event channel grows at memory
-    /// speed for as long as the caller does not drain it.
+    /// speed for as long as the caller does not drain it. The final flush retries
+    /// are floored at a millisecond, so a zero gap cannot spin there.
     pub retry_gap: Duration,
     /// Capacity of the bounded pull→push queue; backpressure when full.
+    ///
+    /// Clamped to `1..=1 << 30`: `0` is treated as `1`, because the underlying
+    /// channel asserts a non-zero capacity, and anything larger is clamped to
+    /// `1 << 30`, which is the channel's upper bound.
     pub push_queue_cap: usize,
     /// Give up once no chunk has arrived for this long.
     ///
@@ -87,8 +92,10 @@ pub fn download_single<R: Puller, W: Pusher>(
         })
     });
 
-    let (tx_push, rx_push) =
-        spsc::bounded_async_blocking::<(ProgressEntry, Bytes)>(options.push_queue_cap);
+    // The channel asserts `1 <= capacity < 1 << 31`, so a caller-supplied 0 or a
+    // huge value must be clamped here rather than panicking inside `crossfire`.
+    let push_queue_cap = options.push_queue_cap.clamp(1, 1 << 30);
+    let (tx_push, rx_push) = spsc::bounded_async_blocking::<(ProgressEntry, Bytes)>(push_queue_cap);
     let push_thread = Arc::new(std::sync::OnceLock::new());
     let push_handle = tokio::task::spawn_blocking({
         let push_thread = push_thread.clone();
@@ -717,6 +724,69 @@ mod tests {
         );
         while result.event_chain().recv().await.is_ok() {}
         assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test]
+    async fn test_single_zero_push_queue_cap_is_clamped() {
+        // `crossfire` asserts a non-zero capacity, so a caller-supplied 0 must be
+        // clamped instead of panicking the session.
+        let mock_data = build_mock_data(1024);
+        let puller = MockPuller::new(&mock_data);
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        let result = download_single(
+            puller,
+            pusher,
+            DownloadOptions {
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 0,
+                stall_timeout: Duration::from_secs(60),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while result.event_chain().recv().await.is_ok() {}
+        })
+        .await
+        .expect("a zero queue capacity must be clamped, not panic");
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test]
+    async fn test_single_zero_retry_gap_does_not_flood_flush_errors() {
+        // `retry_gap = ZERO` must not turn the flush loop into a busy loop for the
+        // whole stall window: the retries are floored at a millisecond, so the
+        // number of `FlushError`s stays bounded.
+        let mock_data = build_mock_data(1024);
+        let puller = MockPuller::new(&mock_data);
+        let mut sink = FlakySink::new();
+        sink.always_fail_flush = true;
+        let result = download_single(
+            puller,
+            sink,
+            DownloadOptions {
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                stall_timeout: Duration::from_millis(50),
+            },
+        );
+        let mut flush_errors = 0;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(event) = result.event_chain().recv().await {
+                if matches!(event, Event::FlushError(_)) {
+                    flush_errors += 1;
+                }
+            }
+        })
+        .await
+        .expect("a permanently failing flush must end after the stall window");
+        assert!(flush_errors > 0, "the failure must still be reported");
+        // 50 ms at the 1 ms floor is ~50 retries; a busy loop would emit orders of
+        // magnitude more. The bound is loose so a slow machine cannot trip it.
+        assert!(
+            flush_errors < 500,
+            "a zero retry gap must not flood `FlushError`: {flush_errors}"
+        );
+        assert!(result.is_aborted(), "the engine must abort the session");
     }
 
     #[tokio::test]

@@ -122,13 +122,22 @@ fn spawn_stall_watch<PullError, PushError>(
     });
 }
 
+/// Lower bound on the interval between flush retries.
+///
+/// A zero `retry_gap` means "retry as soon as possible" for pulls and pushes; in
+/// the flush loop it would spin at full speed for the whole stall window,
+/// emitting one `FlushError` per iteration. A millisecond keeps the retry
+/// responsive while bounding that.
+const FLUSH_RETRY_FLOOR: Duration = Duration::from_millis(1);
+
 /// Flush the sink, retrying until it succeeds, the session is cancelled, or
 /// `stall_timeout` has passed since the first failure.
 ///
 /// A flush error is normally permanent (full disk, EIO), so a session that keeps
 /// failing ends instead of looping forever. `watch_stop` ends the stall watchdog
 /// first: every pulled chunk has been handled and only the flush is left, which
-/// the watchdog must not cut short.
+/// the watchdog must not cut short. Retries are spaced by `retry_gap` but never
+/// closer than [`FLUSH_RETRY_FLOOR`].
 fn flush_sink<W, PullError, PushError>(
     pusher: &mut W,
     tx: &crossfire::MTx<mpmc::List<Event<PullError, PushError>>>,
@@ -142,6 +151,7 @@ fn flush_sink<W, PullError, PushError>(
     PushError: Send + Unpin + 'static,
 {
     watch_stop.cancel();
+    let retry_gap = retry_gap.max(FLUSH_RETRY_FLOOR);
     let mut first_failure: Option<Instant> = None;
     loop {
         if token.is_cancelled() {

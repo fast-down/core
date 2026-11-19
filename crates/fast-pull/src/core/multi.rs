@@ -29,11 +29,21 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
     /// [`stall_timeout`](Self::stall_timeout), which turns the watchdog off, a
     /// sink or puller that fails permanently leaves the session with no
     /// terminating condition, and the unbounded event channel grows at memory
-    /// speed for as long as the caller does not drain it.
+    /// speed for as long as the caller does not drain it. The final flush retries
+    /// are floored at a millisecond, so a zero gap cannot spin there.
     pub retry_gap: Duration,
     /// Maximum time to wait for bytes before aborting and re-pulling a range.
+    ///
+    /// Covers both the request itself and each wait for the next chunk.
+    /// [`Duration::ZERO`] disables it: a request then waits indefinitely, so a
+    /// session that never delivers anything is ended only by
+    /// [`stall_timeout`](Self::stall_timeout) or cancellation.
     pub pull_timeout: Duration,
     /// Capacity of the bounded pull→push queue; backpressure when full.
+    ///
+    /// Clamped to `1..=1 << 30`: `0` is treated as `1`, because the underlying
+    /// channel asserts a non-zero capacity, and anything larger is clamped to
+    /// `1 << 30`, which is the channel's upper bound.
     pub push_queue_cap: usize,
     /// Give up once no chunk has arrived for this long.
     ///
@@ -105,8 +115,11 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
             clock.beat();
         })
     });
+    // The channel asserts `1 <= capacity < 1 << 31`, so a caller-supplied 0 or a
+    // huge value must be clamped here rather than panicking inside `crossfire`.
+    let push_queue_cap = options.push_queue_cap.clamp(1, 1 << 30);
     let (tx_push, rx_push) =
-        mpsc::bounded_async_blocking::<(WorkerId, ProgressEntry, Bytes)>(options.push_queue_cap);
+        mpsc::bounded_async_blocking::<(WorkerId, ProgressEntry, Bytes)>(push_queue_cap);
 
     let push_thread = Arc::new(OnceLock::new());
     let push_handle = tokio::task::spawn_blocking({
@@ -312,7 +325,10 @@ where
                     let gap = {
                         let t = tokio::select! {
                             () = worker_token.cancelled() => break 'task,
-                            () = tokio::time::sleep(pull_timeout) => None,
+                            // A zero timeout disables the guard instead of arming
+                            // an always-ready `sleep(ZERO)` that would win every
+                            // poll and flood the session with `PullTimeout`.
+                            () = tokio::time::sleep(pull_timeout), if !pull_timeout.is_zero() => None,
                             t = puller.pull(Some(&download_range)) => Some(t)
                         };
                         match t {
@@ -353,7 +369,9 @@ where
                 loop {
                     let t = tokio::select! {
                         () = worker_token.cancelled() => break 'task,
-                        () = tokio::time::sleep(pull_timeout) => {
+                        // Same guard as the request above: a zero timeout means
+                        // "wait for the chunk indefinitely".
+                        () = tokio::time::sleep(pull_timeout), if !pull_timeout.is_zero() => {
                             let _ = tx.send(Event::PullTimeout(id));
                             drop(stream);
                             puller = puller.clone();
@@ -1302,6 +1320,85 @@ mod tests {
         );
         drain(&result).await;
         assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_zero_pull_timeout_disables_the_timeout() {
+        // `pull_timeout = ZERO` must disable the guard rather than arming an
+        // always-ready `sleep(ZERO)`. The stream here is not ready on the first
+        // poll, so an armed zero timeout wins the `select!` and re-requests the
+        // same range instead of waiting for it.
+        let mock_data = build_mock_data(3 * 1024);
+        let puller = SlowStreamPuller {
+            data: Arc::from(mock_data.as_slice()),
+            delay: Duration::from_millis(2),
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let receive = pusher.receive.clone();
+        #[allow(clippy::single_range_in_vec_init)]
+        let download_chunks = [0..mock_data.len() as u64];
+        let result = download_multi(
+            puller,
+            pusher,
+            DownloadOptions {
+                concurrent: 4,
+                retry_gap: Duration::from_millis(1),
+                push_queue_cap: 1024,
+                download_chunks: download_chunks.iter().cloned(),
+                pull_timeout: Duration::ZERO,
+                stall_timeout: Duration::from_secs(60),
+                min_chunk_size: 1024,
+                max_speculative: 1,
+            },
+        );
+        let mut timeouts = 0;
+        timeout(Duration::from_secs(5), async {
+            while let Ok(event) = result.event_chain().recv().await {
+                if matches!(event, Event::PullTimeout(_)) {
+                    timeouts += 1;
+                }
+            }
+        })
+        .await
+        .expect("a disabled pull timeout must not stall the session");
+        assert_eq!(timeouts, 0, "a disabled timeout must not fire");
+        assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    /// A [`Puller`] whose chunks arrive only after `delay`, so an armed zero
+    /// `pull_timeout` would always win the worker's `select!`.
+    #[derive(Debug, Clone)]
+    struct SlowStreamPuller {
+        data: Arc<[u8]>,
+        delay: Duration,
+    }
+    impl crate::Puller for SlowStreamPuller {
+        type Error = std::convert::Infallible;
+        fn pull(
+            &mut self,
+            range: Option<&crate::ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            type Item = crate::PullResult<Bytes, std::convert::Infallible>;
+            #[allow(clippy::cast_possible_truncation)]
+            let data: Vec<u8> = match range {
+                Some(r) => self.data[r.start as usize..r.end as usize].to_vec(),
+                None => self.data.to_vec(),
+            };
+            let delay = self.delay;
+            async move {
+                let chunks: Vec<Bytes> = data.chunks(1024).map(Bytes::copy_from_slice).collect();
+                let stream = stream::iter(chunks).then(move |chunk| async move {
+                    sleep(delay).await;
+                    Ok::<_, (std::convert::Infallible, Option<Duration>)>(chunk)
+                });
+                Ok(Box::pin(stream)
+                    as std::pin::Pin<
+                        Box<dyn futures::Stream<Item = Item> + Send>,
+                    >)
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
