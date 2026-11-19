@@ -16,7 +16,11 @@ use crate::{
 };
 use fast_pull::Puller;
 use parking_lot::Mutex;
-use reqwest::{ClientBuilder, Response, header::HeaderMap, redirect::Policy};
+use reqwest::{
+    ClientBuilder, Response,
+    header::{ACCEPT_ENCODING, HeaderMap, HeaderValue},
+    redirect::Policy,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
@@ -101,6 +105,14 @@ pub fn build_client(
     let origin = headers.remove("origin");
     let authorization = headers.remove("authorization");
     let cookie = headers.remove("cookie");
+    // A content coding makes the body bytes something other than the resource's
+    // bytes at the offsets `Content-Range` names, and the engine writes those
+    // offsets verbatim. This is an invariant rather than a default: a
+    // caller-supplied `Accept-Encoding` is overwritten instead of honoured.
+    // `reqwest`'s decompression features are unified across the dependency
+    // graph, so another crate can switch them on and have the client negotiate
+    // a coding even when this one did not ask for it.
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     let mut client = ClientBuilder::new()
         .default_headers(headers)
         .local_address(local_addr)
@@ -569,5 +581,77 @@ mod tests {
         // clone() consumed 1 and advanced the counter to 2.
         assert_eq!(cloned.turn.load(std::sync::atomic::Ordering::Acquire), 2);
         assert_eq!(puller.turn.load(std::sync::atomic::Ordering::Acquire), 2);
+    }
+
+    /// The engine writes the body at the offsets `Content-Range` names, so a
+    /// content coding would corrupt the output. Identity is not a default a
+    /// caller may override: a `gzip` request header is replaced.
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn build_client_forces_the_identity_encoding() {
+        use futures::TryStreamExt;
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/identity")
+            .match_header("accept-encoding", "identity")
+            .with_status(200)
+            .with_body("x")
+            .create_async()
+            .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let mut opts = make_options(Url::parse(&format!("{}/identity", server.url())).unwrap());
+        opts.headers = Arc::new(headers);
+        let mut puller = FastDownPuller::new(opts).expect("new must succeed");
+        let mut stream = FastDownPuller::pull(&mut puller, None)
+            .await
+            .expect("the request must succeed");
+        while stream
+            .try_next()
+            .await
+            .expect("the body must arrive")
+            .is_some()
+        {}
+        drop(stream);
+
+        mock.assert_async().await;
+    }
+
+    /// A ranged request lands in the same byte space as the whole-file one, so
+    /// it asks for identity as well.
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn ranged_requests_also_ask_for_identity() {
+        use futures::TryStreamExt;
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/range")
+            .match_header("accept-encoding", "identity")
+            .match_header("range", "bytes=0-0")
+            .with_status(206)
+            .with_header("content-range", "bytes 0-0/1")
+            .with_header("content-length", "1")
+            .with_body("x")
+            .create_async()
+            .await;
+
+        let opts = make_options(Url::parse(&format!("{}/range", server.url())).unwrap());
+        let mut puller = FastDownPuller::new(opts).expect("new must succeed");
+        let range = 0..1u64;
+        let mut stream = FastDownPuller::pull(&mut puller, Some(&range))
+            .await
+            .expect("the request must succeed");
+        while stream
+            .try_next()
+            .await
+            .expect("the body must arrive")
+            .is_some()
+        {}
+        drop(stream);
+
+        mock.assert_async().await;
     }
 }
