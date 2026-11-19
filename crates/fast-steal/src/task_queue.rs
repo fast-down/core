@@ -250,7 +250,7 @@ impl<H: Handle> TaskQueue<H> {
     ///   grows or shrinks toward the requested count.
     /// - **Growth drains `waiting` with the same `take` handshake as
     ///   [`steal`](TaskQueue::steal).** Each registration has its range claimed
-    ///   via [`Task::take`]; exhausted and corrupted ones are dropped instead of
+    ///   via `Task::take`; exhausted and corrupted ones are dropped instead of
     ///   spending a spawn slot, and registrations aliasing one cursor are
     ///   deduplicated by that claim: the first takes the remaining range, the
     ///   rest come back empty and are skipped. The worker is spawned on a fresh
