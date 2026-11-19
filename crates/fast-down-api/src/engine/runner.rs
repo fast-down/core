@@ -358,9 +358,7 @@ async fn drive(
         Fate::Resume => true,
         Fate::Fresh => false,
         Fate::Fail => {
-            if let ResumeOutcome::Mismatch(e) = outcome {
-                let _ = tx.send(Event::ResumeError(e));
-            }
+            report_refusal(outcome, fd_path, &final_path, tx);
             return TerminationReason::Failed;
         }
     };
@@ -450,6 +448,27 @@ async fn drive(
 
     // 5. Rename the finished `.part` into place and drop the `.fd`.
     finalize(&config, &final_path, &tmp_path, &fd_path, tx).await
+}
+
+/// Report why a failing start policy refuses to run.
+///
+/// A [`ResumeOutcome::Mismatch`] carries its own reason. A
+/// [`ResumeOutcome::Fresh`] under a failing policy means the probe found no
+/// `.fd` at all, so the report names the path it looked for — the pinned one, or
+/// the default `<final>.fd` — instead of leaving the caller with only
+/// [`Event::Terminated`]. [`ResumeOutcome::Resumable`] never fails a policy and
+/// reports nothing.
+fn report_refusal(outcome: ResumeOutcome, fd_path: Option<PathBuf>, final_path: &Path, tx: &Tx) {
+    match outcome {
+        ResumeOutcome::Mismatch(e) => {
+            let _ = tx.send(Event::ResumeError(e));
+        }
+        ResumeOutcome::Fresh => {
+            let probe = fd_path.unwrap_or_else(|| final_path.with_added_extension("fd"));
+            let _ = tx.send(Event::ResumeError(StateError::NotFound(probe)));
+        }
+        ResumeOutcome::Resumable => {}
+    }
 }
 
 /// The `.fd`/`.part` pair a run will use, plus the record to persist.

@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fast_down_api::{
-    Ctx, Event, PartialConfig, Record, ResumeOutcome, Rx, StartMode, State, TerminationReason,
-    WriteMethod, create_channel,
+    Ctx, Event, PartialConfig, Record, ResumeOutcome, Rx, StartMode, State, StateError,
+    TerminationReason, WriteMethod, create_channel,
 };
 use http_body_util::BodyExt;
 use http_body_util::combinators::BoxBody;
@@ -1201,6 +1201,90 @@ async fn a_new_download_without_save_dir_says_so() {
         err.to_string().contains("save_dir"),
         "the message names the missing setting: {err}"
     );
+}
+
+/// A policy that refuses a missing state file must say *which* `.fd` it looked
+/// for before ending `Failed`: a `Fresh` outcome used to emit no `ResumeError`
+/// at all, leaving only `Terminated(Failed)`.
+///
+/// The `Resume` preset deliberately falls back for `no_state` (see
+/// [`StartPolicy::resume`]: "nothing safe to continue" is not a mismatch), so
+/// the reachable way to demand a refusal is the per-dimension policy below.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_state_failure_names_the_probed_fd() {
+    use fast_down_api::{Recovery, StartPolicy};
+
+    let (_server, url) = start_server(vec![0x42u8; 128], "v1", true).await;
+    let dir = temp_dir("resume_no_state");
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    assert!(matches!(&ready.outcome, ResumeOutcome::Fresh));
+    // The `.fd` the probe would have continued from, though it is absent.
+    let expected = ready.final_path.with_added_extension("fd");
+    assert!(!expected.exists(), "precondition: no state file exists");
+
+    let policy = StartPolicy {
+        no_state: Recovery::Fail,
+        ..StartMode::Resume.into()
+    };
+    let handle = ready.start(policy, tx, &ctx);
+
+    let mut events = Vec::new();
+    while let Some(event) = next_event(&rx).await {
+        let done = matches!(event, Event::Terminated(_));
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    assert_eq!(handle.await, TerminationReason::Failed);
+
+    let error_at = events
+        .iter()
+        .position(|event| {
+            matches!(event, Event::ResumeError(StateError::NotFound(path)) if path == &expected)
+        })
+        .unwrap_or_else(|| {
+            panic!("expected ResumeError(NotFound({expected:?})) before Terminated, got {events:?}")
+        });
+    let terminated_at = events
+        .iter()
+        .position(|event| matches!(event, Event::Terminated(TerminationReason::Failed)))
+        .expect("the run must end Failed");
+    assert!(
+        error_at < terminated_at,
+        "the refusal must be reported before the terminal event, got {events:?}"
+    );
+}
+
+/// The `Resume` preset keeps its documented fallback for a missing `.fd`:
+/// "nothing safe to continue" is not a mismatch, so it downloads the whole
+/// file. Pinned here next to the refusal above so the two behaviors cannot
+/// drift into each other.
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_mode_without_state_falls_back_to_a_full_download() {
+    let payload: Vec<u8> = (0..256usize).map(|i| (i % 251) as u8).collect();
+    let (_server, url) = start_server(payload.clone(), "v1", true).await;
+    let dir = temp_dir("resume_no_state_fallback");
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    assert!(matches!(&ready.outcome, ResumeOutcome::Fresh));
+    let final_path = ready.final_path.clone();
+
+    let drain = tokio::spawn(run_to_end(rx));
+    let _handle = ready.start(StartMode::Resume, tx, &ctx);
+    assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
+    assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 }
 
 /// A server whose responses set a session cookie and whose *ranged* responses
