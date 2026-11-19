@@ -33,15 +33,26 @@ use url::Url;
 mod error;
 pub use error::*;
 
+/// The `Range` header value for `range`, or `None` when the range names no byte.
+///
+/// `end == u64::MAX` is the "to the end of the resource" sentinel callers pass
+/// when the size is unknown; the byte-range syntax spells it as the open range
+/// `bytes=<start>-`. An empty range (`end <= start`) covers no byte at all, and
+/// `bytes=<start>-<start - 1>` would be a reversed range that servers reject
+/// with `416` or ignore, so no header is produced for it.
+fn range_header(range: &ProgressEntry) -> Option<String> {
+    if range.end == u64::MAX {
+        return Some(format!("bytes={}-", range.start));
+    }
+    (range.end > range.start).then(|| format!("bytes={}-{}", range.start, range.end - 1))
+}
+
 impl HttpClient for Client {
     type RequestBuilder = RequestBuilder;
     fn get(&self, url: Url, range: Option<ProgressEntry>) -> Self::RequestBuilder {
         let mut req = self.get(url);
-        if let Some(range) = range {
-            req = req.header(
-                header::RANGE,
-                format!("bytes={}-{}", range.start, range.end.saturating_sub(1)),
-            );
+        if let Some(value) = range.as_ref().and_then(range_header) {
+            req = req.header(header::RANGE, value);
         }
         req
     }
@@ -211,11 +222,8 @@ impl HttpRequestBuilder for ManualRedirectRequestBuilder {
     async fn send(mut self) -> PullResult<Response, Self::RequestError> {
         loop {
             let mut req = self.client.get(self.url.clone());
-            if let Some(ref range) = self.range {
-                req = req.header(
-                    header::RANGE,
-                    format!("bytes={}-{}", range.start, range.end.saturating_sub(1)),
-                );
+            if let Some(value) = self.range.as_ref().and_then(range_header) {
+                req = req.header(header::RANGE, value);
             }
             if let Some(ref referer) = self.next_referer {
                 req = req.header(header::REFERER, referer);
@@ -1212,5 +1220,94 @@ mod range_underflow_tests {
         // The mock server is no longer needed once the response is received.
         drop(server);
         assert!(resp.is_ok(), "empty-range request must not panic");
+    }
+
+    /// The mapping from an internal range to the on-the-wire value: the end is
+    /// exclusive here and inclusive in the header, `u64::MAX` names no end, and
+    /// an empty range names nothing to ask for.
+    #[test]
+    fn range_header_maps_the_end_and_the_sentinel() {
+        assert_eq!(range_header(&(0..u64::MAX)), Some("bytes=0-".to_string()));
+        assert_eq!(range_header(&(3..8u64)), Some("bytes=3-7".to_string()));
+        assert_eq!(range_header(&(0..0u64)), None);
+        assert_eq!(range_header(&(5..5u64)), None);
+        // A reversed range cannot come out of the queue (the task invariant
+        // forbids it), but the mapping must still refuse to ask the server for
+        // it. Built without the `start..end` syntax so it is not mistaken for a
+        // reversed loop.
+        let reversed = core::ops::Range { start: 5, end: 4 };
+        assert_eq!(range_header(&reversed), None);
+    }
+
+    /// The `Range` header value as it reaches the wire for `range`.
+    ///
+    /// Sends one request through [`SmartRedirectClient`] to a bare listener that
+    /// answers with an empty `200`, so the request head can be inspected byte
+    /// for byte instead of trusting the builder.
+    async fn request_head(range: Option<ProgressEntry>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Read exactly the request head, so the header assertion below sees
+            // every header the client sent regardless of how the bytes were
+            // segmented.
+            let mut head = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n".as_slice()) {
+                let read = stream.read(&mut chunk).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                head.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 1\r\nconnection: close\r\n\r\nx")
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&head).into_owned()
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let redirect = SmartRedirectClient::new(client, None, None, None, None, None, 10);
+        let resp = redirect
+            .get(Url::parse(&format!("http://{addr}/x")).unwrap(), range)
+            .send()
+            .await
+            .expect("the listener answers every request with a 200");
+        drop(resp);
+        server.await.unwrap().to_ascii_lowercase()
+    }
+
+    /// `end == u64::MAX` is the "rest of the resource" sentinel a caller passes
+    /// when the size is unknown. It must reach the server as the open range
+    /// `bytes=<start>-`; `bytes=<start>-<u64::MAX - 1>` asks for a range no
+    /// server can satisfy.
+    #[tokio::test]
+    async fn a_to_the_end_range_asks_for_the_open_range() {
+        let head = request_head(Some(0..u64::MAX)).await;
+        assert!(
+            head.contains("\r\nrange: bytes=0-\r\n"),
+            "the to-the-end sentinel must be sent as an open range, got:\n{head}"
+        );
+    }
+
+    /// An empty range covers no byte, so there is nothing to ask for. Sending
+    /// `bytes=5-4` would be a reversed range, and `bytes=0-18446744073709551614`
+    /// a range that no server can satisfy.
+    #[tokio::test]
+    async fn an_empty_range_sends_no_range_header() {
+        for range in [0..0u64, 5..5] {
+            let head = request_head(Some(range.clone())).await;
+            assert!(
+                !head.contains("\r\nrange:"),
+                "an empty range ({range:?}) must not send a Range header, got:\n{head}"
+            );
+        }
     }
 }
