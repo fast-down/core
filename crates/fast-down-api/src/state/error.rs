@@ -98,6 +98,15 @@ pub enum PlanError {
          resumed .fd resolves its destination next to itself"
     )]
     MissingSaveDir,
+    /// The `.fd` names the same file as its `.part` or as the output.
+    ///
+    /// The `.part` is derived from the state path with `with_extension`, so a
+    /// state path already ending in `.part` is its own partial file; and a
+    /// `filename` equal to the `.fd`'s name makes the output the state file. The
+    /// run would then overwrite its state with the download (or the finished
+    /// file with its own `.fd`), so the plan is refused up front.
+    #[error("the .fd path collides with its .part or the output: {0}")]
+    BadStatePath(PathBuf),
 }
 
 impl PlanError {
@@ -113,6 +122,16 @@ impl PlanError {
             Self::Prefetch(e) => tx.send(Event::PrefetchError(e)),
             Self::GenPath(e) => tx.send(Event::GenPathError(e)),
             Self::MissingSaveDir => tx.send(Event::MissingSaveDir),
+            // No dedicated event: a colliding `.fd`/`.part`/output is another
+            // way of failing to resolve those paths, which is what
+            // `GenPathError` reports.
+            Self::BadStatePath(path) => tx.send(Event::GenPathError(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "the .fd path collides with its .part or the output: {}",
+                    path.display()
+                ),
+            ))),
         };
     }
 }

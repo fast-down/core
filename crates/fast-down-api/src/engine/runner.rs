@@ -29,6 +29,7 @@ use inherit_config::ConfigLayer;
 use parking_lot::Mutex;
 use reqwest::Response;
 use std::{
+    io,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -495,6 +496,14 @@ async fn resolve_target(
     resuming: bool,
     tx: &Tx,
 ) -> Result<Target, TerminationReason> {
+    // The `.fd` must not be its own `.part`, nor the output: `State::build`
+    // refuses that plan, but a hand-assembled `PreparedRun` (its fields are
+    // public) can still reach here. Checked before the output directory or any
+    // pair is touched, so a rejected run leaves nothing behind.
+    if let Some(fd_path) = fd_path.as_deref() {
+        ensure_distinct_paths(fd_path, &crate::utils::part_path(fd_path), final_path, tx)?;
+    }
+
     // Ensure the output directory exists before claiming a scratch pair (the
     // `.fd`/`.part` sit next to `final_path`, so `create_new` there would
     // otherwise fail when `final_path`'s parent — e.g. a template subdir — has
@@ -532,6 +541,14 @@ async fn resolve_target(
         let (claim, fd_path, tmp_path) = paths::claim_pair(final_path, tx).await?;
         (claim, fd_path, tmp_path, true)
     };
+
+    // The resolved triple is distinct by construction (`claim_pair` appends
+    // `.fd`/`.part` to the output stem); pin the invariant where the pair is
+    // used, so a future change to that derivation cannot quietly collide them.
+    debug_assert!(
+        crate::utils::paths_are_distinct(&fd_path, &tmp_path, final_path),
+        "the .fd, its .part and the output must be distinct paths"
+    );
 
     // Fold the configuration into a difference against the crate defaults before
     // the first write: `build` restores those defaults on load, so the `.fd`
@@ -576,6 +593,43 @@ fn claim_or_report(fd_path: &Path, tx: &Tx) -> Result<Claim, TerminationReason> 
             Err(TerminationReason::Failed)
         }
     }
+}
+
+/// Refuse a `.fd`/`.part`/output triple that is not three distinct paths.
+///
+/// [`crate::State::build`] already rejects such a plan; this catches a
+/// hand-assembled [`PreparedRun`], whose fields are public. An `.fd` that is
+/// also its own `.part` would let the sink overwrite the state, and an output
+/// equal to the `.fd` would make `finalize`'s rename replace the state with the
+/// finished file. The invariant is a debug assertion; a release build reports
+/// [`Event::BuildPusherError`] and fails instead of corrupting either file.
+fn ensure_distinct_paths(
+    fd_path: &Path,
+    tmp_path: &Path,
+    final_path: &Path,
+    tx: &Tx,
+) -> Result<(), TerminationReason> {
+    let distinct = crate::utils::paths_are_distinct(fd_path, tmp_path, final_path);
+    debug_assert!(
+        distinct,
+        "the .fd path {} collides with its .part ({}) or the output ({})",
+        fd_path.display(),
+        tmp_path.display(),
+        final_path.display()
+    );
+    if distinct {
+        return Ok(());
+    }
+    let _ = tx.send(Event::BuildPusherError(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "the .fd path {} collides with its .part ({}) or the output ({})",
+            fd_path.display(),
+            tmp_path.display(),
+            final_path.display()
+        ),
+    )));
+    Err(TerminationReason::Failed)
 }
 
 /// The concrete engine session both `download_single` and `download_multi`

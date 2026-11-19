@@ -87,7 +87,10 @@ impl State {
     /// # Errors
     /// Returns [`PlanError`] when the HTTP client cannot be built, the prefetch
     /// exhausts its retries, or the output path cannot be computed. A `.fd` that
-    /// exists but cannot be read is reported rather than silently replaced.
+    /// exists but cannot be read is reported rather than silently replaced. A
+    /// `.fd` path that collides with its `.part` or with the output — for
+    /// example a pinned `out.part`, or a `filename` equal to the `.fd`'s name —
+    /// is refused as [`PlanError::BadStatePath`].
     ///
     /// # Events
     /// `build` publishes on `tx` as it resolves the remote: an
@@ -139,6 +142,19 @@ impl State {
         // clone: the resume paths move it into the result, and a fresh path only
         // needs `caller_pinned` to decide whether to keep it.
         let probe_fd_path = fd_path.unwrap_or_else(|| final_path.with_added_extension("fd"));
+
+        // The `.fd`, its `.part` and the output must be three different files:
+        // `part_path` only swaps the extension, so an `.fd` already ending in
+        // `.part` names its own partial file (the sink would overwrite the
+        // state), and an output named like the `.fd` makes `finalize`'s rename
+        // replace the state with the finished file.
+        if !crate::utils::paths_are_distinct(
+            &probe_fd_path,
+            &crate::utils::part_path(&probe_fd_path),
+            &final_path,
+        ) {
+            return Err(PlanError::BadStatePath(probe_fd_path));
+        }
 
         // A clean, caller-configured record carrying the current identity but no
         // progress: what every `Fresh` path falls back to.

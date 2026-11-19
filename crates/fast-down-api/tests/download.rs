@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fast_down_api::{
-    Ctx, Event, PartialConfig, Record, ResumeOutcome, Rx, StartMode, State, StateError,
+    Ctx, Event, PartialConfig, PlanError, Record, ResumeOutcome, Rx, StartMode, State, StateError,
     TerminationReason, WriteMethod, create_channel,
 };
 use http_body_util::BodyExt;
@@ -1285,6 +1285,57 @@ async fn resume_mode_without_state_falls_back_to_a_full_download() {
     let _handle = ready.start(StartMode::Resume, tx, &ctx);
     assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
     assert_eq!(std::fs::read(&final_path).unwrap(), payload);
+}
+
+/// A pinned state file whose name already ends in `.part` derives itself as its
+/// own `.part`, so a run would write the download over its own state: `build`
+/// must refuse the plan instead of resolving it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fd_path_that_is_its_own_part_is_refused() {
+    let (_server, url) = start_server(vec![1u8; 64], "v1", true).await;
+    let dir = temp_dir("bad_fd_part");
+    let fd = dir.join("out.part");
+
+    let (tx, _rx) = create_channel();
+    let err = State::at_path(Url::parse(&url).unwrap(), fd.clone(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect_err("a .fd that is also its own .part must not resolve");
+    assert!(
+        matches!(&err, PlanError::BadStatePath(path) if path == &fd),
+        "expected PlanError::BadStatePath({fd:?}), got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("out.part"),
+        "the failure must name the colliding path, got: {err}"
+    );
+}
+
+/// A `filename` equal to the `.fd`'s file name makes the output *be* the state
+/// file, so `finalize`'s rename would replace the `.fd` with the finished file:
+/// `build` must refuse the plan instead of resolving it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_filename_equal_to_the_fd_name_is_refused() {
+    let (_server, url) = start_server(vec![1u8; 64], "v1", true).await;
+    let dir = temp_dir("bad_fd_output");
+    // Canonicalize before deriving anything: `gen_path` canonicalizes the
+    // `save_dir` itself, and comparing a plain spelling with its verbatim
+    // (`\\?\`) twin is exactly the case the check must see through.
+    let canonical = std::fs::canonicalize(&dir).expect("canonicalize temp dir");
+    let fd = canonical.join("state.fd");
+    let mut cfg = make_config(&dir);
+    cfg.filename = Some("state.fd".to_string());
+    cfg.parse_filename = Some(false);
+
+    let (tx, _rx) = create_channel();
+    let err = State::at_path(Url::parse(&url).unwrap(), fd.clone(), cfg)
+        .build(&tx)
+        .await
+        .expect_err("an output named like the .fd must not resolve");
+    assert!(
+        matches!(&err, PlanError::BadStatePath(path) if path == &fd),
+        "expected PlanError::BadStatePath({fd:?}), got {err:?}"
+    );
 }
 
 /// A server whose responses set a session cookie and whose *ranged* responses
