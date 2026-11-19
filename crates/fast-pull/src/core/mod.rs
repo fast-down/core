@@ -28,7 +28,8 @@ pub mod single;
 // helper; keep it crate-local and silence the private-module lint.
 const PUSH_POLL: Duration = Duration::from_millis(500);
 
-/// Shared "last progress" clock, fed whenever a chunk is accepted.
+/// Shared "last progress" clock, fed whenever a chunk is accepted or a write
+/// completes.
 ///
 /// The hot path is one relaxed store: a monotonic millisecond stamp is enough
 /// for a watchdog that only needs second-scale resolution.
@@ -48,7 +49,7 @@ impl ProgressClock {
         }
     }
 
-    /// Record that a chunk just arrived.
+    /// Record that progress was made.
     pub fn beat(&self) {
         self.last_ms
             .store(millis(self.start.elapsed()), Ordering::Relaxed);
@@ -77,9 +78,14 @@ impl Default for ProgressClock {
 /// [`Event::Stalled`] and cancels the session's root token, so every worker and
 /// the write driver wind down on their next poll. `stop` ends the watch without
 /// firing (the pull side is done and only the flush remains), and cancelling
-/// `abort` ends it too. The guard watches actual progress rather than error
-/// frequency: a burst of retries inside the window does not end a download that
-/// is still moving. A zero timeout disables it.
+/// `abort` ends it too.
+///
+/// The clock is beaten by an accepted chunk and by a write that completes (so a
+/// sink need not forward `set_listener` to stay alive), so the guard watches
+/// actual progress rather than error frequency: a burst of retries inside the
+/// window does not end a download that is still moving. The window starts with
+/// the session, so it has to exceed the time to first byte. A zero timeout
+/// disables it.
 fn spawn_stall_watch<PullError, PushError>(
     tx: &crossfire::MTx<mpmc::List<Event<PullError, PushError>>>,
     abort: CancellationToken,

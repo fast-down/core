@@ -45,12 +45,14 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
     /// channel asserts a non-zero capacity, and anything larger is clamped to
     /// `1 << 30`, which is the channel's upper bound.
     pub push_queue_cap: usize,
-    /// Give up once no chunk has arrived for this long.
+    /// Give up once the session has made no progress for this long.
     ///
-    /// Measured from the last accepted chunk, not by error count: any number of
-    /// retries inside the window keeps the download alive. The same window
-    /// bounds retrying a final flush from its first failure. [`Duration::ZERO`]
-    /// disables the guard.
+    /// Progress is a pulled chunk or a completed write; errors and new attempts
+    /// are not progress by themselves. The window starts when the session starts,
+    /// so `stall_timeout` has to exceed the time to first byte (DNS, connect,
+    /// TLS), or the first request of every range is killed before it can deliver
+    /// anything. The same window bounds retrying a final flush from its first
+    /// failure. [`Duration::ZERO`] disables the guard.
     pub stall_timeout: Duration,
     /// Minimum size (bytes) of a range handed to a worker when stealing.
     pub min_chunk_size: u64,
@@ -127,6 +129,7 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
         let token = token.clone();
         let watch_stop = watch_stop.clone();
         let tx = tx.clone();
+        let clock = clock.clone();
         move || {
             let _ = push_thread.set(std::thread::current());
             loop {
@@ -148,7 +151,14 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
                     let _ = tx.send(Event::Pushing(id, spin.clone()));
                     let len_before_push = data.len();
                     match pusher.push(&spin, data) {
-                        Ok(()) => break,
+                        Ok(()) => {
+                            // A completed write is direct evidence that the
+                            // session is moving, and unlike the listener it is
+                            // available from every sink: `set_listener` may be
+                            // the default no-op.
+                            clock.beat();
+                            break;
+                        }
                         Err((err, bytes)) => {
                             let _ = tx.send(Event::PushError(id, spin.clone(), err));
                             let written = len_before_push.saturating_sub(bytes.len());

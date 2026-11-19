@@ -30,12 +30,14 @@ pub struct DownloadOptions {
     /// channel asserts a non-zero capacity, and anything larger is clamped to
     /// `1 << 30`, which is the channel's upper bound.
     pub push_queue_cap: usize,
-    /// Give up once no chunk has arrived for this long.
+    /// Give up once the session has made no progress for this long.
     ///
-    /// Measured from the last accepted chunk, not by error count: any number of
-    /// retries inside the window keeps the download alive. The same window
-    /// bounds retrying a final flush from its first failure. [`Duration::ZERO`]
-    /// disables the guard.
+    /// Progress is a pulled chunk or a completed write; errors and new attempts
+    /// are not progress by themselves. The window starts when the session starts,
+    /// so `stall_timeout` has to exceed the time to first byte (DNS, connect,
+    /// TLS), or the first request is killed before it can deliver anything. The
+    /// same window bounds retrying a final flush from its first failure.
+    /// [`Duration::ZERO`] disables the guard.
     pub stall_timeout: Duration,
 }
 
@@ -102,6 +104,7 @@ pub fn download_single<R: Puller, W: Pusher>(
         let token = token.clone();
         let watch_stop = watch_stop.clone();
         let tx = tx.clone();
+        let clock = clock.clone();
         move || {
             let _ = push_thread.set(std::thread::current());
             loop {
@@ -123,7 +126,14 @@ pub fn download_single<R: Puller, W: Pusher>(
                     let _ = tx.send(Event::Pushing(ID, spin.clone()));
                     let len_before_push = data.len();
                     match pusher.push(&spin, data) {
-                        Ok(()) => break,
+                        Ok(()) => {
+                            // A completed write is direct evidence that the
+                            // session is moving, and unlike the listener it is
+                            // available from every sink: `set_listener` may be
+                            // the default no-op.
+                            clock.beat();
+                            break;
+                        }
                         Err((err, bytes)) => {
                             let _ = tx.send(Event::PushError(ID, spin.clone(), err));
                             let written = len_before_push.saturating_sub(bytes.len());
@@ -1089,6 +1099,95 @@ mod tests {
         .await
         .expect("a stalled body must end after the stall timeout");
         assert!(stalled, "the session must report Event::Stalled");
+    }
+
+    /// A puller that hands the whole payload over immediately in large chunks, so
+    /// the pull side is done long before a slow sink has drained the queue.
+    #[derive(Clone)]
+    struct BigChunkPuller {
+        data: Arc<[u8]>,
+        chunk: usize,
+    }
+
+    impl Puller for BigChunkPuller {
+        type Error = std::convert::Infallible;
+
+        fn pull(
+            &mut self,
+            _range: Option<&ProgressEntry>,
+        ) -> impl Future<Output = PullResult<impl PullStream<Self::Error>, Self::Error>> + Send
+        {
+            type PullItem = crate::PullResult<Bytes, std::convert::Infallible>;
+            let data = self.data.clone();
+            let chunk = self.chunk;
+            async move {
+                let items: Vec<PullItem> = data
+                    .chunks(chunk)
+                    .map(|c| Ok(Bytes::copy_from_slice(c)))
+                    .collect();
+                Ok(stream::iter(items))
+            }
+        }
+    }
+
+    /// A sink that leaves `set_listener` at its default no-op and writes slowly.
+    struct SlowListenerlessSink {
+        written: Arc<parking_lot::Mutex<Vec<u8>>>,
+        delay: Duration,
+    }
+
+    impl Pusher for SlowListenerlessSink {
+        type Error = std::convert::Infallible;
+
+        fn push(
+            &mut self,
+            _range: &ProgressEntry,
+            content: Bytes,
+        ) -> Result<(), (Self::Error, Bytes)> {
+            std::thread::sleep(self.delay);
+            self.written.lock().extend_from_slice(&content);
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_single_slow_listenerless_sink_is_not_stalled() {
+        // The watchdog must not depend on the sink forwarding `set_listener`:
+        // this sink keeps the default no-op. Every single write finishes well
+        // inside the stall window, but draining the whole queue takes several
+        // windows, so only the write side's own progress keeps the session alive.
+        let mock_data = build_mock_data(12_800);
+        let puller = BigChunkPuller {
+            data: Arc::from(mock_data.as_slice()),
+            chunk: 128,
+        };
+        let written = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let pusher = SlowListenerlessSink {
+            written: written.clone(),
+            delay: Duration::from_millis(10),
+        };
+        let result = download_single(
+            puller,
+            pusher,
+            DownloadOptions {
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                stall_timeout: Duration::from_millis(500),
+            },
+        );
+        let mut stalled = false;
+        while let Ok(event) = result.event_chain().recv().await {
+            if matches!(event, Event::Stalled(_)) {
+                stalled = true;
+            }
+        }
+        assert!(
+            !stalled,
+            "a sink that does not forward `set_listener` must not be judged stalled \
+             while its writes still land"
+        );
+        assert!(!result.is_aborted(), "the session must finish normally");
+        assert_eq!(&**written.lock(), mock_data);
     }
 
     #[tokio::test(flavor = "multi_thread")]
