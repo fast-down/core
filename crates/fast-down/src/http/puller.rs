@@ -74,6 +74,16 @@ pub(super) fn content_range_start(headers: &impl HttpHeaders) -> Option<u64> {
     ContentRange::parse(&raw)?.first_byte()
 }
 
+/// The complete length a response's `Content-Range` names, if any.
+///
+/// A whole-file request names no end of its own, but a `206` reply to it still
+/// states the resource's size here — the only expected length such an attempt
+/// can be checked against.
+fn content_range_complete(headers: &impl HttpHeaders) -> Option<u64> {
+    let raw = headers.get("content-range").ok()?;
+    ContentRange::parse(&raw)?.complete_length()
+}
+
 impl<Client: HttpClient> Debug for HttpPuller<Client> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpPuller")
@@ -120,11 +130,7 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
         };
 
         // File identity is verified for every response — the reused one and every
-        // freshly requested one. Only the validators both sides carry take part:
-        // a server may send `Last-Modified` on the metadata `200` and omit it from
-        // the ranged `206` replies, and a whole-identity comparison read that
-        // omission as a changed file (`MismatchedBody` is retryable, so the
-        // download would never finish).
+        // freshly requested one.
         let new_file_id = FileId::new(
             current.headers().get("etag").ok().as_deref(),
             current.headers().get("last-modified").ok().as_deref(),
@@ -153,6 +159,18 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
             ));
         }
 
+        // The absolute offsets this attempt must deliver. A finite range names its
+        // end directly. `u64::MAX` is the "to the end of the resource" sentinel
+        // callers pass when the size is unknown (`0..u64::MAX`), and a whole-file
+        // pull names no end at all — but a `206` reply to either still states the
+        // resource's size in its `Content-Range`, which is then the only expected
+        // end available. With neither, nothing says how long the body should be
+        // and the end cannot be checked.
+        let (start, expected_end) = range.map_or((0, None), |r| (r.start, Some(r.end)));
+        let expected_end = expected_end
+            .filter(|end| *end != u64::MAX)
+            .or_else(|| content_range_complete(current.headers()));
+
         Ok(Box::pin(stream! {
             // One response per call. Retrying is the engine's job: a chunk error ends
             // this attempt, the engine rebuilds the puller (new client, next local
@@ -161,13 +179,34 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
             // never rotate away from a path the server keeps cutting.
             //
             // Stream contract: `Ok(None)` (clean termination) is reached ONLY on a
-            // genuine EOF — when `current.chunk()` returns `Ok(None)`. A failed read
-            // reports the failure and then keeps yielding `Irrecoverable`, so the
-            // engine can never mistake a failed pull for a finished one.
+            // genuine EOF. `current.chunk()` returning `Ok(None)` is not proof of
+            // one: under chunked coding a body that stops early is a clean EOF, so
+            // the end is accepted only when the expected length is unknown or this
+            // attempt has already delivered all of it. A short body is reported as
+            // `Irrecoverable`, which makes the engine drop this stream and re-pull
+            // from the cursor it has already accepted. A failed read reports the
+            // failure and then keeps yielding `Irrecoverable`, so the engine can
+            // never mistake a failed pull for a finished one.
+            let mut yielded: u64 = 0;
             loop {
                 match current.chunk().await {
-                    Ok(Some(chunk)) => yield Ok(chunk),
-                    Ok(None) => return,
+                    Ok(Some(chunk)) => {
+                        yielded = yielded.saturating_add(chunk.len() as u64);
+                        yield Ok(chunk);
+                    }
+                    Ok(None) => {
+                        if let Some(end) = expected_end
+                            && start.saturating_add(yielded) < end
+                        {
+                            // A short body must never look like a clean end: report
+                            // the failure and keep reporting it, so a consumer that
+                            // polls again cannot read `None` as EOF.
+                            loop {
+                                yield Err((HttpError::Irrecoverable, None));
+                            }
+                        }
+                        return;
+                    }
                     Err(e) => {
                         // Report the underlying read failure (carries `current` for
                         // diagnostics). The response is spent, so there is nothing to
@@ -752,6 +791,318 @@ mod tests {
             Puller::pull(&mut puller, Some(&range)).await.is_ok(),
             "a range starting at 0 must not require Content-Range"
         );
+    }
+
+    /// A response that delivers `body_len` bytes and then ends, so a body that
+    /// stops before the end of the requested range can be told apart from a
+    /// complete one. `content_range` is the header the response carries, verbatim.
+    #[derive(Clone, Debug)]
+    struct EndingClient {
+        body_len: usize,
+        content_range: Option<&'static str>,
+    }
+    impl EndingClient {
+        fn new(body_len: usize, content_range: Option<&'static str>) -> Self {
+            Self {
+                body_len,
+                content_range,
+            }
+        }
+    }
+    impl HttpClient for EndingClient {
+        type RequestBuilder = EndingRequestBuilder;
+        fn get(&self, _url: Url, _range: Option<ProgressEntry>) -> Self::RequestBuilder {
+            EndingRequestBuilder(self.clone())
+        }
+    }
+    struct EndingRequestBuilder(EndingClient);
+    impl HttpRequestBuilder for EndingRequestBuilder {
+        type Response = EndingResponse;
+        type RequestError = MockError;
+        fn send(
+            self,
+        ) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> + Send {
+            let body_len = self.0.body_len;
+            let content_range = self.0.content_range;
+            std::future::ready(Ok(EndingResponse::new(body_len, content_range)))
+        }
+    }
+    #[derive(Debug)]
+    struct EndingResponse {
+        url: Url,
+        remaining: usize,
+        headers: EndingHeaders,
+    }
+    impl EndingResponse {
+        fn new(body_len: usize, content_range: Option<&'static str>) -> Self {
+            Self {
+                url: Url::parse("http://mock-url").unwrap(),
+                remaining: body_len,
+                headers: EndingHeaders { content_range },
+            }
+        }
+    }
+    /// Only `content-range` is ever present; its value is the fixture's verbatim.
+    #[derive(Debug)]
+    struct EndingHeaders {
+        content_range: Option<&'static str>,
+    }
+    impl HttpHeaders for EndingHeaders {
+        type GetHeaderError = MockError;
+        fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
+            match (header, self.content_range) {
+                ("content-range", Some(value)) => Ok(Cow::Borrowed(value)),
+                _ => Err(MockError),
+            }
+        }
+    }
+    impl HttpResponse for EndingResponse {
+        type Headers = EndingHeaders;
+        type ChunkError = MockError;
+        fn headers(&self) -> &Self::Headers {
+            &self.headers
+        }
+        fn url(&self) -> &Url {
+            &self.url
+        }
+        fn chunk(
+            &mut self,
+        ) -> impl Future<Output = Result<Option<Bytes>, Self::ChunkError>> + Send {
+            let next = match self.remaining {
+                0 => None,
+                remaining => {
+                    let len = remaining.min(64);
+                    self.remaining -= len;
+                    Some(Bytes::from(vec![b'x'; len]))
+                }
+            };
+            std::future::ready(Ok(next))
+        }
+    }
+
+    /// A body that ends before the requested range is short, not finished: under
+    /// chunked coding that is a clean EOF, so `Ok(None)` alone would let a
+    /// truncated download pass as a completed one.
+    #[tokio::test]
+    async fn a_body_that_stops_before_the_range_end_is_irrecoverable() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            EndingClient::new(50, None),
+            None,
+            FileId::new(None, None),
+        );
+        let range = 0..100;
+        let mut stream = Puller::pull(&mut puller, Some(&range)).await.unwrap();
+        assert_eq!(stream.try_next().await.unwrap().unwrap().len(), 50);
+        assert!(
+            matches!(
+                stream.try_next().await,
+                Err((HttpError::Irrecoverable, None))
+            ),
+            "a body shorter than the range must be reported as Irrecoverable, not as EOF"
+        );
+        assert!(
+            matches!(
+                stream.try_next().await,
+                Err((HttpError::Irrecoverable, None))
+            ),
+            "a short body must keep reporting the failure, never a clean EOF"
+        );
+    }
+
+    /// Control: a body that fills the requested range still ends cleanly.
+    #[tokio::test]
+    async fn a_body_that_fills_the_range_ends_cleanly() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            EndingClient::new(100, None),
+            None,
+            FileId::new(None, None),
+        );
+        let range = 0..100;
+        let mut stream = Puller::pull(&mut puller, Some(&range)).await.unwrap();
+        let mut total = 0;
+        loop {
+            match stream.try_next().await {
+                Ok(Some(chunk)) => total += chunk.len(),
+                Ok(None) => break,
+                Err(e) => panic!("a complete body must end cleanly, got {e:?}"),
+            }
+        }
+        assert_eq!(total, 100);
+    }
+
+    /// Without a range the expected length is unknown, so `Ok(None)` is the only
+    /// signal the body has ended and no short-body check may reject it.
+    #[tokio::test]
+    async fn an_unknown_expected_length_ends_cleanly() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            EndingClient::new(50, None),
+            None,
+            FileId::new(None, None),
+        );
+        let mut stream = Puller::pull(&mut puller, None).await.unwrap();
+        let mut total = 0;
+        loop {
+            match stream.try_next().await {
+                Ok(Some(chunk)) => total += chunk.len(),
+                Ok(None) => break,
+                Err(e) => panic!("an unknown-length body may end at any size, got {e:?}"),
+            }
+        }
+        assert_eq!(total, 50);
+    }
+
+    /// `0..u64::MAX` is how a caller asks for "the rest of the resource" when the
+    /// size is unknown; it names no length, so it must not turn a normal EOF into
+    /// a short-body error.
+    #[tokio::test]
+    async fn the_to_the_end_sentinel_ends_cleanly() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            EndingClient::new(50, None),
+            None,
+            FileId::new(None, None),
+        );
+        let range = 0..u64::MAX;
+        let mut stream = Puller::pull(&mut puller, Some(&range)).await.unwrap();
+        let mut total = 0;
+        loop {
+            match stream.try_next().await {
+                Ok(Some(chunk)) => total += chunk.len(),
+                Ok(None) => break,
+                Err(e) => panic!("a to-the-end range has no length to enforce, got {e:?}"),
+            }
+        }
+        assert_eq!(total, 50);
+    }
+
+    /// A whole-file pull has no range to measure against, but a `206` reply still
+    /// names the resource's size in `Content-Range`: a body that stops short of it
+    /// is truncated, and reporting that as a completed download is what let the
+    /// single-stream path keep a partial file.
+    #[tokio::test]
+    async fn a_declared_complete_length_is_enforced_for_a_whole_file_pull() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            EndingClient::new(50, Some("bytes 0-99/100")),
+            None,
+            FileId::new(None, None),
+        );
+        let mut stream = Puller::pull(&mut puller, None).await.unwrap();
+        assert_eq!(stream.try_next().await.unwrap().unwrap().len(), 50);
+        assert!(
+            matches!(
+                stream.try_next().await,
+                Err((HttpError::Irrecoverable, None))
+            ),
+            "a body short of the declared complete length must be Irrecoverable"
+        );
+    }
+
+    /// Control for the case above: when the `Content-Range` names no complete
+    /// length, nothing says how long the body should be and the end is accepted.
+    #[tokio::test]
+    async fn a_whole_file_pull_without_a_declared_length_ends_cleanly() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            EndingClient::new(50, None),
+            None,
+            FileId::new(None, None),
+        );
+        let mut stream = Puller::pull(&mut puller, None).await.unwrap();
+        let mut total = 0;
+        loop {
+            match stream.try_next().await {
+                Ok(Some(chunk)) => total += chunk.len(),
+                Ok(None) => break,
+                Err(e) => panic!("an undeclared length cannot be enforced, got {e:?}"),
+            }
+        }
+        assert_eq!(total, 50);
+    }
+
+    #[cfg(feature = "reqwest")]
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn a_chunked_206_that_stops_short_is_irrecoverable() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/short")
+            .with_status(206)
+            .with_header("content-range", "bytes 0-99/100")
+            .with_chunked_body(|w| w.write_all(&[b'x'; 50]))
+            .create_async()
+            .await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(Url::parse(&format!("{}/short", server.url())).unwrap()),
+            client,
+            None,
+            FileId::new(None, None),
+        );
+        let range = 0..100;
+        let mut stream = Puller::pull(&mut puller, Some(&range))
+            .await
+            .expect("the 206 must be accepted");
+        let mut total = 0;
+        loop {
+            match stream.try_next().await {
+                Ok(Some(chunk)) => total += chunk.len(),
+                Ok(None) => panic!("a 50-byte body for a 100-byte range must not end cleanly"),
+                Err((e, _)) => {
+                    assert!(
+                        matches!(e, HttpError::Irrecoverable),
+                        "expected Irrecoverable, got {e:?}"
+                    );
+                    break;
+                }
+            }
+        }
+        assert_eq!(total, 50);
+    }
+
+    /// Regression: a chunked `206` that delivers the whole range still ends with
+    /// a clean `Ok(None)`.
+    #[cfg(feature = "reqwest")]
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn a_chunked_206_that_fills_the_range_ends_cleanly() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/full")
+            .with_status(206)
+            .with_header("content-range", "bytes 0-99/100")
+            .with_chunked_body(|w| w.write_all(&[b'x'; 100]))
+            .create_async()
+            .await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(Url::parse(&format!("{}/full", server.url())).unwrap()),
+            client,
+            None,
+            FileId::new(None, None),
+        );
+        let range = 0..100;
+        let mut stream = Puller::pull(&mut puller, Some(&range))
+            .await
+            .expect("the 206 must be accepted");
+        let mut total = 0;
+        loop {
+            match stream.try_next().await {
+                Ok(Some(chunk)) => total += chunk.len(),
+                Ok(None) => break,
+                Err((e, _)) => panic!("a complete body must end cleanly, got {e:?}"),
+            }
+        }
+        assert_eq!(total, 100);
     }
 
     /// A response carrying the given validators, so the identity check can be
