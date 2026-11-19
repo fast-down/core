@@ -26,9 +26,10 @@ pub struct DownloadOptions {
     pub retry_gap: Duration,
     /// Capacity of the bounded pull→push queue; backpressure when full.
     ///
-    /// Clamped to `1..=1 << 30`: `0` is treated as `1`, because the underlying
-    /// channel asserts a non-zero capacity, and anything larger is clamped to
-    /// `1 << 30`, which is the channel's upper bound.
+    /// `0` is treated as `1`. The value is clamped to `1..=u32::MAX`, the
+    /// largest bound the underlying channel accepts, and the queue
+    /// **immediately preallocates that many slots**: a huge value is a huge
+    /// upfront allocation, not a hint.
     pub push_queue_cap: usize,
     /// Give up once the session has made no progress for this long.
     ///
@@ -94,9 +95,13 @@ pub fn download_single<R: Puller, W: Pusher>(
         })
     });
 
-    // The channel asserts `1 <= capacity < 1 << 31`, so a caller-supplied 0 or a
-    // huge value must be clamped here rather than panicking inside `crossfire`.
-    let push_queue_cap = options.push_queue_cap.clamp(1, 1 << 30);
+    // The channel asserts `1 <= capacity <= u32::MAX` (and normalises 0 to 1),
+    // so clamp to that bound here instead of panicking inside `crossfire`. The
+    // queue preallocates the capacity immediately, so this is a real allocation
+    // bound rather than a throughput hint.
+    let push_queue_cap = options
+        .push_queue_cap
+        .clamp(1, usize::try_from(u32::MAX).unwrap_or(usize::MAX));
     let (tx_push, rx_push) = spsc::bounded_async_blocking::<(ProgressEntry, Bytes)>(push_queue_cap);
     let push_thread = Arc::new(std::sync::OnceLock::new());
     let push_handle = tokio::task::spawn_blocking({
@@ -738,8 +743,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_zero_push_queue_cap_is_clamped() {
-        // `crossfire` asserts a non-zero capacity, so a caller-supplied 0 must be
-        // clamped instead of panicking the session.
+        // `0` must not panic the session. Note this cannot prove *our* clamp:
+        // `crossfire` normalises a zero capacity to 1 itself, so the channel
+        // would survive a zero even without the clamp in `download_single`. All
+        // this pins is that the session runs to completion with a zero capacity.
         let mock_data = build_mock_data(1024);
         let puller = MockPuller::new(&mock_data);
         let pusher = MemPusher::with_capacity(mock_data.len());
@@ -757,7 +764,7 @@ mod tests {
             while result.event_chain().recv().await.is_ok() {}
         })
         .await
-        .expect("a zero queue capacity must be clamped, not panic");
+        .expect("a zero queue capacity must not panic");
         assert_eq!(&**receive.lock(), mock_data);
     }
 

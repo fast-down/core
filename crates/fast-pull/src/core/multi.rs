@@ -41,9 +41,10 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
     pub pull_timeout: Duration,
     /// Capacity of the bounded pull→push queue; backpressure when full.
     ///
-    /// Clamped to `1..=1 << 30`: `0` is treated as `1`, because the underlying
-    /// channel asserts a non-zero capacity, and anything larger is clamped to
-    /// `1 << 30`, which is the channel's upper bound.
+    /// `0` is treated as `1`. The value is clamped to `1..=u32::MAX`, the
+    /// largest bound the underlying channel accepts, and the queue
+    /// **immediately preallocates that many slots**: a huge value is a huge
+    /// upfront allocation, not a hint.
     pub push_queue_cap: usize,
     /// Give up once the session has made no progress for this long.
     ///
@@ -117,9 +118,13 @@ pub fn download_multi<R: Puller, W: Pusher, I: Iterator<Item = ProgressEntry>>(
             clock.beat();
         })
     });
-    // The channel asserts `1 <= capacity < 1 << 31`, so a caller-supplied 0 or a
-    // huge value must be clamped here rather than panicking inside `crossfire`.
-    let push_queue_cap = options.push_queue_cap.clamp(1, 1 << 30);
+    // The channel asserts `1 <= capacity <= u32::MAX` (and normalises 0 to 1),
+    // so clamp to that bound here instead of panicking inside `crossfire`. The
+    // queue preallocates the capacity immediately, so this is a real allocation
+    // bound rather than a throughput hint.
+    let push_queue_cap = options
+        .push_queue_cap
+        .clamp(1, usize::try_from(u32::MAX).unwrap_or(usize::MAX));
     let (tx_push, rx_push) =
         mpsc::bounded_async_blocking::<(WorkerId, ProgressEntry, Bytes)>(push_queue_cap);
 

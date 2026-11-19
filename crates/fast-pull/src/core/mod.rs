@@ -301,6 +301,7 @@ where
 /// `while result.recv().await.is_ok() {}` awaits the session end. [`recv`](Self::recv)
 /// is the `Send`-safe form of that call; prefer it over
 /// `result.event_chain().recv()` in a `tokio::spawn`ed driver.
+#[must_use = "dropping the last handle cancels the download"]
 pub struct DownloadResult<E, PullError, PushError>
 where
     E: Executor + Send + Sync,
