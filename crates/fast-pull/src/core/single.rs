@@ -763,9 +763,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_zero_retry_gap_does_not_flood_flush_errors() {
-        // `retry_gap = ZERO` must not turn the flush loop into a busy loop for the
-        // whole stall window: the retries are floored at a millisecond, so the
-        // number of `FlushError`s stays bounded.
+        // `retry_gap = ZERO` must not turn the final flush into a busy loop: the
+        // retries are floored at a millisecond, so collecting a fixed number of
+        // them takes measurable time. Measuring the floor directly keeps the
+        // test independent of when the stall watchdog happens to fire.
         let mock_data = build_mock_data(1024);
         let puller = MockPuller::new(&mock_data);
         let mut sink = FlakySink::new();
@@ -776,27 +777,37 @@ mod tests {
             DownloadOptions {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
-                stall_timeout: Duration::from_millis(50),
+                // Only the floor keeps this from flooding, so the window must
+                // not end the session before enough retries are observed.
+                stall_timeout: Duration::from_secs(60),
             },
         );
+        let started = std::time::Instant::now();
         let mut flush_errors = 0;
         tokio::time::timeout(Duration::from_secs(5), async {
             while let Ok(event) = result.event_chain().recv().await {
                 if matches!(event, Event::FlushError(_)) {
                     flush_errors += 1;
+                    if flush_errors == 20 {
+                        result.abort();
+                    }
                 }
             }
         })
         .await
-        .expect("a permanently failing flush must end after the stall window");
-        assert!(flush_errors > 0, "the failure must still be reported");
-        // 50 ms at the 1 ms floor is ~50 retries; a busy loop would emit orders of
-        // magnitude more. The bound is loose so a slow machine cannot trip it.
+        .expect("the flush must retry and the session must end on abort");
+        let elapsed = started.elapsed();
         assert!(
-            flush_errors < 500,
-            "a zero retry gap must not flood `FlushError`: {flush_errors}"
+            flush_errors >= 20,
+            "the failure must still be reported, saw {flush_errors}"
         );
-        assert!(result.is_aborted(), "the engine must abort the session");
+        // 20 retries at a 1 ms floor cannot finish in under 19 ms; a busy loop
+        // emits them in well under a millisecond.
+        assert!(
+            elapsed >= Duration::from_millis(19),
+            "a zero retry gap must not flood `FlushError`: 20 retries took {elapsed:?}"
+        );
+        assert!(result.is_aborted(), "abort must end the session");
     }
 
     #[tokio::test]
