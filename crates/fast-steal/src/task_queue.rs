@@ -7,7 +7,7 @@
 
 #![allow(clippy::significant_drop_tightening)]
 extern crate alloc;
-use crate::{Executor, Handle, Task, WeakTask};
+use crate::{Executor, Handle, Task};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use core::ops::Range;
 // The queue's critical sections are short and synchronous (a few `VecDeque`
@@ -61,7 +61,7 @@ impl<H: Handle> Clone for TaskQueue<H> {
 }
 #[derive(Debug)]
 struct TaskQueueInner<H: Handle> {
-    running: VecDeque<(WeakTask, H)>,
+    running: VecDeque<(Task, H)>,
     waiting: VecDeque<Task>,
 }
 
@@ -70,9 +70,10 @@ impl<H: Handle> TaskQueueInner<H> {
     fn fattest(&self, exclude: Option<&Task>) -> Option<Task> {
         self.running
             .iter()
-            .filter_map(|w| w.0.upgrade())
-            .filter(|w| exclude.is_none_or(|e| w != e))
-            .max_by_key(Task::remain)
+            .map(|(task, _)| task)
+            .filter(|task| task.is_alive() && exclude.is_none_or(|e| *task != e))
+            .max_by_key(|task| task.remain())
+            .cloned()
     }
 }
 impl<H: Handle> TaskQueue<H> {
@@ -102,7 +103,7 @@ impl<H: Handle> TaskQueue<H> {
     #[must_use]
     pub fn add(&self, task: Task) -> bool {
         let mut guard = self.inner.lock();
-        let live = guard.running.iter().any(|w| w.0.is_alive());
+        let live = guard.running.iter().any(|(task, _)| task.is_alive());
         guard.waiting.push_back(task);
         live
     }
@@ -132,11 +133,11 @@ impl<H: Handle> TaskQueue<H> {
     /// - **`task` must already be exhausted** for this worker. Every path that
     ///   reports [`Refilled`](StealOutcome::Refilled) **overwrites `*task`** with
     ///   the new work, dropping the `Task` the caller passed in — and with it the
-    ///   worker's identity (and, for a speculative sharer, its reference to the
-    ///   shared cursor). Calling `steal` with work still remaining therefore
-    ///   silently discards that remaining range: the queue cannot reclaim it,
-    ///   because the advancing cursor is the only record of it. A `debug_assert!`
-    ///   at the entry enforces this in debug builds.
+    ///   worker's identity and liveness guard (and, for a speculative sharer, its
+    ///   reference to the shared cursor). Calling `steal` with work still
+    ///   remaining therefore silently discards that remaining range: the queue
+    ///   cannot reclaim it, because the advancing cursor is the only record of
+    ///   it. A `debug_assert!` at the entry enforces this in debug builds.
     /// - `id` must be the id of a worker the queue registered (a handle returned
     ///   by [`Executor::execute`](crate::Executor::execute) from this queue), and
     ///   that entry must still be registered. `steal` authenticates the caller
@@ -188,14 +189,14 @@ impl<H: Handle> TaskQueue<H> {
             // Exhausted (`Ok(None)`) and corrupted (`Err`) tasks are skipped,
             // never handed to a worker.
             if let Ok(Some(range)) = new_task.take() {
-                *task = Task::new(range);
+                *task = Task::new(range).armed();
                 found = true;
                 break;
             }
         }
         if !found && let Some(steal_task) = guard.fattest(Some(task)) {
             if let Ok(Some(range)) = steal_task.split_two(min_chunk_size) {
-                *task = Task::new(range);
+                *task = Task::new(range).armed();
                 found = true;
             } else if max_speculative > 1
                 && steal_task.sharer_count() < max_speculative
@@ -206,7 +207,7 @@ impl<H: Handle> TaskQueue<H> {
             }
         }
         if found {
-            guard.running[worker_idx].0 = task.downgrade();
+            guard.running[worker_idx].0 = task.clone();
             StealOutcome::Refilled
         } else {
             guard.running.remove(worker_idx);
@@ -220,7 +221,7 @@ impl<H: Handle> TaskQueue<H> {
     /// - **`threads` is clamped to at least 1** (`threads.max(1)`), so
     ///   `set_threads(0, ..)` keeps one worker rather than pausing the pool.
     ///   `min_chunk_size` is likewise clamped to at least 1.
-    /// - It first sweeps dead workers out of `running` (`WeakTask::is_alive`), then
+    /// - It first sweeps dead workers out of `running` (`Task::is_alive`), then
     ///   grows or shrinks toward the requested count.
     /// - **Returning `Some(())` does not mean `threads` was reached.** Growth is
     ///   fed from `waiting` and from halves split off the fattest running task; when
@@ -229,9 +230,9 @@ impl<H: Handle> TaskQueue<H> {
     ///   later call to fill. It returns `None` only when growth is needed *right
     ///   now* and no `executor` was supplied.
     /// - **Shrink puts the aborted workers' unclaimed ranges back into `waiting`.**
-    ///   Every worker beyond `threads` is upgraded to a strong `Task` and has
-    ///   [`Handle::abort`] called on it; once the drain is done those tasks are
-    ///   pushed onto `waiting`, so a surviving worker can `take` the range an aborted
+    ///   Every worker beyond `threads` has [`Handle::abort`] called on it and
+    ///   its registered `Task` is pushed onto `waiting`, so a surviving worker
+    ///   can `take` the range an aborted
     ///   worker had not claimed yet. Only *unclaimed* work is recoverable: whatever
     ///   the aborted worker had already claimed (moved the cursor past) before it
     ///   observed the abort is gone, which is exactly why [`Handle::abort`] carries
@@ -257,7 +258,7 @@ impl<H: Handle> TaskQueue<H> {
         let threads = threads.max(1);
         let min_chunk_size = min_chunk_size.max(1);
         let mut guard = self.inner.lock();
-        guard.running.retain(|t| t.0.is_alive());
+        guard.running.retain(|(task, _)| task.is_alive());
         let len = guard.running.len();
         if len < threads {
             let executor = executor?;
@@ -265,27 +266,29 @@ impl<H: Handle> TaskQueue<H> {
             let mut temp = Vec::with_capacity(need);
             let iter = guard.waiting.drain(..need);
             for task in iter {
-                let weak = task.downgrade();
-                let handle = executor.execute(task, self.clone());
-                temp.push((weak, handle));
+                // The guard has to travel with the value moved into `execute`;
+                // the queue keeps an unarmed clone (see `Task::clone`) that
+                // shares the identity and reads the same alive flag.
+                let armed = task.armed();
+                let registered = armed.clone();
+                let handle = executor.execute(armed, self.clone());
+                temp.push((registered, handle));
             }
             guard.running.extend(temp);
             while guard.running.len() < threads
                 && let Some(steal_task) = guard.fattest(None)
                 && let Ok(Some(range)) = steal_task.split_two(min_chunk_size)
             {
-                let task = Task::new(range);
-                let weak = task.downgrade();
-                let handle = executor.execute(task, self.clone());
-                guard.running.push_back((weak, handle));
+                let armed = Task::new(range).armed();
+                let registered = armed.clone();
+                let handle = executor.execute(armed, self.clone());
+                guard.running.push_back((registered, handle));
             }
         } else if len > threads {
             let mut temp = Vec::with_capacity(len - threads);
             let iter = guard.running.drain(threads..);
             for (task, mut handle) in iter {
-                if let Some(task) = task.upgrade() {
-                    temp.push(task);
-                }
+                temp.push(task);
                 handle.abort();
             }
             guard.waiting.extend(temp);
@@ -304,7 +307,7 @@ impl<H: Handle> TaskQueue<H> {
     ///
     /// # Reclaiming aborted work
     /// Aborting a handle here does **not** reclaim that worker's unclaimed range.
-    /// Only [`set_threads`](TaskQueue::set_threads) shrink upgrades the aborted
+    /// Only [`set_threads`](TaskQueue::set_threads) shrink takes the aborted
     /// workers' tasks and pushes them back into `waiting`; an abort through this
     /// iterator just signals cancellation, and the range the worker had not
     /// claimed yet is lost together with its [`Task`] (see [`Handle::abort`]'s
@@ -359,16 +362,14 @@ impl<H: Handle> TaskQueue<H> {
             .running
             .iter()
             .find(|(_, h)| h.is_self(id))
-            .is_some_and(|(weak, _)| weak.upgrade().is_some_and(|own| own == *task));
+            .is_some_and(|(own, _)| own == task);
         if !owns_task {
             return;
         }
         // Abort every twin whose task matches but is not the caller's own, and
         // deregister it so a later liveness sweep does not count it as live.
-        guard.running.retain_mut(|(weak, handle)| {
-            let is_twin = weak
-                .upgrade()
-                .is_some_and(|t| t == *task && !handle.is_self(id));
+        guard.running.retain_mut(|(own, handle)| {
+            let is_twin = own == task && !handle.is_self(id);
             if is_twin {
                 handle.abort();
             }
@@ -738,9 +739,9 @@ mod tests {
         type Handle = HoldHandle;
         fn execute(&self, task: Task, _q: TaskQueue<Self::Handle>) -> Self::Handle {
             *self.spawned.lock().unwrap() += 1;
-            // Keep the `Task` alive with a strong reference so `Weak::upgrade`
-            // during `set_threads` reclaim always succeeds. No real work is done
-            // and no background task is spawned, so the test runtime exits cleanly.
+            // Keep the `Task` alive so `set_threads` shrink can move it back to
+            // `waiting`. No real work is done and no background task is spawned,
+            // so the test runtime exits cleanly.
             self.tasks.lock().unwrap().push(task);
             HoldHandle
         }
@@ -813,8 +814,8 @@ mod tests {
     /// transfer. The core invariant `waiting.len() + running.len() == total` must
     /// hold after every resize, and `running` must land exactly at the requested
     /// size (clamped to what `waiting` can supply). A broken hand-off (e.g. a
-    /// failed `Weak::upgrade` during reclaim, or a double-drain on increase) would
-    /// break one of these assertions immediately.
+    /// task dropped during reclaim, or a double-drain on increase) would break
+    /// one of these assertions immediately.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_set_threads_oscillate_keeps_invariant() {
         let ex = HoldExecutor {
@@ -992,7 +993,7 @@ mod tests {
     /// A task whose range invariant is broken (`start > end`), built through the
     /// raw state field because `Task::new` would (correctly) refuse to make one.
     fn corrupted_task() -> Task {
-        Task::from_raw_state(Arc::new(portable_atomic::AtomicU128::new(
+        Task::from_state(Arc::new(portable_atomic::AtomicU128::new(
             (20u128 << 64) | 0xA,
         )))
     }
@@ -1055,6 +1056,64 @@ mod tests {
         assert!(
             q.add(Task::new(5..6)),
             "a live worker exists to pick up the new task"
+        );
+    }
+
+    /// Liveness is the registration's non-`Clone` guard, not the identity's
+    /// strong count: a `Task::clone` held by an observer outlives the worker but
+    /// must not keep it alive.
+    #[test]
+    fn external_task_clone_does_not_keep_an_exited_worker_alive() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new(core::iter::once(0..10));
+        q.set_threads(1, 1, Some(&ex)).unwrap();
+
+        // An observer's clone: it shares the identity but carries no guard.
+        let observer = ex.task_of(0);
+        assert!(q.inner.lock().running[0].0.is_alive());
+
+        // The worker exits: the executor drops the armed task it was handed.
+        ex.kill(0);
+        assert!(
+            observer.strong_count() > 0,
+            "the observer's clone is still alive"
+        );
+        assert!(
+            !q.inner.lock().running[0].0.is_alive(),
+            "an observer's clone must not keep the exited worker alive"
+        );
+
+        // The liveness sweep agrees and collects the dead entry.
+        let _ = q.set_threads::<SyncExecutor>(1, 1, None);
+        assert_eq!(q.inner.lock().running.len(), 0);
+    }
+
+    /// `add`'s return value tracks real liveness, not strong counts: with the
+    /// worker gone and only an observer's clone left, no worker will pick the
+    /// task up and `add` must say so.
+    #[test]
+    fn add_reports_real_liveness_not_a_lingering_clone() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new(core::iter::once(0..10));
+        q.set_threads(1, 1, Some(&ex)).unwrap();
+        let observer = ex.task_of(0);
+        assert!(
+            q.add(Task::new(100..110)),
+            "the registered worker is alive and will pick the task up"
+        );
+
+        ex.kill(0);
+        assert!(
+            !q.add(Task::new(200..210)),
+            "a clone outliving the worker must not count as a live worker"
+        );
+        assert!(
+            !q.inner.lock().running[0].0.is_alive(),
+            "the worker is dead even though its identity is still referenced"
+        );
+        assert!(
+            observer.strong_count() >= 2,
+            "the queue keeps its own reference to the dead identity until it is swept"
         );
     }
 
@@ -1133,7 +1192,7 @@ mod tests {
             "the fat peer keeps its range: waiting wins over split_two"
         );
         // The worker is re-registered against its brand-new task.
-        assert_eq!(q.inner.lock().running[0].0.upgrade().unwrap(), t);
+        assert_eq!(q.inner.lock().running[0].0, t);
     }
 
     /// The waiting drain loop pops until it finds *usable* work: an exhausted task
@@ -1310,8 +1369,8 @@ mod tests {
         assert_eq!(q.inner.lock().running.len(), 1, "the dead slot is swept");
     }
 
-    /// The liveness sweep keys off worker identity (`WeakTask` -> `TaskInner`), so
-    /// a dead worker is reclaimed even while a twin still shares its cursor.
+    /// The liveness sweep keys off the armed identity's alive flag, so a dead
+    /// worker is reclaimed even while a twin still shares its cursor.
     #[test]
     fn speculative_sharing_no_longer_defeats_liveness_sweep() {
         let ex = SyncExecutor::new();
@@ -1321,12 +1380,9 @@ mod tests {
         let mut t0 = ex.drained_task_of(0);
         assert_eq!(q.steal(&0, &mut t0, 1, 2), StealOutcome::Refilled);
         ex.rebind(0, &t0);
-        // Both `running` entries now weak-point at one and the same cursor.
+        // Both `running` entries now share one and the same cursor.
         let guard = q.inner.lock();
-        assert_eq!(
-            guard.running[0].0.upgrade().unwrap(),
-            guard.running[1].0.upgrade().unwrap()
-        );
+        assert_eq!(guard.running[0].0, guard.running[1].0);
         drop(guard);
 
         // Worker 0 exits, leaving worker 1 as the only live worker.
@@ -1689,7 +1745,7 @@ mod tests {
         q.set_threads(1, 10, Some(&ex)).unwrap();
         let guard = q.inner.lock();
         assert_eq!(guard.running.len(), 1);
-        let survivor = guard.running[0].0.upgrade().unwrap();
+        let survivor = guard.running[0].0.clone();
 
         // The reclaimed waiting task aliases the *still-running* survivor's
         // cursor. Whoever steals it next re-executes the survivor's range.

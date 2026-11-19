@@ -29,17 +29,17 @@ pub trait Executor {
     ///   key. If it fails to match, `steal` reports
     ///   [`StealOutcome::Unregistered`](crate::StealOutcome::Unregistered) and the
     ///   worker exits while work may still be waiting.
-    /// - **The spawned worker must keep `task` alive until it exits.** `task`
-    ///   arrives by value, and the queue keeps only a `WeakTask` to it (taken
-    ///   *before* this call), so the strong reference moved in here is the sole
-    ///   record of the worker's identity *and* of its range. Moving it into the
-    ///   spawned future is what makes the worker look alive to the liveness sweep
-    ///   in [`TaskQueue::set_threads`](TaskQueue::set_threads) and what lets a
-    ///   shrink recover its unclaimed range; dropping it instead (spawning
-    ///   nothing, running the work elsewhere, forgetting to move it into the
-    ///   future) deallocates the identity, makes `WeakTask::upgrade` fail, and
-    ///   silently strands the range — the queue cannot hand out or reclaim a
-    ///   task nobody holds.
+    /// - **The spawned worker must keep the very `task` value it was given until
+    ///   it exits.** `task` arrives by value and carries the registration's
+    ///   non-clonable liveness guard; the queue keeps its own unarmed clone of
+    ///   the same identity (taken *before* this call). Moving that value into
+    ///   the spawned future is what makes the worker look alive to the liveness
+    ///   sweep in [`TaskQueue::set_threads`](TaskQueue::set_threads) and what
+    ///   lets a shrink recover its unclaimed range; dropping it marks the worker
+    ///   dead, so the queue no longer counts it as a live recipient. A
+    ///   `Task::clone` intentionally does **not** carry the guard, so an
+    ///   observer's clone can neither keep a worker alive nor substitute for
+    ///   moving the original value in.
     /// - **Do not panic.** `set_threads` calls this *after* draining tasks out of
     ///   `waiting` into a local buffer and *while holding the queue lock*; an
     ///   unwind drops those already-drained tasks on the floor (they are gone from

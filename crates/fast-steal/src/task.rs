@@ -8,17 +8,28 @@
 //! only `alloc` is required for the reference-counted state.
 
 extern crate alloc;
-use alloc::sync::{Arc, Weak};
-use core::{fmt, ops::Range, sync::atomic::Ordering};
+use alloc::sync::Arc;
+use core::{
+    fmt,
+    ops::Range,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use portable_atomic::AtomicU128;
 
 /// A cancellable, concurrent-safe unit of work that tracks a `start..end` range.
 ///
 /// `Task` is a reference-counted *handle*: each worker holds a strong `Task`
 /// (an `Arc<TaskInner>`), giving every worker a **distinct identity** even when
-/// two workers speculatively share the same progress cursor. This identity is
-/// what `set_threads`'s liveness sweep keys off (via `WeakTask`), so a dead
-/// worker is reclaimed regardless of how many twins still reference its cursor.
+/// two workers speculatively share the same progress cursor. The queue keeps its
+/// own view of that identity in its running set, so a dead worker is reclaimed
+/// without waiting for every clone to be dropped.
+///
+/// Liveness is *not* the identity's strong count. The task handed to a worker
+/// by [`Executor::execute`](crate::Executor::execute) carries an internal
+/// `AliveGuard` that is dropped, marking the worker dead, when that very task
+/// value is dropped. `Clone` shares the identity and cursor but deliberately
+/// leaves the guard behind, so a clone held by an observer cannot pin a worker
+/// that has already exited.
 ///
 /// The range is stored as a single atomic `u128` inside `TaskInner`, allowing
 /// lock-free reads and fine-grained progress updates on targets with native
@@ -27,14 +38,37 @@ use portable_atomic::AtomicU128;
 ///
 /// Two `Task`s are equal iff they point to the same underlying state (see the
 /// `PartialEq` impl, which uses `Arc::ptr_eq`).
-#[derive(Debug, Clone)]
-pub struct Task(Arc<TaskInner>);
+#[derive(Debug)]
+pub struct Task {
+    inner: Arc<TaskInner>,
+    /// Set only on the value moved into a worker: dropping it marks that
+    /// registration dead. Never cloned (see the `Clone` impl), and never read —
+    /// it exists for its `Drop`.
+    #[allow(dead_code, reason = "held only for its Drop impl")]
+    keep_alive: Option<AliveGuard>,
+}
+
+/// Non-`Clone` liveness guard for one registered worker.
+///
+/// Created when the queue registers a task (grow or refill) and carried inside
+/// the [`Task`] value that [`Executor::execute`](crate::Executor::execute) moves
+/// into the worker future. Dropping it clears the identity's alive flag, which
+/// is what [`Task::is_alive`] reports. Because it cannot be cloned, no
+/// external handle can extend a dead worker's lifetime.
+#[derive(Debug)]
+struct AliveGuard(Arc<AtomicBool>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 /// The identity-bearing inner of `Task`.
 ///
-/// Kept separate from `state` so the liveness refcount counts *worker identity*,
-/// not the shared progress cursor. Only the `state` field is shared between
-/// speculative twins; each twin still owns its own `TaskInner` allocation.
+/// Kept separate from `state` so liveness tracks *worker identity*, not the
+/// shared progress cursor. Only the `state` field is shared between speculative
+/// twins; each twin still owns its own `TaskInner` allocation and alive flag.
 #[derive(Debug)]
 struct TaskInner {
     /// Atomic state packing `start` (high 64 bits) and `end` (low 64 bits).
@@ -44,49 +78,10 @@ struct TaskInner {
     /// [`Task::get`], [`Task::safe_add_start`], ...), which is what keeps the
     /// packed encoding an implementation detail.
     state: Arc<AtomicU128>,
-}
-
-/// A weak reference to a `Task`, obtained via [`Task::downgrade`].
-///
-/// Does not prevent the task from being deallocated. Use [`upgrade`](WeakTask::upgrade)
-/// to attempt to obtain a strong `Task` reference.
-///
-/// A `WeakTask` points at a worker's *identity* (`TaskInner`), not at the shared
-/// progress cursor — so [`strong_count`](WeakTask::strong_count) and
-/// [`is_alive`](WeakTask::is_alive) report whether that worker is still around.
-#[derive(Debug, Clone)]
-pub struct WeakTask(Weak<TaskInner>);
-
-impl WeakTask {
-    /// Attempts to upgrade to a strong [`Task`].
-    ///
-    /// Returns `None` if all strong references to the underlying task identity
-    /// have already been dropped (i.e. the worker that owned it has exited).
-    #[must_use]
-    pub fn upgrade(&self) -> Option<Task> {
-        self.0.upgrade().map(Task)
-    }
-    /// Returns the number of strong [`Task`] references to the underlying task
-    /// identity. Used by [`is_alive`](WeakTask::is_alive), which the liveness
-    /// sweep in `set_threads` relies on.
-    #[must_use]
-    pub fn strong_count(&self) -> usize {
-        self.0.strong_count()
-    }
-    /// Returns the number of weak [`WeakTask`] references to the underlying task
-    /// identity.
-    #[must_use]
-    pub fn weak_count(&self) -> usize {
-        self.0.weak_count()
-    }
-    /// Returns `true` if at least one strong [`Task`] reference to this worker's
-    /// identity still exists. This is the exact "is this worker alive?" test the
-    /// liveness sweep relies on — it is independent of how many twins share the
-    /// worker's progress cursor.
-    #[must_use]
-    pub fn is_alive(&self) -> bool {
-        self.0.strong_count() > 0
-    }
+    /// `true` until the identity's `AliveGuard` is dropped (or forever for an
+    /// identity that was never registered, which then liveness-tracks like a
+    /// plain shared allocation).
+    alive: Arc<AtomicBool>,
 }
 
 /// Error returned when a task range invariant is violated (`start > end`), or
@@ -124,15 +119,54 @@ impl Task {
     #[must_use]
     pub fn new(range: Range<u64>) -> Self {
         assert!(range.start <= range.end);
-        Self(Arc::new(TaskInner {
-            state: Arc::new(AtomicU128::new(Self::pack(range))),
-        }))
+        Self::from_state(Arc::new(AtomicU128::new(Self::pack(range))))
+    }
+    /// Builds an unregistered identity around `state`: no liveness guard, and
+    /// the alive flag starts `false` because nothing has armed this identity.
+    ///
+    /// This is also how tests fabricate a state `new` would refuse (an inverted
+    /// range): [`new`](Task::new) is the only constructor that checks the range
+    /// invariant.
+    pub(crate) fn from_state(state: Arc<AtomicU128>) -> Self {
+        Self {
+            inner: Arc::new(TaskInner {
+                state,
+                alive: Arc::new(AtomicBool::new(false)),
+            }),
+            keep_alive: None,
+        }
+    }
+    /// Makes this the registered task value handed to a worker: a fresh
+    /// identity (same progress cursor) whose alive flag is cleared when this
+    /// value is dropped.
+    ///
+    /// Only queue registration calls this. The queue keeps its own unarmed
+    /// clone and moves this value into the worker, so the guard marks exactly
+    /// the worker's lifetime rather than the registration's.
+    pub(crate) fn armed(self) -> Self {
+        let alive = Arc::new(AtomicBool::new(true));
+        Self {
+            inner: Arc::new(TaskInner {
+                state: self.inner.state.clone(),
+                alive: alive.clone(),
+            }),
+            keep_alive: Some(AliveGuard(alive)),
+        }
+    }
+    /// Returns `true` while the worker registered against this identity is alive.
+    ///
+    /// The flag starts `false` for an unregistered identity (every [`Task::new`]
+    /// and every clone of one) and becomes `true` only for a value produced by
+    /// [`armed`](Task::armed); dropping that value clears it again.
+    #[must_use]
+    pub(crate) fn is_alive(&self) -> bool {
+        self.inner.alive.load(Ordering::Acquire)
     }
     /// Returns the current `start..end` range, loaded atomically with `Acquire`
     /// ordering.
     #[must_use]
     pub fn get(&self) -> Range<u64> {
-        let state = self.0.state.load(Ordering::Acquire);
+        let state = self.inner.state.load(Ordering::Acquire);
         Self::unpack(state)
     }
     /// Returns the current start of the work range (the high 64 bits of the atomic
@@ -144,7 +178,7 @@ impl Task {
     /// consistent view of both bounds is required.
     #[must_use]
     pub fn start(&self) -> u64 {
-        (self.0.state.load(Ordering::Acquire) >> 64) as u64
+        (self.inner.state.load(Ordering::Acquire) >> 64) as u64
     }
     /// Atomically advances `start` to `min(start + bias, end)`, but only if that
     /// makes forward progress; then returns the slice that was claimed.
@@ -162,7 +196,7 @@ impl Task {
     /// `start` runs ahead of the task's cursor.
     pub fn safe_add_start(&self, start: u64, bias: u64) -> Result<Range<u64>, RangeError> {
         let new_start = start.saturating_add(bias);
-        let mut old_state = self.0.state.load(Ordering::Acquire);
+        let mut old_state = self.inner.state.load(Ordering::Acquire);
         loop {
             let mut range = Self::unpack(old_state);
             if start > range.start {
@@ -177,7 +211,7 @@ impl Task {
             let span = range.start..new_start;
             range.start = new_start;
             let new_state = Self::pack(range);
-            match self.0.state.compare_exchange_weak(
+            match self.inner.state.compare_exchange_weak(
                 old_state,
                 new_state,
                 Ordering::AcqRel,
@@ -196,7 +230,7 @@ impl Task {
     #[must_use]
     pub fn end(&self) -> u64 {
         #[allow(clippy::cast_possible_truncation)]
-        let end = self.0.state.load(Ordering::Acquire) as u64;
+        let end = self.inner.state.load(Ordering::Acquire) as u64;
         end
     }
     /// Returns `end - start` (saturating), i.e. how much work is left.
@@ -230,7 +264,7 @@ impl Task {
     /// 2. Returns `None` when `min_chunk_size == 0` or `remain < min_chunk_size * 2`,
     ///    without modifying itself
     pub fn split_two(&self, min_chunk_size: u64) -> Result<Option<Range<u64>>, RangeError> {
-        let mut old_state = self.0.state.load(Ordering::Acquire);
+        let mut old_state = self.inner.state.load(Ordering::Acquire);
         loop {
             let range = Self::unpack(old_state);
             if range.start > range.end {
@@ -244,7 +278,7 @@ impl Task {
             }
             let mid = range.start.midpoint(range.end);
             let new_state = Self::pack(range.start..mid);
-            match self.0.state.compare_exchange_weak(
+            match self.inner.state.compare_exchange_weak(
                 old_state,
                 new_state,
                 Ordering::AcqRel,
@@ -266,7 +300,7 @@ impl Task {
     /// 1. Returns [`RangeError`] when `start > end`
     /// 2. Returns `Ok(None)` when the task is already empty, without modifying it
     pub fn take(&self) -> Result<Option<Range<u64>>, RangeError> {
-        let mut old_state = self.0.state.load(Ordering::Acquire);
+        let mut old_state = self.inner.state.load(Ordering::Acquire);
         loop {
             let range = Self::unpack(old_state);
             if range.start > range.end {
@@ -276,7 +310,7 @@ impl Task {
                 return Ok(None);
             }
             let new_state = Self::pack(range.start..range.start);
-            match self.0.state.compare_exchange_weak(
+            match self.inner.state.compare_exchange_weak(
                 old_state,
                 new_state,
                 Ordering::AcqRel,
@@ -287,29 +321,17 @@ impl Task {
             }
         }
     }
-    /// Creates a [`WeakTask`] that does not keep the task's state alive.
-    #[must_use]
-    pub fn downgrade(&self) -> WeakTask {
-        WeakTask(Arc::downgrade(&self.0))
-    }
     /// Returns the number of strong [`Task`] references to this worker's *identity*
     /// (`TaskInner`).
     ///
-    /// `Task` and [`WeakTask`] are a paired strong/weak view of the same identity
-    /// allocation, so this equals [`WeakTask::strong_count`] on a matching
-    /// `WeakTask` — exactly like `Arc`/`Weak`. The (different) cursor-sharer count
-    /// that `steal` caps on is exposed separately as the crate-internal
-    /// `sharer_count` accessor.
+    /// This is a plain reference count and says nothing about worker liveness
+    /// (see [`is_alive`](Task::is_alive)). The queue holds one reference for
+    /// every registered worker. The (different) cursor-sharer count that `steal`
+    /// caps on is exposed separately as the crate-internal `sharer_count`
+    /// accessor.
     #[must_use]
     pub fn strong_count(&self) -> usize {
-        Arc::strong_count(&self.0)
-    }
-    /// Returns the number of weak [`WeakTask`] references to this worker's *identity*
-    /// (`TaskInner`). Pairs with [`strong_count`](Task::strong_count), and equals
-    /// [`WeakTask::weak_count`] on a matching `WeakTask`.
-    #[must_use]
-    pub fn weak_count(&self) -> usize {
-        Arc::weak_count(&self.0)
+        Arc::strong_count(&self.inner)
     }
     /// Returns the number of [`Task`] references currently sharing this task's
     /// progress *cursor* (the `state` `Arc<AtomicU128>`).
@@ -321,28 +343,18 @@ impl Task {
     /// share one cursor.
     #[must_use]
     pub(crate) fn sharer_count(&self) -> usize {
-        Arc::strong_count(&self.0.state)
+        Arc::strong_count(&self.inner.state)
     }
     /// Rebinds this task to share `other`'s progress cursor while keeping its own
-    /// distinct identity.
+    /// distinct liveness identity.
     ///
     /// Used by speculative sharing in `steal`: the caller's task aliases the
     /// victim's cursor without copying it, and — unlike a plain `clone` — remains
-    /// a *separate* worker identity. That separation is what lets the liveness
-    /// sweep in `set_threads` still track each worker independently even after
-    /// sharing.
+    /// a *separate* worker identity with its own guard. That separation is what
+    /// lets the liveness sweep in `set_threads` still track each worker
+    /// independently even after sharing.
     pub(crate) fn share_state(&mut self, other: &Self) {
-        *self = Self(Arc::new(TaskInner {
-            state: other.0.state.clone(),
-        }));
-    }
-    /// Builds a `Task` from a raw state, bypassing the range invariant checked by
-    /// [`new`](Task::new). For tests only: fabricates a corrupted (inverted-range)
-    /// state that `new` would refuse.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn from_raw_state(state: Arc<AtomicU128>) -> Self {
-        Self(Arc::new(TaskInner { state }))
+        *self = Self::from_state(other.inner.state.clone()).armed();
     }
 }
 /// Creates a [`Task`] from a `start..end` range.
@@ -355,9 +367,20 @@ impl From<Range<u64>> for Task {
     }
 }
 
+/// Clones share the identity and progress cursor but not the liveness guard:
+/// an observer's clone must never keep an exited worker alive.
+impl Clone for Task {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            keep_alive: None,
+        }
+    }
+}
+
 impl PartialEq for Task {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0.state, &other.0.state)
+        Arc::ptr_eq(&self.inner.state, &other.inner.state)
     }
 }
 impl Eq for Task {}
@@ -447,14 +470,21 @@ mod tests {
         assert_eq!(task.remain(), 0);
     }
 
+    /// A guard marks exactly the value that carries it: a clone reports the
+    /// same alive flag but cannot extend the worker's lifetime, because it
+    /// carries no guard of its own.
     #[test]
-    fn test_downgrade_upgrade() {
-        let task = Task::new(1..10);
-        let weak = task.downgrade();
-        assert_eq!(weak.strong_count(), 1);
-        assert_eq!(weak.upgrade().unwrap().get(), 1..10);
-        drop(task);
-        assert_eq!(weak.upgrade(), None);
+    fn armed_marks_only_the_value_that_carries_the_guard() {
+        let armed = Task::new(1..10).armed();
+        let observer = armed.clone();
+        assert!(armed.is_alive());
+        assert!(observer.is_alive(), "a clone shares the identity's flag");
+        drop(armed);
+        assert!(
+            !observer.is_alive(),
+            "dropping the armed value clears the shared flag"
+        );
+        assert_eq!(observer.get(), 1..10, "the observer keeps the cursor");
     }
 
     #[test]
@@ -528,31 +558,6 @@ mod tests {
     }
 
     #[test]
-    fn weak_task_reports_strong_and_weak_counts() {
-        // `WeakTask` mirrors the counts of the identity it points at.
-        let task = Task::new(1..10);
-        let weak = task.downgrade();
-        assert_eq!(weak.strong_count(), 1);
-        assert_eq!(weak.weak_count(), 1);
-        // A second weak reference bumps the weak count.
-        let weak2 = task.downgrade();
-        assert_eq!(weak2.weak_count(), 2);
-        drop(weak2);
-        assert_eq!(weak.weak_count(), 1);
-    }
-
-    #[test]
-    fn task_weak_count_reflects_weak_refs() {
-        // Weak refs come from `downgrade`, so they target the identity, not the cursor.
-        let task = Task::new(1..10);
-        assert_eq!(task.weak_count(), 0);
-        let _w1 = task.downgrade();
-        assert_eq!(task.weak_count(), 1);
-        let _w2 = task.downgrade();
-        assert_eq!(task.weak_count(), 2);
-    }
-
-    #[test]
     fn safe_add_start_survives_contention() {
         // Contention forces the CAS in `safe_add_start` to fail and retry.
         let task = Arc::new(Task::new(0..2_000));
@@ -621,7 +626,7 @@ mod tests {
     fn split_two_reports_invariant_violation_when_start_gt_end() {
         // Only `from_raw_state` can build the inverted state `new` refuses;
         // `split_two` reports it instead of normalising it away.
-        let bad = Task::from_raw_state(std::sync::Arc::new(portable_atomic::AtomicU128::new(
+        let bad = Task::from_state(std::sync::Arc::new(portable_atomic::AtomicU128::new(
             (20u128 << 64) | 0xA,
         )));
         assert_eq!(bad.split_two(1), Err(RangeError));
@@ -746,7 +751,7 @@ mod tests {
     /// state is reported rather than normalised into a silently empty range.
     #[test]
     fn take_reports_invariant_violation_on_corrupted_state() {
-        let bad = Task::from_raw_state(Arc::new(portable_atomic::AtomicU128::new(
+        let bad = Task::from_state(Arc::new(portable_atomic::AtomicU128::new(
             (20u128 << 64) | 0xA,
         )));
         // Inline `20..10` would trip `clippy::reversed_empty_ranges`.
@@ -766,29 +771,10 @@ mod tests {
     /// task looks "finished" to `steal`'s `max_by_key`.
     #[test]
     fn remain_saturates_to_zero_on_corrupted_state() {
-        let bad = Task::from_raw_state(Arc::new(portable_atomic::AtomicU128::new(
+        let bad = Task::from_state(Arc::new(portable_atomic::AtomicU128::new(
             (20u128 << 64) | 0xA,
         )));
         assert_eq!(bad.remain(), 0);
-    }
-
-    /// `weak_count` collapses to 0 once the last strong ref dies: it does not
-    /// report surviving weak refs. `Task`'s paired accessor behaves identically.
-    #[test]
-    fn weak_task_weak_count_collapses_to_zero_without_strong_refs() {
-        let task = Task::new(0..10);
-        let w1 = task.downgrade();
-        let _w2 = task.downgrade();
-        assert_eq!(w1.weak_count(), 2);
-        assert_eq!(w1.strong_count(), 1);
-        drop(task);
-        assert_eq!(w1.strong_count(), 0);
-        assert_eq!(
-            w1.weak_count(),
-            0,
-            "weak_count collapses once the strong count hits 0"
-        );
-        assert!(w1.upgrade().is_none());
     }
 
     /// `sharer_count` counts strong refs to the *shared cursor*: a speculative
@@ -823,67 +809,54 @@ mod tests {
             1,
             "clone shares identity, not a cursor ref"
         );
-
-        // An upgraded `WeakTask` holds a strong ref to the *identity* (TaskInner),
-        // not to the cursor, so it also leaves `sharer_count` unchanged.
-        let w = task.downgrade();
-        let _up = w.upgrade().unwrap();
-        assert_eq!(
-            task.sharer_count(),
-            1,
-            "upgrade keeps the cursor count unchanged"
-        );
     }
 
-    /// `strong_count` counts *worker identity* (like `WeakTask::strong_count`),
-    /// never the shared cursor, and the paired accessors stay equal.
+    /// `strong_count` counts *worker identity*, never the shared cursor.
     #[test]
     fn task_strong_count_counts_identity_not_cursor() {
         let task = Task::new(0..10);
-        let weak = task.downgrade();
-
-        // Paired strong/weak views of the same identity: equal counts.
         assert_eq!(task.strong_count(), 1);
-        assert_eq!(weak.strong_count(), 1);
 
         // A plain `clone` shares the identity, so it bumps `strong_count`...
-        let _alias = task.clone();
+        let alias = task.clone();
         assert_eq!(task.strong_count(), 2);
-        // ...and the paired `WeakTask` accessor tracks the very same identity.
-        assert_eq!(weak.strong_count(), 2);
 
-        // A `clone` does NOT touch the cursor, so `sharer_count` is unchanged.
+        // ...but does NOT touch the cursor, so `sharer_count` is unchanged.
         assert_eq!(task.sharer_count(), 1, "clone does not alias the cursor");
+        drop(alias);
 
         // `share_state` aliases the cursor (new identity) and bumps `sharer_count`,
         // but leaves `strong_count` (identity) untouched.
         let mut twin = Task::new(0..0);
         twin.share_state(&task);
         assert_eq!(task.sharer_count(), 2, "share_state aliases the cursor");
-        assert_eq!(task.strong_count(), 2, "share_state keeps its own identity");
+        assert_eq!(task.strong_count(), 1, "share_state keeps its own identity");
     }
 
-    /// `WeakTask::is_alive` reports whether the worker *identity* is still held,
-    /// independent of how many twins share the cursor.
+    /// `is_alive` follows the worker's own guard, independent of how many twins
+    /// share the cursor.
     #[test]
-    fn weak_task_is_alive_tracks_identity_not_cursor() {
-        let task = Task::new(0..10);
-        let weak = task.downgrade();
-        assert!(weak.is_alive());
-        drop(task);
-        assert!(!weak.is_alive(), "identity dropped -> not alive");
+    fn is_alive_tracks_the_guard_not_the_cursor() {
+        let armed = Task::new(0..10).armed();
+        let observer = armed.clone();
+        assert!(observer.is_alive());
 
-        // A speculative twin holds its OWN identity, so the victim's death does
-        // not flip the twin's `is_alive`.
-        let victim = Task::new(0..10);
+        // A speculative twin carries its own guard, so the victim's death does
+        // not flip the twin's flag.
+        let victim = Task::new(0..10).armed();
         let mut twin = Task::new(0..0);
         twin.share_state(&victim);
-        let twin_weak = twin.downgrade();
-        assert!(twin_weak.is_alive());
+        let twin_observer = twin.clone();
         drop(victim);
         assert!(
-            twin_weak.is_alive(),
-            "twin keeps its own identity alive after the victim dies"
+            twin_observer.is_alive(),
+            "the twin owns a separate guard and identity"
+        );
+
+        drop(armed);
+        assert!(
+            !observer.is_alive(),
+            "dropping the armed value marks its worker dead"
         );
     }
 
