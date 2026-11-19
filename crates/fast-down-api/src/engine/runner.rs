@@ -658,17 +658,12 @@ async fn drive_session(
             // `token.cancelled()` is ready forever, and under `biased` an
             // unguarded arm would win every poll and never reach `recv`.
             () = token.cancelled(), if !res.is_aborted() => res.abort(),
-            event = res.recv() => match event {
-                Ok(event) => {
-                    tracker.observe(&event);
-                    if let fast_down::Event::PushProgress(range) = &event {
-                        record.merge_progress(range.clone());
-                        tracker.set_written(record.downloaded());
-                    }
-                    forward(tx, event);
-                }
-                Err(_) => break,
-            },
+            // Both timers sit before `recv` on purpose. The engine emits an
+            // event per chunk, so during a transfer `recv` is ready on nearly
+            // every poll; under `biased` a later tick would then never run until
+            // the download ended, starving the 1s `.fd` snapshot and
+            // `Event::Progress` — which are promised to fire on their own
+            // cadence, independent of how busy the stream is.
             _ = persist_tick.tick() => {
                 // Bounded to one snapshot: a slower-than-one-second disk
                 // skips a tick instead of piling up snapshots. Check capacity
@@ -686,6 +681,17 @@ async fn drive_session(
                     tracker.snapshot(Instant::now(), record.progress()),
                 ));
             }
+            event = res.recv() => match event {
+                Ok(event) => {
+                    tracker.observe(&event);
+                    if let fast_down::Event::PushProgress(range) = &event {
+                        record.merge_progress(range.clone());
+                        tracker.set_written(record.downloaded());
+                    }
+                    forward(tx, event);
+                }
+                Err(_) => break,
+            },
         }
     }
 
@@ -796,4 +802,99 @@ fn fresh_over(record: &Record, origin_config: &PartialConfig, info: &UrlInfo) ->
     let mut fresh = Record::new(record.url.clone(), origin_config.clone());
     fresh.refresh_identity(info);
     fresh
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::create_channel;
+
+    /// The two timers must be polled before `recv`. With `recv` first, a single
+    /// flood of engine events keeps `biased` on the first ready arm and starves
+    /// both `Event::Progress` and the periodic `.fd` snapshot until the download
+    /// ends — the opposite of what the config documents.
+    ///
+    /// Driven through `drive_session` directly (it is the loop under test), with
+    /// the flood queued up front so the ordering, not the runtime's scheduling,
+    /// decides which arm wins.
+    ///
+    /// The clock is paused and moved forward before the loop starts: the timer
+    /// driver's cached "now" is then current, so a freshly created interval's
+    /// first tick is due immediately. Auto-advance cannot rescue the old order
+    /// here either, because the queued flood keeps the runtime busy.
+    #[tokio::test(start_paused = true)]
+    async fn a_flood_of_events_does_not_starve_the_progress_timer() {
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        let dir = std::env::temp_dir().join(format!("fd_runner_ticks_{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let fd_path = dir.join("out.bin.fd");
+
+        let (event_tx, event_rx) = crossfire::mpmc::unbounded_async();
+        let res: Session =
+            fast_down::DownloadResult::new(event_rx, None, CancellationToken::new(), None);
+        // Queue the flood before the loop starts: the stream is non-empty (and
+        // therefore always ready) for the whole run.
+        for _ in 0..10_000 {
+            let _ = event_tx.send(fast_down::Event::PushProgress(0..1));
+        }
+        drop(event_tx);
+
+        let (tx, rx) = create_channel();
+        let collector = tokio::spawn(async move {
+            let mut frames = 0usize;
+            while let Ok(event) = rx.recv().await {
+                if matches!(event, Event::Progress(_)) {
+                    frames += 1;
+                }
+            }
+            frames
+        });
+
+        let config = PartialConfig {
+            progress_emit_gap: Some(Duration::from_millis(50)),
+            ..PartialConfig::default()
+        }
+        .build();
+        let info = UrlInfo {
+            size: 1,
+            raw_name: "out.bin".to_string(),
+            supports_range: true,
+            fast_download: true,
+            final_url: url::Url::parse("https://example.com/out.bin").unwrap(),
+            file_id: fast_down::FileId::default(),
+            content_type: None,
+        };
+        let record = Record::new(info.final_url.clone(), PartialConfig::default());
+
+        let (record, aborted) = drive_session(
+            record,
+            &fd_path,
+            &info,
+            &config,
+            res,
+            &tx,
+            &CancellationToken::new(),
+        )
+        .await;
+        drop(tx);
+        let frames = collector.await.unwrap();
+
+        assert!(!aborted, "the session was not aborted");
+        assert_eq!(
+            record.downloaded(),
+            1,
+            "the loop must still consume the flooded events"
+        );
+        assert!(
+            frames >= 2,
+            "expected a periodic Progress before the terminal one, got {frames} \
+             frame(s): the timer was starved by the ready event stream"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
 }
