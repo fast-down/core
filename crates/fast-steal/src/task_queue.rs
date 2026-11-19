@@ -241,8 +241,27 @@ impl<H: Handle> TaskQueue<H> {
     /// - **`threads` is clamped to at least 1** (`threads.max(1)`), so
     ///   `set_threads(0, ..)` keeps one worker rather than pausing the pool.
     ///   `min_chunk_size` is likewise clamped to at least 1.
+    /// - **`threads` is otherwise trusted: there is no upper bound.** The queue
+    ///   does not validate the requested count against the work available; a
+    ///   huge `threads` simply spawns until `waiting` and splittable ranges run
+    ///   out, which can be arbitrarily expensive. Callers that accept the count
+    ///   from untrusted input must bound it themselves.
     /// - It first sweeps dead workers out of `running` (`Task::is_alive`), then
     ///   grows or shrinks toward the requested count.
+    /// - **Growth drains `waiting` with the same `take` handshake as
+    ///   [`steal`](TaskQueue::steal).** Each registration has its range claimed
+    ///   via [`Task::take`]; exhausted and corrupted ones are dropped instead of
+    ///   spending a spawn slot, and registrations aliasing one cursor are
+    ///   deduplicated by that claim: the first takes the remaining range, the
+    ///   rest come back empty and are skipped. The worker is spawned on a fresh
+    ///   task built from the claimed range, so growth never adds a second worker
+    ///   to an existing cursor.
+    /// - **`max_speculative` does not apply here.** It is a
+    ///   [`steal`](TaskQueue::steal) parameter bounding only how many workers
+    ///   `steal` may let *speculatively share* one progress cursor.
+    ///   `set_threads` cannot exceed that bound because it never makes a new
+    ///   worker share a cursor: waiting claims partition the cursor, and each
+    ///   split off the fattest task hands out a brand-new one.
     /// - **Returning `Some(())` does not mean `threads` was reached.** Growth is
     ///   fed from `waiting` and from halves split off the fattest running task; when
     ///   both run dry (an empty `waiting` plus a single unsplittable task) it
@@ -251,13 +270,13 @@ impl<H: Handle> TaskQueue<H> {
     ///   now* and no `executor` was supplied.
     /// - **Shrink puts the aborted workers' unclaimed ranges back into `waiting`.**
     ///   Every worker beyond `threads` has [`Handle::abort`] called on it and
-    ///   its registered `Task` is pushed onto `waiting`, so a surviving worker
-    ///   can `take` the range an aborted
+    ///   its registered `Task` is pushed onto `waiting`, so a surviving worker's
+    ///   next `steal` (or the next growth) can `take` the range an aborted
     ///   worker had not claimed yet. Only *unclaimed* work is recoverable: whatever
     ///   the aborted worker had already claimed (moved the cursor past) before it
     ///   observed the abort is gone, which is exactly why [`Handle::abort`] carries
     ///   its own contract. A speculative sharer's reclaimed `Task` aliases its
-    ///   surviving twin's cursor, and `steal`'s `take` handshake partitions that
+    ///   surviving twin's cursor, and the shared `take` handshake partitions that
     ///   cursor safely instead of executing it twice. **This is the only path that
     ///   reclaims**: aborting a worker's handle alone leaves its unclaimed range
     ///   lost with the task.
@@ -282,19 +301,26 @@ impl<H: Handle> TaskQueue<H> {
         let len = guard.running.len();
         if len < threads {
             let executor = executor?;
-            let need = guard.waiting.len().min(threads - len);
-            let mut temp = Vec::with_capacity(need);
-            let iter = guard.waiting.drain(..need);
-            for task in iter {
+            // Same filter and cursor handshake as `steal`'s waiting drain: claim
+            // each range with `take`, skipping exhausted/corrupted tasks instead
+            // of spending a spawn slot on them. Taking the range also dedupes
+            // registrations that alias one cursor -- the first empties it, the
+            // rest come back empty.
+            while guard.running.len() < threads {
+                let Some(task) = guard.waiting.pop_front() else {
+                    break;
+                };
+                let Ok(Some(range)) = task.take() else {
+                    continue;
+                };
                 // The guard has to travel with the value moved into `execute`;
                 // the queue keeps an unarmed clone (see `Task::clone`) that
                 // shares the identity and reads the same alive flag.
-                let armed = task.armed();
+                let armed = Task::new(range).armed();
                 let registered = armed.clone();
                 let handle = executor.execute(armed, self.clone());
-                temp.push((registered, handle));
+                guard.running.push_back((registered, handle));
             }
-            guard.running.extend(temp);
             while guard.running.len() < threads
                 && let Some(steal_task) = guard.fattest(None)
                 && let Ok(Some(range)) = steal_task.split_two(min_chunk_size)
@@ -1389,6 +1415,82 @@ mod tests {
         // The single waiting task is still spawned, but no extra split worker is
         // created because `remain >= u64::MAX` is always false.
         assert_eq!(q.inner.lock().running.len(), 1);
+    }
+
+    /// Growth must apply the same `take` filter as `steal`: an exhausted (or
+    /// corrupted) registration in `waiting` must not consume a spawn slot. With
+    /// `[empty, empty, real]` and room for three workers, the real range still
+    /// gets a worker and the pool fills by splitting it -- never by spawning
+    /// workers on the unusable registrations.
+    #[test]
+    fn set_threads_growth_skips_empty_and_corrupted_waiting_tasks() {
+        let ex = SyncExecutor::new();
+        let q: TaskQueue<SyncHandle> = TaskQueue::new(core::iter::empty());
+        let _ = q.add(Task::new(7..7));
+        let _ = q.add(corrupted_task());
+        let _ = q.add(Task::new(500..510));
+        q.set_threads(3, 1, Some(&ex)).unwrap();
+
+        let guard = q.inner.lock();
+        assert_eq!(guard.running.len(), 3, "the pool is filled");
+        assert_eq!(guard.waiting.len(), 0, "the real task was consumed");
+        let mut ranges: Vec<_> = guard.running.iter().map(|(task, _)| task.get()).collect();
+        drop(guard);
+        ranges.sort_by_key(|r| r.start);
+        assert!(
+            ranges.iter().all(|r| r.start < r.end),
+            "growth spent spawn slots on empty tasks: {ranges:?}"
+        );
+        // The real work is still represented, partitioned across the pool.
+        assert_eq!(ranges.first().unwrap().start, 500);
+        assert_eq!(ranges.last().unwrap().end, 510);
+    }
+
+    /// A shrink puts aborted workers' tasks back into `waiting`, and a later
+    /// grow must not spawn one worker per reclaimed registration: several of
+    /// them may alias one cursor (a speculative sharer reclaimed while its twin
+    /// survives). Growth applies the same `take` handshake, so the reclaimed
+    /// cursor is claimed once and the new worker gets a fresh cursor.
+    /// A shrink+grow round trip therefore never puts two workers on one cursor
+    /// -- the property `max_speculative` bounds for `steal`.
+    #[test]
+    fn set_threads_shrink_grow_never_duplicates_a_cursor() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new([0..5, 5..10].into_iter());
+        // `min_chunk_size = 10` makes both 5-wide ranges unsplittable, so worker
+        // 0 can only join worker 1's cursor speculatively.
+        q.set_threads(2, 10, Some(&ex)).unwrap();
+        let mut t0 = ex.drained_task_of(0);
+        assert_eq!(q.steal(&0, &mut t0, 10, 2), StealOutcome::Refilled);
+        ex.rebind(0, &t0);
+        assert!(
+            t0.same_cursor(&ex.task_of(1)),
+            "worker 0 aliases worker 1's cursor"
+        );
+
+        // Shrink to 1: worker 1 is aborted and its task reclaimed into `waiting`,
+        // still aliasing the survivor's cursor.
+        q.set_threads(1, 10, Some(&ex)).unwrap();
+        assert_eq!(q.inner.lock().running.len(), 1);
+        assert_eq!(q.inner.lock().waiting.len(), 1);
+
+        // Grow back. The reclaimed alias must be drained with `take`, not spawned
+        // as a second sharer of the survivor's cursor.
+        q.set_threads(2, 10, Some(&ex)).unwrap();
+        let tasks: Vec<_> = {
+            let guard = q.inner.lock();
+            assert_eq!(guard.running.len(), 2);
+            guard.running.iter().map(|(task, _)| task.clone()).collect()
+        };
+        for (i, a) in tasks.iter().enumerate() {
+            for b in &tasks[i + 1..] {
+                assert!(
+                    !a.same_cursor(b),
+                    "shrink+grow spawned two workers on one cursor, \
+                     bypassing the speculative-sharing cap"
+                );
+            }
+        }
     }
 
     /// Baseline for the next test: with no sharing, one worker owns one task, so
