@@ -91,6 +91,19 @@ pub trait Handle {
     /// `execute` call that returned this handle, consistent across calls. An
     /// implementation that misidentifies its worker makes `steal` silently
     /// strand waiting work.
+    ///
+    /// It is a hot-path predicate, not a callback point:
+    ///
+    /// - **Called while the queue lock is held**, once for every running worker
+    ///   on every [`steal`](TaskQueue::steal) and
+    ///   [`cancel_task`](TaskQueue::cancel_task) call, so the cost is O(number of
+    ///   workers) per call and the whole queue is blocked while it runs.
+    /// - **It must be lock-free and very short.** Acquiring a mutex, allocating,
+    ///   doing I/O or awaiting here serialises the queue; a lock that another
+    ///   thread can hold while it waits for the queue deadlocks it outright.
+    /// - **It must not call back into the queue** (nor into [`Handle::abort`]):
+    ///   any `TaskQueue` method (`add`, `steal`, `set_threads`, `cancel_task`,
+    ///   `handles`) re-takes the lock and deadlocks.
     fn is_self(&self, id: &Self::Id) -> bool;
 }
 
