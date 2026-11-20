@@ -179,6 +179,32 @@ fn flush_sink<W, PullError, PushError>(
     }
 }
 
+/// Cancels the session when the task holding it is dropped by a panic.
+///
+/// The task owns its queue sender — the pull task of a single-threaded session,
+/// or one worker of a multi-threaded one — so a panic would otherwise look like
+/// a finished stream to the push driver: it flushes, returns, and the session
+/// can end as a clean download with a truncated file. Running during the unwind
+/// marks the session aborted before the sender goes away, so the failure is
+/// observable as [`is_aborted`](DownloadResult::is_aborted) instead of a
+/// successful result.
+///
+/// `std::thread::panicking()` tells a panic apart from a normal exit, including
+/// the one caused by `abort`.
+///
+/// It does not hand a worker's unclaimed range back: `TaskQueue::set_threads`
+/// sweeps dead workers and takes their remaining interval into `waiting`, which
+/// covers both a panic and an exit that dropped work.
+struct PanicGuard(CancellationToken);
+
+impl Drop for PanicGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.cancel();
+        }
+    }
+}
+
 /// Shared state of an active download session.
 ///
 /// Owned inside an `Arc` by [`DownloadResult`]. Because all clones of a

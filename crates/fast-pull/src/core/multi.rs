@@ -1,6 +1,6 @@
 //! Multi-threaded concurrent download with work-stealing.
 
-use crate::core::{PUSH_POLL, ProgressClock, flush_sink, spawn_stall_watch};
+use crate::core::{PUSH_POLL, PanicGuard, ProgressClock, flush_sink, spawn_stall_watch};
 use crate::{DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, WorkerId};
 use bytes::Bytes;
 use core::{
@@ -84,12 +84,16 @@ pub struct DownloadOptions<I: Iterator<Item = ProgressEntry>> {
 /// [`download_single`](crate::single::download_single), where `Ok(None)` ends the
 /// whole download.
 ///
-/// A panic in the blocking push driver cancels the session instead of letting
-/// the workers feed a closed channel; normal cancellation via `abort()` makes
-/// every worker leave its range and the push driver return without flushing, so
-/// buffered bytes are discarded and the file is left incomplete. Either ending
-/// is observed by draining `event_chain`, because the senders are dropped when
-/// the last side exits.
+/// A panic in a worker or in the blocking push driver cancels the session
+/// instead of letting a truncated download look like a clean one: a dead worker
+/// would otherwise just stop advancing its cursor, and the push driver would
+/// flush and finish. The panicking worker's unclaimed interval is put back into
+/// the queue first as a best effort, so a survivor can pick it up if one is
+/// still running. Normal cancellation via `abort()` makes every worker leave its
+/// range and the push driver return without flushing, so buffered bytes are
+/// discarded and the file is left incomplete. Either ending is observed by
+/// draining `event_chain`, because the senders are dropped when the last side
+/// exits.
 ///
 /// # Panics
 ///
@@ -256,6 +260,7 @@ impl Handle for TokioHandle {
         self.id == *id
     }
 }
+
 /// A built-in [`Executor`] implementation based on tokio tasks.
 ///
 /// Each worker is a `tokio::spawn`-ed task that pulls chunks from the puller,
@@ -316,7 +321,14 @@ where
         let max_speculative = self.max_speculative;
         let clock = self.clock.clone();
         let worker_token = token.clone();
+        // A panicking worker would otherwise look like one that finished: its
+        // cursor stops moving and it drops its queue sender, after which the push
+        // driver flushes and can end the session as if the missing range had been
+        // downloaded. The guard is dropped during the unwind, before the senders
+        // go away, so the cancel lands while the failure is still observable.
+        let panic_token = self.token.clone();
         tokio::spawn(async move {
+            let _panic_guard = PanicGuard(panic_token);
             'task: loop {
                 if worker_token.is_cancelled() {
                     break 'task;
@@ -1719,6 +1731,61 @@ mod tests {
         assert!(
             result.is_aborted(),
             "a dead writer must report the session as aborted, not merely unfinished"
+        );
+    }
+
+    /// A puller whose request panics instead of returning a stream.
+    #[derive(Clone)]
+    struct PanickingPuller;
+
+    impl crate::Puller for PanickingPuller {
+        type Error = std::convert::Infallible;
+
+        async fn pull(
+            &mut self,
+            _range: Option<&crate::ProgressEntry>,
+        ) -> crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error> {
+            // A real `.await` makes this a genuine `async fn`; the pull itself
+            // panics on its first poll, which is what the test is about.
+            std::future::ready(()).await;
+            panic!("pull panic");
+            // Unreachable: it only pins the opaque stream type.
+            #[allow(unreachable_code)]
+            {
+                Ok::<_, (Self::Error, Option<Duration>)>(stream::empty())
+            }
+        }
+    }
+
+    /// A panicking worker must abort the session: otherwise its cursor simply
+    /// stops advancing, the worker drops its queue sender, and the run can end as
+    /// if the missing range had been downloaded.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_panic_aborts_the_session() {
+        let result = download_multi(
+            PanickingPuller,
+            MemPusher::with_capacity(1024),
+            DownloadOptions {
+                concurrent: 2,
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 16,
+                download_chunks: std::iter::once(0..1024u64),
+                // Neither a pull timeout nor the stall watchdog may be what ends
+                // the session; only the panic detection can.
+                pull_timeout: Duration::ZERO,
+                stall_timeout: Duration::ZERO,
+                min_chunk_size: 1,
+                max_speculative: 1,
+            },
+        );
+        timeout(Duration::from_secs(5), async {
+            while result.event_chain().recv().await.is_ok() {}
+        })
+        .await
+        .expect("a panicking worker must not keep the session alive");
+        assert!(
+            result.is_aborted(),
+            "a panicking pull must report the session as aborted, not completed"
         );
     }
 }

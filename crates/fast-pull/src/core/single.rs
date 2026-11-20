@@ -1,6 +1,6 @@
 //! Single-threaded sequential download.
 
-use crate::core::{PUSH_POLL, ProgressClock, flush_sink, spawn_stall_watch};
+use crate::core::{PUSH_POLL, PanicGuard, ProgressClock, flush_sink, spawn_stall_watch};
 use crate::{
     DownloadResult, Event, ProgressEntry, Puller, PullerError, Pusher, multi::TokioExecutor,
 };
@@ -60,9 +60,10 @@ pub struct DownloadOptions {
 /// The session is finished once the push driver has drained `rx_push` and
 /// flushed; the `event_chain` sender lives inside that driver, so it is dropped
 /// when the driver returns and the receiver disconnects. Draining
-/// `event_chain` is therefore the way to await completion. A panic in the
-/// blocking push driver also drops the sender and ends the session, but is
-/// otherwise swallowed. Normal cancellation (via
+/// `event_chain` is therefore the way to await completion. A panic in the pull
+/// task or in the blocking push driver cancels the session instead of letting a
+/// truncated download look like a clean one; the senders are dropped as both
+/// sides exit, so the same drain observes it. Normal cancellation (via
 /// `abort()`) is observed: the pull task is force-aborted and the push driver
 /// returns without flushing, so any buffered bytes are discarded and the file
 /// is left incomplete. Completion is still detected by draining `event_chain`,
@@ -163,7 +164,9 @@ pub fn download_single<R: Puller, W: Pusher>(
 
     let pull_clock = clock.clone();
     let watch_tx = tx.clone();
+    let pull_token = token.clone();
     let pull_handle = tokio::spawn(async move {
+        let _panic_guard = PanicGuard(pull_token);
         'redownload: loop {
             let _ = tx.send(Event::Pulling(ID));
             let mut downloaded: u64 = 0;
@@ -225,21 +228,47 @@ pub fn download_single<R: Puller, W: Pusher>(
     tokio::spawn({
         let token = token.clone();
         async move {
-            let push_failed = tokio::select! {
-                res = push_handle => res.is_err(),
-                () = token.cancelled() => false,
+            let mut pull_handle = pull_handle;
+            let mut push_handle = push_handle;
+            let mut pull_done = false;
+            let mut push_done = false;
+            // Watch both sides. The push driver is the only sink for pulled
+            // bytes, and a panicking pull task drops its queue sender on the way
+            // out: the driver would then flush and report a clean end for a
+            // download that never finished. Either death must cancel the session
+            // instead, which `is_aborted()` exposes to the caller. The loop keeps
+            // waiting for the push side after a clean pull so a later push panic
+            // is still caught; `biased` reports a simultaneous pull panic before
+            // the driver's clean return can mask it.
+            let failed = loop {
+                tokio::select! {
+                    biased;
+                    res = &mut pull_handle, if !pull_done => {
+                        pull_done = true;
+                        if res.is_err() {
+                            break true;
+                        }
+                    }
+                    res = &mut push_handle, if !push_done => {
+                        push_done = true;
+                        if res.is_err() {
+                            break true;
+                        }
+                    }
+                    () = token.cancelled() => break false,
+                }
+                if pull_done && push_done {
+                    break false;
+                }
             };
-            // The push driver is the only sink for pulled bytes, so its death
-            // aborts the session rather than leaving it to look like a download
-            // that is merely slow: `is_aborted()` is how a caller observes it.
-            // `multi` does the same for its workers.
-            if push_failed {
+            if failed {
                 token.cancel();
             }
             // Always drop the pull task. The push driver may win the race above
             // by returning as soon as it sees the cancelled token, and the pull
             // task owns the event sender: leaving it detached would keep the
-            // stream open and hang the caller's drain loop.
+            // stream open and hang the caller's drain loop. Aborting an already
+            // finished task is a no-op.
             pull_handle.abort();
             if let Some(t) = push_thread.get() {
                 t.unpark();
@@ -1311,6 +1340,55 @@ mod tests {
         assert!(
             !result.is_aborted(),
             "a completed session must stay complete"
+        );
+    }
+
+    /// A puller whose request panics instead of returning a stream.
+    #[derive(Clone)]
+    struct PanickingPuller;
+
+    impl Puller for PanickingPuller {
+        type Error = std::convert::Infallible;
+
+        async fn pull(
+            &mut self,
+            _range: Option<&ProgressEntry>,
+        ) -> PullResult<impl PullStream<Self::Error>, Self::Error> {
+            // A real `.await` makes this a genuine `async fn`; the pull itself
+            // panics on its first poll, which is what the test is about.
+            std::future::ready(()).await;
+            panic!("pull panic");
+            // Unreachable: it only pins the opaque stream type.
+            #[allow(unreachable_code)]
+            {
+                Ok::<_, (Self::Error, Option<Duration>)>(stream::empty())
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pull_panic_aborts_the_session() {
+        // The push driver sees the pull task's queue sender drop, so it would
+        // flush and report a clean end; the supervisor must treat the panic as a
+        // failed download instead.
+        let result = download_single(
+            PanickingPuller,
+            MemPusher::with_capacity(0),
+            DownloadOptions {
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 16,
+                // Only the panic detection can end this session.
+                stall_timeout: Duration::ZERO,
+            },
+        );
+        timeout(Duration::from_secs(5), async {
+            while result.event_chain().recv().await.is_ok() {}
+        })
+        .await
+        .expect("a panicking puller must not keep the session alive");
+        assert!(
+            result.is_aborted(),
+            "a panicking pull task must abort the session"
         );
     }
 }
