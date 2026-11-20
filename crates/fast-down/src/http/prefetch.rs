@@ -9,7 +9,7 @@ use crate::{
     UrlInfo,
     http::{
         ContentDisposition, ContentRange, GetResponse, HttpClient, HttpError, HttpHeaders,
-        HttpRequestBuilder, HttpResponse,
+        HttpRequestBuilder, HttpResponse, content_encoding,
     },
     url_info::FileId,
 };
@@ -21,7 +21,8 @@ use url::Url;
 ///
 /// The error is the layer's own [`HttpError`]: a transport failure surfaces as
 /// [`HttpError::Request`], an attempt that outlives its budget as
-/// [`HttpError::Timeout`].
+/// [`HttpError::Timeout`], and a response carrying a content coding as
+/// [`HttpError::ContentEncoding`].
 pub type PrefetchResult<Client> = PullResult<(UrlInfo, GetResponse<Client>), HttpError<Client>>;
 
 /// The caller's budgets and probe policy for one prefetch attempt.
@@ -73,6 +74,12 @@ pub trait Prefetch<Client: HttpClient> {
     /// `options` carries both budgets and the probe's retry policy. A request
     /// that outlives its budget fails with [`HttpError::Timeout`], which the
     /// caller treats like any other failed attempt (typically: retry).
+    ///
+    /// The response is the one later reused by
+    /// [`HttpPuller`](crate::http::HttpPuller) for the first request, so a
+    /// response that cannot be used as the resource's bytes — one carrying a
+    /// `Content-Encoding` other than `identity` — fails the prefetch with
+    /// [`HttpError::ContentEncoding`] instead of being handed on.
     fn prefetch(
         &self,
         url: Url,
@@ -155,6 +162,13 @@ async fn prefetch_no_range<Client: HttpClient>(
     let resp = attempt
         .map_err(|_| (HttpError::Timeout(timeout), None))?
         .map_err(|(e, retry)| (HttpError::Request(e), retry))?;
+    // `Accept-Encoding: identity` only negotiates, and the backend may decode a
+    // coded body on its own, so the response itself is checked: its bytes have to
+    // be the resource's bytes, because the downloader writes them at absolute
+    // offsets and the prefetched response is reused for the first of them.
+    if let Some(encoding) = content_encoding(resp.headers()) {
+        return Err((HttpError::ContentEncoding { encoding, resp }, None));
+    }
     let headers = resp.headers();
     let size = headers
         .get("content-length")
@@ -379,6 +393,8 @@ mod tests {
         /// The `Content-Length` the metadata response carries; `None` is the
         /// chunked case, where the metadata response declares no length at all.
         metadata_length: Option<&'static str>,
+        /// The `Content-Encoding` the metadata response carries, if any.
+        metadata_encoding: Option<&'static str>,
     }
 
     impl ProbeFixture {
@@ -388,12 +404,20 @@ mod tests {
                 failing_probes,
                 serves_ranges,
                 metadata_length: Some("1024"),
+                metadata_encoding: None,
             }
         }
 
         /// A metadata response with no `Content-Length`, as a chunked one has.
         fn chunked_metadata(mut self) -> Self {
             self.metadata_length = None;
+            self
+        }
+
+        /// A metadata response that declares `encoding`, as a server that
+        /// ignored `Accept-Encoding: identity` does.
+        fn coded_metadata(mut self, encoding: &'static str) -> Self {
+            self.metadata_encoding = Some(encoding);
             self
         }
 
@@ -436,6 +460,11 @@ mod tests {
                 }
             } else if let Some(length) = self.fixture.metadata_length {
                 headers.insert("content-length".to_string(), length.to_string());
+            }
+            if !self.ranged
+                && let Some(encoding) = self.fixture.metadata_encoding
+            {
+                headers.insert("content-encoding".to_string(), encoding.to_string());
             }
             Ok(FixtureResponse {
                 url: self.url,
@@ -523,6 +552,26 @@ mod tests {
         assert_eq!(client.probes(), 1, "an answer must not be retried");
         assert!(!info.supports_range);
         assert!(!info.fast_download);
+    }
+
+    /// `Accept-Encoding: identity` only negotiates: a server may code the body
+    /// anyway, and the backend decodes it when its decompression features are
+    /// enabled. The decoded bytes are not the resource's, and the response is
+    /// reused for the first bytes of the download, so the prefetch must refuse it.
+    #[tokio::test]
+    async fn a_coded_metadata_response_is_refused() {
+        let client = ProbeFixture::new(0, true).coded_metadata("gzip");
+        let url = Url::parse("http://example.com/file.bin").unwrap();
+
+        let err = match prefetch_within(&client, url, options()).await {
+            Ok(_) => panic!("a gzip-coded metadata response must not be reused"),
+            Err((e, _)) => e,
+        };
+
+        match err {
+            HttpError::ContentEncoding { encoding, .. } => assert_eq!(encoding, "gzip"),
+            other => panic!("expected the response's coding to be reported, got {other:?}"),
+        }
     }
 
     #[tokio::test]

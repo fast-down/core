@@ -13,12 +13,12 @@
 
 use crate::http::{
     ContentRange, FileId, GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder,
-    HttpResponse,
+    HttpResponse, content_encoding,
 };
 use async_stream::stream;
 use fast_pull::{ProgressEntry, PullResult, PullStream, Puller};
 use parking_lot::Mutex;
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, sync::Arc, time::Duration};
 use url::Url;
 
 /// A [`Puller`] implementation that fetches data over HTTP.
@@ -26,6 +26,13 @@ use url::Url;
 /// Uses the generic [`HttpClient`] trait so it can work with any HTTP backend
 /// (e.g. reqwest, custom clients). Supports range requests, file identity
 /// checking, and reusing previously opened responses.
+///
+/// Every response must carry the resource's own bytes. `Accept-Encoding:
+/// identity` is requested, but that only negotiates: a server may answer with a
+/// coding anyway, and the backend may decode it. A response whose
+/// `Content-Encoding` is not `identity` is therefore reported as
+/// [`HttpError::ContentEncoding`] instead of being streamed — the engine writes
+/// bytes at the offsets it asked for, which a coded body does not line up with.
 pub struct HttpPuller<Client: HttpClient> {
     client: Client,
     url: Arc<Url>,
@@ -77,6 +84,31 @@ impl<Client: HttpClient> Debug for HttpPuller<Client> {
     }
 }
 
+/// Refuse a response whose body does not start where the request asked.
+///
+/// A `206` states its offset in `Content-Range`, so any other offset means the
+/// body belongs somewhere else and would be written at the wrong place. A `200`
+/// without the header is fine only for a request rooted at byte 0: the server
+/// ignored `Range` and sent the whole file, which starts there.
+fn reject_wrong_start<Client: HttpClient>(
+    resp: GetResponse<Client>,
+    requested_start: u64,
+    answered_start: Option<u64>,
+) -> Result<GetResponse<Client>, (HttpError<Client>, Option<Duration>)> {
+    if answered_start.is_some_and(|start| start != requested_start)
+        || (answered_start.is_none() && requested_start > 0)
+    {
+        return Err((
+            HttpError::RangeIgnored {
+                start: requested_start,
+                resp,
+            },
+            None,
+        ));
+    }
+    Ok(resp)
+}
+
 impl<Client: HttpClient> Puller for HttpPuller<Client> {
     type Error = HttpError<Client>;
     async fn pull(
@@ -101,7 +133,7 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
         // would report success before a single byte was asked for, and a caller
         // timing `pull` out would never see the wait. Awaiting here makes the request
         // itself observable and cancellable.
-        let mut current: GetResponse<Client> = match reused {
+        let current: GetResponse<Client> = match reused {
             Some(resp) => resp,
             None => self
                 .client
@@ -110,6 +142,21 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
                 .await
                 .map_err(|(e, retry)| (HttpError::Request(e), retry))?,
         };
+
+        // `Accept-Encoding: identity` only negotiates: a server may code the body
+        // anyway, and `reqwest` decodes a coded body when its decompression
+        // features are enabled. Decoded bytes are not the resource's bytes at the
+        // offsets the caller is about to write, so the response is refused before
+        // any of it is streamed.
+        if let Some(encoding) = content_encoding(current.headers()) {
+            return Err((
+                HttpError::ContentEncoding {
+                    encoding,
+                    resp: current,
+                },
+                None,
+            ));
+        }
 
         // File identity is verified for every response — the reused one and every
         // freshly requested one.
@@ -145,17 +192,7 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
             .and_then(|raw| ContentRange::parse(&raw));
         let requested_start = range.map_or(0, |r| r.start);
         let answered_start = content_range.and_then(ContentRange::first_byte);
-        if answered_start.is_some_and(|start| start != requested_start)
-            || (answered_start.is_none() && requested_start > 0)
-        {
-            return Err((
-                HttpError::RangeIgnored {
-                    start: requested_start,
-                    resp: current,
-                },
-                None,
-            ));
-        }
+        let mut current = reject_wrong_start(current, requested_start, answered_start)?;
 
         // The absolute offsets this attempt must deliver. A finite range names its
         // end directly. `u64::MAX` is the "to the end of the resource" sentinel
@@ -1358,5 +1395,110 @@ mod tests {
             FileId::new(None, None),
         );
         assert!(Puller::pull(&mut puller, None).await.is_ok());
+    }
+
+    /// A response that declares `Content-Encoding: gzip`, as a server that
+    /// ignored `Accept-Encoding: identity` does.
+    #[derive(Clone, Debug)]
+    struct EncodedClient;
+    impl HttpClient for EncodedClient {
+        type RequestBuilder = EncodedRequestBuilder;
+        fn get(&self, _url: Url, _range: Option<ProgressEntry>) -> Self::RequestBuilder {
+            EncodedRequestBuilder
+        }
+    }
+    struct EncodedRequestBuilder;
+    impl HttpRequestBuilder for EncodedRequestBuilder {
+        type Response = EncodedResponse;
+        type RequestError = MockError;
+        fn send(
+            self,
+        ) -> impl Future<Output = PullResult<Self::Response, Self::RequestError>> + Send {
+            std::future::ready(Ok(EncodedResponse::new()))
+        }
+    }
+    #[derive(Debug)]
+    struct EncodedResponse {
+        url: Url,
+    }
+    impl EncodedResponse {
+        fn new() -> Self {
+            Self {
+                url: Url::parse("http://mock-url").unwrap(),
+            }
+        }
+    }
+    impl HttpResponse for EncodedResponse {
+        type Headers = EncodedHeaders;
+        type ChunkError = MockError;
+        fn headers(&self) -> &Self::Headers {
+            &EncodedHeaders
+        }
+        fn url(&self) -> &Url {
+            &self.url
+        }
+        fn chunk(
+            &mut self,
+        ) -> impl Future<Output = Result<Option<Bytes>, Self::ChunkError>> + Send {
+            // The body a backend with decompression enabled would hand over. It
+            // must never reach the caller: decoded bytes do not line up with the
+            // offsets that were requested.
+            std::future::ready(Ok(Some(Bytes::from_static(b"decoded"))))
+        }
+    }
+    /// Only `content-encoding` is present.
+    #[derive(Debug)]
+    struct EncodedHeaders;
+    impl HttpHeaders for EncodedHeaders {
+        type GetHeaderError = MockError;
+        fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
+            match header {
+                "content-encoding" => Ok(Cow::Borrowed("gzip")),
+                _ => Err(MockError),
+            }
+        }
+    }
+
+    /// `Accept-Encoding: identity` only negotiates; it cannot stop a server from
+    /// coding the body, nor the backend from decoding it. A coded response must
+    /// fail the pull instead of being streamed at the requested offsets.
+    #[tokio::test]
+    async fn a_coded_response_is_refused_before_any_byte_is_streamed() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller =
+            HttpPuller::new(Arc::new(url), EncodedClient, None, FileId::new(None, None));
+        let err = Puller::pull(&mut puller, None)
+            .await
+            .err()
+            .expect("a gzip-coded body must not be streamed")
+            .0;
+        match err {
+            HttpError::ContentEncoding { encoding, .. } => assert_eq!(encoding, "gzip"),
+            other => panic!("expected the response's coding to be reported, got {other:?}"),
+        }
+    }
+
+    /// Control: `identity` (in any case), an empty value, and a missing header
+    /// all mean the body is the resource's own bytes.
+    #[test]
+    fn identity_is_not_a_coding() {
+        struct EncodingHeader(&'static str);
+        impl HttpHeaders for EncodingHeader {
+            type GetHeaderError = MockError;
+            fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
+                match header {
+                    "content-encoding" => Ok(Cow::Borrowed(self.0)),
+                    _ => Err(MockError),
+                }
+            }
+        }
+        assert_eq!(content_encoding(&EncodingHeader("identity")), None);
+        assert_eq!(content_encoding(&EncodingHeader("IDENTITY")), None);
+        assert_eq!(content_encoding(&EncodingHeader("  ")), None);
+        assert_eq!(content_encoding(&MockHeaders(None)), None);
+        assert_eq!(
+            content_encoding(&EncodingHeader("gzip")).as_deref(),
+            Some("gzip")
+        );
     }
 }

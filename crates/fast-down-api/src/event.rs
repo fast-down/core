@@ -29,7 +29,8 @@ pub enum Event {
     /// caller can inspect the remote before or while the download proceeds.
     Prefetch(UrlInfo),
     /// The prefetch request failed (server unreachable, non-2xx response, a
-    /// request that outlived its time budget, etc.).
+    /// request that outlived its time budget, a response that cannot be used as
+    /// the resource's bytes, etc.).
     ///
     /// Fatal for the download: without [`UrlInfo`] the engine cannot plan ranges.
     PrefetchError(HttpError<SmartRedirectClient>),

@@ -32,6 +32,15 @@ use std::{borrow::Cow, fmt::Debug, future::Future, time::Duration};
 use url::Url;
 
 /// Abstraction over an HTTP client that can send GET requests with optional byte-range headers.
+///
+/// Implementations must return the response body **undecoded**: the downloader
+/// writes body bytes at the absolute offsets it asks for, so a body that went
+/// through a content coding is not the resource's bytes. Every request asks for
+/// `Accept-Encoding: identity`, but a server may ignore that and a backend may
+/// decode anyway, so [`HttpPuller`] and the prefetch check the response's
+/// `Content-Encoding` and report
+/// [`HttpError::ContentEncoding`]
+/// instead of streaming it.
 pub trait HttpClient: Clone + Send + Sync + Unpin + 'static {
     /// The request builder this client produces.
     type RequestBuilder: HttpRequestBuilder;
@@ -177,11 +186,32 @@ impl ContentRange {
     }
 }
 
+/// The content coding a response declares, when it changes the body's bytes.
+///
+/// `None` when the header is missing, empty, or `identity` (case-insensitive):
+/// all three say the bytes on the wire are the resource's own. Any other value
+/// (including a comma-separated list) is returned so the caller can report it —
+/// the downloader writes body bytes at the absolute offsets it asked for, which
+/// a coded representation does not line up with.
+pub(crate) fn content_encoding(headers: &impl HttpHeaders) -> Option<String> {
+    let raw = headers.get("content-encoding").ok()?;
+    let encoding = raw.trim();
+    if encoding.is_empty() || encoding.eq_ignore_ascii_case("identity") {
+        return None;
+    }
+    Some(encoding.to_string())
+}
+
 /// Errors that can occur during HTTP download operations.
 ///
 /// Maps to the various stages of an HTTP request: building, streaming chunks,
 /// detecting mismatched file identity, and irrecoverable failures.
+///
+/// `#[non_exhaustive]`: new ways for a response to be wrong get their own
+/// variant, and a caller outside this crate must not fail to compile because of
+/// one it has never seen.
 #[derive(thiserror::Error)]
+#[non_exhaustive]
 pub enum HttpError<Client: HttpClient> {
     /// The HTTP request failed to send.
     #[error("HTTP request failed: {0}")]
@@ -226,6 +256,24 @@ pub enum HttpError<Client: HttpClient> {
         /// The response that kept sending past it.
         resp: GetResponse<Client>,
     },
+    /// The response body is not the resource's own bytes: it carries a
+    /// `Content-Encoding` other than `identity`.
+    ///
+    /// The downloader writes body bytes at the absolute offsets named by the
+    /// range it asked for, so a coded body cannot be used at all — its bytes
+    /// are a representation, not the resource's bytes at those offsets.
+    /// `identity` is requested on every request, but a server may ignore it, and
+    /// the `reqwest` backend decodes a coded body regardless of what was asked
+    /// for when its decompression features are enabled.
+    #[error(
+        "the response body is `{encoding}`-encoded, not the resource's bytes\n  response: {resp:?}"
+    )]
+    ContentEncoding {
+        /// The `Content-Encoding` value the response declared.
+        encoding: String,
+        /// The response that carried it.
+        resp: GetResponse<Client>,
+    },
 }
 
 impl<Client: HttpClient> std::fmt::Debug for HttpError<Client> {
@@ -246,6 +294,11 @@ impl<Client: HttpClient> std::fmt::Debug for HttpError<Client> {
             Self::OverDelivery { expected, resp } => f
                 .debug_struct("OverDelivery")
                 .field("expected", expected)
+                .field("resp", resp)
+                .finish(),
+            Self::ContentEncoding { encoding, resp } => f
+                .debug_struct("ContentEncoding")
+                .field("encoding", encoding)
                 .field("resp", resp)
                 .finish(),
         }

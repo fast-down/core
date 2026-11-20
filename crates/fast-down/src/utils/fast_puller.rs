@@ -123,7 +123,9 @@ pub fn build_client(
     // caller-supplied `Accept-Encoding` is overwritten instead of honoured.
     // `reqwest`'s decompression features are unified across the dependency
     // graph, so another crate can switch them on and have the client negotiate
-    // a coding even when this one did not ask for it.
+    // a coding even when this one did not ask for it. That case is caught by the
+    // response checks in `HttpPuller` and the prefetch, which refuse a body whose
+    // `Content-Encoding` is not `identity`.
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     let mut client = ClientBuilder::new()
         .default_headers(headers)
