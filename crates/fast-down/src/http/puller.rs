@@ -5,8 +5,11 @@
 //! verifies the server's `ETag` / `Last-Modified` headers against the expected
 //! [`crate::FileId`] so that a changed file is reported as [`crate::http::HttpError::MismatchedBody`]
 //! rather than silently corrupting an incremental download, and it verifies the
-//! `Content-Range` start of every mid-file request so a server that ignores
-//! `Range` cannot have its whole-file body written at the requested offset.
+//! `Content-Range` of every response: its first byte must be the offset that was
+//! requested, a range it declares shorter than the request is reported as a
+//! changed resource, and a mid-file request answered without one is refused —
+//! so a server that ignores `Range` cannot have its whole-file body written at
+//! the requested offset.
 
 use crate::http::{
     ContentRange, FileId, GetResponse, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder,
@@ -61,27 +64,6 @@ impl<Client: HttpClient> HttpPuller<Client> {
             file_id,
         }
     }
-}
-
-/// The first byte offset a response body starts at, read from `Content-Range`.
-///
-/// Accepts `bytes <start>-<end>/<size>`; the `bytes */<size>` form (no body
-/// range) and any malformed value yield `None`. The parsing rules — the
-/// case-insensitive unit and the tolerated whitespace — live in `ContentRange`,
-/// shared with the prefetch probe so the two cannot disagree.
-pub(super) fn content_range_start(headers: &impl HttpHeaders) -> Option<u64> {
-    let raw = headers.get("content-range").ok()?;
-    ContentRange::parse(&raw)?.first_byte()
-}
-
-/// The complete length a response's `Content-Range` names, if any.
-///
-/// A whole-file request names no end of its own, but a `206` reply to it still
-/// states the resource's size here — the only expected length such an attempt
-/// can be checked against.
-fn content_range_complete(headers: &impl HttpHeaders) -> Option<u64> {
-    let raw = headers.get("content-range").ok()?;
-    ContentRange::parse(&raw)?.complete_length()
 }
 
 impl<Client: HttpClient> Debug for HttpPuller<Client> {
@@ -141,18 +123,34 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
             return Err((HttpError::MismatchedBody(new_file_id, current), None));
         }
 
-        // A ranged request must be answered with a body that starts where we asked.
-        // A server that ignores `Range` replies `200` with the whole file; the
-        // engine would write that body at `range.start`, silently corrupting the
-        // output. The `Content-Range` offset is the only proof of the body's
-        // position that reaches this layer.
-        if let Some(expected) = range
-            && expected.start > 0
-            && content_range_start(current.headers()) != Some(expected.start)
+        // A `Content-Range` is the only proof of where a body starts that reaches
+        // this layer. When the response carries one, it must name the offset that
+        // was asked for — including 0, both for a whole-file pull and for a slice
+        // that starts there: a server answering `bytes 50-…` to a request rooted
+        // at 0 is sending a different span than the caller is about to write, and
+        // the engine would write it at the requested offset.
+        //
+        // A response without the header is still fine for a request rooted at 0:
+        // a `200` with the whole body legitimately starts there. A mid-file
+        // request without it is the case the check exists for — the server
+        // ignored `Range` and answered with the whole file.
+        // Parse the header once: the offset, the declared span and the complete
+        // length all come from the same value. Re-reading it per check would cost
+        // a second parse and let a hypothetical disagreement between calls pick
+        // different answers for one response.
+        let content_range = current
+            .headers()
+            .get("content-range")
+            .ok()
+            .and_then(|raw| ContentRange::parse(&raw));
+        let requested_start = range.map_or(0, |r| r.start);
+        let answered_start = content_range.and_then(ContentRange::first_byte);
+        if answered_start.is_some_and(|start| start != requested_start)
+            || (answered_start.is_none() && requested_start > 0)
         {
             return Err((
                 HttpError::RangeIgnored {
-                    start: expected.start,
+                    start: requested_start,
                     resp: current,
                 },
                 None,
@@ -166,10 +164,24 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
         // resource's size in its `Content-Range`, which is then the only expected
         // end available. With neither, nothing says how long the body should be
         // and the end cannot be checked.
-        let (start, expected_end) = range.map_or((0, None), |r| (r.start, Some(r.end)));
-        let expected_end = expected_end
-            .filter(|end| *end != u64::MAX)
-            .or_else(|| content_range_complete(current.headers()));
+        let (start, requested_end) = range.map_or((0, None), |r| (r.start, Some(r.end)));
+        let requested_end = requested_end.filter(|end| *end != u64::MAX);
+        // A finite range also says how long the resource must be. `requested_end`
+        // is a half-open byte *position*, and `resource_len` is the resource's
+        // total length, so both are measured from the start of the file and are
+        // directly comparable: `resource_len == requested_end` is exactly enough
+        // (byte `requested_end` itself is not requested). A shorter resource has
+        // replaced the file, so this range can never be delivered: report the
+        // changed resource instead of letting the body stop short and surface as
+        // an endless short-body `Irrecoverable` downstream.
+        let resource_len = content_range.and_then(ContentRange::complete_length);
+        if let Some(end) = requested_end
+            && let Some(len) = resource_len
+            && len < end
+        {
+            return Err((HttpError::MismatchedBody(new_file_id, current), None));
+        }
+        let expected_end = requested_end.or(resource_len);
 
         Ok(Box::pin(stream! {
             // One response per call. Retrying is the engine's job: a chunk error ends
@@ -187,11 +199,32 @@ impl<Client: HttpClient> Puller for HttpPuller<Client> {
             // from the cursor it has already accepted. A failed read reports the
             // failure and then keeps yielding `Irrecoverable`, so the engine can
             // never mistake a failed pull for a finished one.
+            let declared_len = content_range.and_then(ContentRange::span_len);
             let mut yielded: u64 = 0;
             loop {
                 match current.chunk().await {
                     Ok(Some(chunk)) => {
-                        yielded = yielded.saturating_add(chunk.len() as u64);
+                        let len = chunk.len() as u64;
+                        let delivered = yielded.saturating_add(len);
+                        if let Some(expected) = declared_len
+                            && delivered > expected
+                        {
+                            // The body is longer than the span it announced, so the
+                            // excess belongs to no offset the caller asked for. Report
+                            // it and keep reporting the failure instead of handing a
+                            // body that does not match the requested range out.
+                            yield Err((
+                                HttpError::OverDelivery {
+                                    expected,
+                                    resp: current,
+                                },
+                                None,
+                            ));
+                            loop {
+                                yield Err((HttpError::Irrecoverable, None));
+                            }
+                        }
+                        yielded = delivered;
                         yield Ok(chunk);
                     }
                     Ok(None) => {
@@ -286,7 +319,8 @@ mod tests {
         }
     }
     /// Only `content-range` is ever present; every other header reads as absent.
-    /// The start offset is rendered in the `Content-Range` form the parser reads.
+    /// The value describes a 1024-byte body starting at the given offset, in the
+    /// `Content-Range` form the parser reads.
     #[derive(Debug)]
     struct MockHeaders(Option<u64>);
     impl HttpHeaders for MockHeaders {
@@ -294,7 +328,12 @@ mod tests {
         fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
             match (header, self.0) {
                 ("content-range", Some(start)) => {
-                    Ok(Cow::Owned(format!("bytes {start}-{start}/1000")))
+                    // A span wide enough for the handful of bytes these mocks
+                    // deliver, so only a test that means to over-deliver trips
+                    // the check.
+                    let last = start.saturating_add(1023);
+                    let complete = start.saturating_add(1024);
+                    Ok(Cow::Owned(format!("bytes {start}-{last}/{complete}")))
                 }
                 _ => Err(MockError),
             }
@@ -697,44 +736,6 @@ mod tests {
         assert_eq!(RESUME_RANGE_START.load(Ordering::SeqCst), 7);
     }
 
-    /// A raw `Content-Range` value, for the parser cases the mock client cannot
-    /// build from an offset alone.
-    struct RawHeaders(&'static str);
-    impl HttpHeaders for RawHeaders {
-        type GetHeaderError = MockError;
-        fn get(&self, header: &str) -> Result<Cow<'_, str>, Self::GetHeaderError> {
-            if header == "content-range" {
-                Ok(Cow::Borrowed(self.0))
-            } else {
-                Err(MockError)
-            }
-        }
-    }
-
-    #[test]
-    fn content_range_start_parses_the_common_forms() {
-        assert_eq!(
-            content_range_start(&MockHeaders(Some(5))),
-            Some(5),
-            "the ranged form must yield its start offset"
-        );
-        assert_eq!(
-            content_range_start(&RawHeaders("bytes */20")),
-            None,
-            "an unsatisfied range carries no body offset"
-        );
-        assert_eq!(
-            content_range_start(&MockHeaders(None)),
-            None,
-            "a response without Content-Range has no offset"
-        );
-        assert_eq!(
-            content_range_start(&RawHeaders("Bytes 5-9/20")),
-            Some(5),
-            "the range unit is a case-insensitive token"
-        );
-    }
-
     /// The corruption case this guards: a server that ignores `Range` answers
     /// `200` with the whole file. Streaming it at the requested offset would
     /// overwrite the wrong bytes, so the pull must fail instead.
@@ -1024,6 +1025,128 @@ mod tests {
                 Ok(Some(chunk)) => total += chunk.len(),
                 Ok(None) => break,
                 Err(e) => panic!("an undeclared length cannot be enforced, got {e:?}"),
+            }
+        }
+        assert_eq!(total, 50);
+    }
+
+    /// A slice rooted at 0 used to skip the `Content-Range` check because its
+    /// start was 0. A `bytes 50-149/200` answer to a `0..100` request is a
+    /// different span, and streaming it at 0 would write the wrong bytes.
+    #[tokio::test]
+    async fn a_zero_offset_range_rejects_a_body_that_starts_later() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            EndingClient::new(100, Some("bytes 50-149/200")),
+            None,
+            FileId::new(None, None),
+        );
+        let range = 0..100;
+        let err = Puller::pull(&mut puller, Some(&range))
+            .await
+            .err()
+            .expect("a body starting at 50 cannot serve a range rooted at 0")
+            .0;
+        assert!(
+            matches!(err, HttpError::RangeIgnored { start: 0, .. }),
+            "expected RangeIgnored at 0, got {err:?}"
+        );
+    }
+
+    /// A whole-file pull names no range, but its body still has to start at 0:
+    /// `bytes 5-…` is a different span and cannot be written at offset 0.
+    #[tokio::test]
+    async fn a_whole_file_pull_rejects_a_body_that_starts_later() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            EndingClient::new(100, Some("bytes 5-104/200")),
+            None,
+            FileId::new(None, None),
+        );
+        let err = Puller::pull(&mut puller, None)
+            .await
+            .err()
+            .expect("a whole-file pull must start at 0")
+            .0;
+        assert!(
+            matches!(err, HttpError::RangeIgnored { start: 0, .. }),
+            "expected RangeIgnored at 0, got {err:?}"
+        );
+    }
+
+    /// The `Content-Range` can also say the resource is now shorter than the
+    /// range being requested. Retrying that range can never fill it, so it is
+    /// reported as a changed resource instead of reaching the short-body loop.
+    #[tokio::test]
+    async fn a_declared_resource_shorter_than_the_range_is_a_mismatch() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            EndingClient::new(200, Some("bytes 0-49/50")),
+            None,
+            FileId::new(None, None),
+        );
+        let range = 0..100;
+        let err = Puller::pull(&mut puller, Some(&range))
+            .await
+            .err()
+            .expect("a 50-byte resource cannot serve a 100-byte range")
+            .0;
+        assert!(
+            matches!(err, HttpError::MismatchedBody(_, _)),
+            "a resource that shrank must read as a changed file, got {err:?}"
+        );
+    }
+
+    /// A body longer than the span its own `Content-Range` announced is not the
+    /// range that was asked for; the excess belongs to no requested offset.
+    #[tokio::test]
+    async fn a_body_longer_than_the_announced_span_is_rejected() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            EndingClient::new(60, Some("bytes 0-49/200")),
+            None,
+            FileId::new(None, None),
+        );
+        let range = 0..50;
+        let mut stream = Puller::pull(&mut puller, Some(&range)).await.unwrap();
+        assert!(
+            matches!(
+                stream.try_next().await,
+                Err((HttpError::OverDelivery { expected: 50, .. }, None))
+            ),
+            "a 60-byte body over-runs the 50-byte span it announced"
+        );
+        assert!(
+            matches!(
+                stream.try_next().await,
+                Err((HttpError::Irrecoverable, None))
+            ),
+            "an over-delivering body must keep reporting the failure, never EOF"
+        );
+    }
+
+    /// Control: a body that fills exactly the announced span ends cleanly.
+    #[tokio::test]
+    async fn a_body_that_matches_the_announced_span_ends_cleanly() {
+        let url = Url::parse("http://localhost").unwrap();
+        let mut puller = HttpPuller::new(
+            Arc::new(url),
+            EndingClient::new(50, Some("bytes 0-49/200")),
+            None,
+            FileId::new(None, None),
+        );
+        let range = 0..50;
+        let mut stream = Puller::pull(&mut puller, Some(&range)).await.unwrap();
+        let mut total = 0;
+        loop {
+            match stream.try_next().await {
+                Ok(Some(chunk)) => total += chunk.len(),
+                Ok(None) => break,
+                Err(e) => panic!("a body that matches its span must end cleanly, got {e:?}"),
             }
         }
         assert_eq!(total, 50);

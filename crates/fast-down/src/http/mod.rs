@@ -152,6 +152,18 @@ impl ContentRange {
         self.first
     }
 
+    /// The number of bytes this range encloses: `last - first + 1`, because
+    /// `last` is inclusive.
+    ///
+    /// `None` for a value that names no body (`bytes */<size>`) and for one whose
+    /// end precedes its start — that encloses no byte, and the subtraction must
+    /// not wrap.
+    pub(crate) fn span_len(self) -> Option<u64> {
+        let last = self.last?;
+        let first = self.first?;
+        last.checked_sub(first)?.checked_add(1)
+    }
+
     /// The complete length of the resource this range belongs to, when the
     /// header names one.
     pub(crate) const fn complete_length(self) -> Option<u64> {
@@ -195,6 +207,18 @@ pub enum HttpError<Client: HttpClient> {
         /// The response that did not honour it.
         resp: GetResponse<Client>,
     },
+    /// The response body is longer than the span its `Content-Range` announced.
+    /// The excess belongs to no offset the caller asked for, so the body cannot
+    /// be streamed as the requested range.
+    #[error(
+        "body over-delivery: the response announced {expected} bytes but delivered more\n  response: {resp:?}"
+    )]
+    OverDelivery {
+        /// The number of bytes the response's `Content-Range` named.
+        expected: u64,
+        /// The response that kept sending past it.
+        resp: GetResponse<Client>,
+    },
 }
 
 impl<Client: HttpClient> std::fmt::Debug for HttpError<Client> {
@@ -209,6 +233,11 @@ impl<Client: HttpClient> std::fmt::Debug for HttpError<Client> {
             Self::RangeIgnored { start, resp } => f
                 .debug_struct("RangeIgnored")
                 .field("start", start)
+                .field("resp", resp)
+                .finish(),
+            Self::OverDelivery { expected, resp } => f
+                .debug_struct("OverDelivery")
+                .field("expected", expected)
                 .field("resp", resp)
                 .finish(),
         }
@@ -226,7 +255,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::{
         ContentRange, HttpClient, HttpError, HttpHeaders, HttpRequestBuilder, HttpResponse,
-        prefetch::zero_range_answer, puller::content_range_start,
+        prefetch::zero_range_answer,
     };
     use crate::url_info::FileId;
     use bytes::Bytes;
@@ -324,7 +353,7 @@ mod tests {
         ];
         for &(raw, expected_start) in cases {
             let headers = RangeHeader(raw);
-            let start = content_range_start(&headers);
+            let start = ContentRange::parse(raw).and_then(ContentRange::first_byte);
             assert_eq!(start, expected_start, "downloader's offset for {raw:?}");
             assert_eq!(
                 zero_range_answer(&headers).is_some(),
@@ -412,6 +441,12 @@ mod tests {
             resp: MockResponse::new(),
         };
         assert!(format!("{range_ignored:?}").contains("RangeIgnored"));
+
+        let over_delivery = HttpError::<MockClient>::OverDelivery {
+            expected: 50,
+            resp: MockResponse::new(),
+        };
+        assert!(format!("{over_delivery:?}").contains("OverDelivery"));
     }
 
     #[test]
@@ -445,6 +480,14 @@ mod tests {
             }
             .is_irrecoverable(),
             "a range-ignoring server may answer correctly on the retry"
+        );
+        assert!(
+            !HttpError::<MockClient>::OverDelivery {
+                expected: 50,
+                resp: MockResponse::new()
+            }
+            .is_irrecoverable(),
+            "an over-delivering server may answer the retry with the right span"
         );
     }
 }
