@@ -246,7 +246,8 @@ impl<H: Handle> TaskQueue<H> {
     ///   huge `threads` simply spawns until `waiting` and splittable ranges run
     ///   out, which can be arbitrarily expensive. Callers that accept the count
     ///   from untrusted input must bound it themselves.
-    /// - It first sweeps dead workers out of `running` (`Task::is_alive`), then
+    /// - It first sweeps dead workers out of `running` (`Task::is_alive`), taking
+    ///   any unclaimed range they still held back into `waiting`, then
     ///   grows or shrinks toward the requested count.
     /// - **Growth drains `waiting` with the same `take` handshake as
     ///   [`steal`](TaskQueue::steal).** Each registration has its range claimed
@@ -297,7 +298,20 @@ impl<H: Handle> TaskQueue<H> {
         let threads = threads.max(1);
         let min_chunk_size = min_chunk_size.max(1);
         let mut guard = self.inner.lock();
-        guard.running.retain(|(task, _)| task.is_alive());
+        // Sweep dead workers, but take their unclaimed interval first: the queue
+        // is the last owner of that task once the entry goes away, so dropping
+        // the entry would lose work a surviving worker could still do.
+        let mut reclaimed = Vec::new();
+        guard.running.retain(|(task, _)| {
+            if task.is_alive() {
+                return true;
+            }
+            if let Ok(Some(range)) = task.take() {
+                reclaimed.push(Task::new(range));
+            }
+            false
+        });
+        guard.waiting.extend(reclaimed);
         let len = guard.running.len();
         if len < threads {
             let executor = executor?;
@@ -1502,8 +1516,30 @@ mod tests {
         q.set_threads(2, 1, Some(&ex)).unwrap();
         assert_eq!(q.inner.lock().running.len(), 2);
         ex.kill(0);
-        let _ = q.set_threads(2, 1, Some(&ex));
+        // No executor: the sweep still runs, and growth cannot refill the pool
+        // from the range the sweep just reclaimed.
+        let _ = q.set_threads::<SyncExecutor>(2, 1, None);
         assert_eq!(q.inner.lock().running.len(), 1, "the dead slot is swept");
+    }
+
+    /// A dead worker's unclaimed range goes back to `waiting` when the sweep
+    /// collects its slot: the queue is the last owner of that task, so dropping
+    /// the entry would lose work a surviving worker could still do.
+    #[test]
+    fn running_sweep_reclaims_a_dead_workers_range() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new(core::iter::once(0..10));
+        q.set_threads(1, 1, Some(&ex)).unwrap();
+
+        // The worker exits without claiming anything.
+        ex.kill(0);
+        // The sweep runs before an executor is needed, so `None` is fine here.
+        let _ = q.set_threads::<SyncExecutor>(1, 1, None);
+
+        let guard = q.inner.lock();
+        assert_eq!(guard.running.len(), 0, "the dead slot is swept");
+        assert_eq!(guard.waiting.len(), 1, "its range came back");
+        assert_eq!(guard.waiting[0].get(), 0..10);
     }
 
     /// The liveness sweep keys off the armed identity's alive flag, so a dead
