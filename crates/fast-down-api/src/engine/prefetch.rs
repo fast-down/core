@@ -2,7 +2,7 @@ use crate::{Config, Event, PlanError, Tx, utils::build_header};
 use fast_down::{
     UrlInfo,
     fast_puller::{CookieStore, build_client},
-    http::Prefetch,
+    http::{Prefetch, PrefetchOptions},
 };
 use reqwest::Response;
 use std::time::Duration;
@@ -48,10 +48,14 @@ fn retry_wait(retry_after: Option<Duration>, gap: Duration) -> Duration {
 ///
 /// Retries that still have an attempt left are reported as
 /// [`Event::PrefetchError`]; the attempt that exhausts the budget is returned
-/// as [`PlanError::Prefetch`] instead, because
-/// [`ReqwestResponseError`](fast_down::reqwest::ReqwestResponseError) cannot be
-/// cloned into both places. A client that cannot be built at all is returned as
+/// as [`PlanError::Prefetch`] instead, because the error cannot be cloned into
+/// both places. A client that cannot be built at all is returned as
 /// [`PlanError::BuildClient`] without emitting an event.
+///
+/// A metadata request that outlives its own timeout is reported exactly like a
+/// transport failure: [`HttpError::Timeout`](fast_down::http::HttpError::Timeout)
+/// counts as one failed attempt, so the retry budget is what bounds a server that
+/// accepts the connection and then never answers.
 #[allow(clippy::result_large_err)]
 pub async fn prefetch(
     url: &Url,
@@ -72,8 +76,14 @@ pub async fn prefetch(
     )
     .map_err(PlanError::BuildClient)?;
     let mut retry_count = 0;
+    let options = PrefetchOptions::new(
+        config.probe_timeout,
+        config.prefetch_timeout,
+        config.probe_attempts,
+        config.probe_gap,
+    );
     loop {
-        match client.prefetch(url.clone()).await {
+        match client.prefetch(url.clone(), options).await {
             Ok(t) => {
                 let _ = tx.send(Event::Prefetch(t.0.clone()));
                 break Ok(t);
@@ -98,7 +108,7 @@ mod tests {
     use std::time::Duration;
 
     use bytes::Bytes;
-    use fast_down::Proxy;
+    use fast_down::{Proxy, http::HttpError, reqwest::ReqwestResponseError};
     use http_body_util::Full;
     use hyper::body::Incoming;
     use hyper::header::{
@@ -144,12 +154,10 @@ mod tests {
         let (tx, rx) = create_channel();
         let result = prefetch(&url, &config, &CookieStore::default(), &tx).await;
         match result {
-            Err(PlanError::Prefetch(e)) => assert!(
-                matches!(e, fast_down::reqwest::ReqwestResponseError::Request(_)),
-                "a dropped connection must surface as a transport error, got {e:?}"
-            ),
+            Err(PlanError::Prefetch(HttpError::Request(ReqwestResponseError::Request(_)))) => {}
             other => panic!(
-                "prefetch must return the last error after exhausting retries, got {other:?}"
+                "a dropped connection must surface as a transport error after the \
+                 retries are exhausted, got {other:?}"
             ),
         }
         drop(tx);
@@ -359,9 +367,11 @@ mod tests {
             hits.load(Ordering::SeqCst)
         );
         match result {
-            Err(PlanError::Prefetch(e)) => assert_eq!(
-                e.status_code(),
-                Some(503),
+            Err(PlanError::Prefetch(HttpError::Request(ReqwestResponseError::StatusCode(
+                resp,
+            )))) => assert_eq!(
+                resp.status(),
+                503,
                 "every attempt must have been answered by the server, not cut \
                  short locally"
             ),

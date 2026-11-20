@@ -1,5 +1,9 @@
 use crate::{Event, Tx};
-use fast_down::{FileId, reqwest::BuildClientError, reqwest::ReqwestResponseError};
+use fast_down::{
+    FileId,
+    http::HttpError,
+    reqwest::{BuildClientError, SmartRedirectClient},
+};
 use std::path::PathBuf;
 
 /// Errors from loading, probing, or persisting a `.fd` state file.
@@ -86,7 +90,7 @@ pub enum PlanError {
     BuildClient(#[from] BuildClientError),
     /// The prefetch request exhausted its retries.
     #[error(transparent)]
-    Prefetch(ReqwestResponseError),
+    Prefetch(HttpError<SmartRedirectClient>),
     /// The output path could not be computed.
     #[error(transparent)]
     GenPath(std::io::Error),

@@ -1,6 +1,8 @@
 use crate::{PartialConfig, StateError, TaskError, WriteMethod};
 use fast_down::{
-    ProgressEntry, UrlInfo, WorkerId, reqwest::BuildClientError, reqwest::ReqwestResponseError,
+    ProgressEntry, UrlInfo, WorkerId,
+    http::HttpError,
+    reqwest::{BuildClientError, SmartRedirectClient},
 };
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
@@ -26,10 +28,11 @@ pub enum Event {
     /// Carries the [`UrlInfo`] (size, identity headers, range support) so a
     /// caller can inspect the remote before or while the download proceeds.
     Prefetch(UrlInfo),
-    /// The prefetch request failed (server unreachable, non-2xx response, etc.).
+    /// The prefetch request failed (server unreachable, non-2xx response, a
+    /// request that outlived its time budget, etc.).
     ///
     /// Fatal for the download: without [`UrlInfo`] the engine cannot plan ranges.
-    PrefetchError(ReqwestResponseError),
+    PrefetchError(HttpError<SmartRedirectClient>),
     /// Failed to compute the output / `.part` / `.fd` paths.
     ///
     /// For example the target directory is not writable or the file name is

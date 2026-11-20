@@ -28,7 +28,7 @@ pub use puller::*;
 use crate::url_info::FileId;
 use bytes::Bytes;
 use fast_pull::{ProgressEntry, PullResult, PullerError};
-use std::{borrow::Cow, fmt::Debug, future::Future};
+use std::{borrow::Cow, fmt::Debug, future::Future, time::Duration};
 use url::Url;
 
 /// Abstraction over an HTTP client that can send GET requests with optional byte-range headers.
@@ -186,6 +186,13 @@ pub enum HttpError<Client: HttpClient> {
     /// The HTTP request failed to send.
     #[error("HTTP request failed: {0}")]
     Request(#[source] GetRequestError<Client>),
+    /// The request outlived the layer's own time budget without being answered.
+    ///
+    /// The backend may have timeouts of its own; this one bounds a request whose
+    /// connection was accepted and then left silent. It surfaces as an ordinary
+    /// failure, so a caller's retries apply exactly as they do to a reset.
+    #[error("the HTTP request did not answer within {0:?}")]
+    Timeout(Duration),
     /// Reading a response body chunk failed.
     #[error("HTTP chunk read failed: {0}\n  response: {1:?}")]
     Chunk(#[source] GetChunkError<Client>, GetResponse<Client>),
@@ -225,6 +232,7 @@ impl<Client: HttpClient> std::fmt::Debug for HttpError<Client> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Request(e) => f.debug_tuple("Request").field(e).finish(),
+            Self::Timeout(timeout) => f.debug_tuple("Timeout").field(timeout).finish(),
             Self::Chunk(e, r) => f.debug_tuple("Chunk").field(e).field(r).finish(),
             Self::Irrecoverable => f.write_str("Irrecoverable"),
             Self::MismatchedBody(id, r) => {
@@ -424,6 +432,9 @@ mod tests {
         let request = HttpError::<MockClient>::Request(MockErr);
         assert!(format!("{request:?}").contains("Request"));
 
+        let timeout = HttpError::<MockClient>::Timeout(std::time::Duration::from_secs(30));
+        assert!(format!("{timeout:?}").contains("Timeout"));
+
         let chunk = HttpError::<MockClient>::Chunk(MockErr, MockResponse::new());
         assert!(format!("{chunk:?}").contains("Chunk"));
 
@@ -465,6 +476,11 @@ mod tests {
     fn is_irrecoverable_only_for_variant() {
         assert!(HttpError::<MockClient>::Irrecoverable.is_irrecoverable());
         assert!(!HttpError::<MockClient>::Request(MockErr).is_irrecoverable());
+        assert!(
+            !HttpError::<MockClient>::Timeout(std::time::Duration::from_secs(30))
+                .is_irrecoverable(),
+            "a timed-out attempt is retried like a reset"
+        );
         assert!(!HttpError::<MockClient>::Chunk(MockErr, MockResponse::new()).is_irrecoverable());
         assert!(
             !HttpError::<MockClient>::MismatchedBody(

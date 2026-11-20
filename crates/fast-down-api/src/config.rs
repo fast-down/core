@@ -239,6 +239,41 @@ pub struct Config {
     #[config(default = 10)]
     pub retry_times: usize,
 
+    /// Upper bound on the metadata prefetch request, including its response head.
+    /// Recommended: `60s`
+    ///
+    /// `ZERO` disables the bound. A server that accepts the connection and then
+    /// never answers would otherwise park [`State::build`](crate::State::build)
+    /// on a dead socket. Every attempt gets this budget; `retry_times` applies on
+    /// top of it.
+    #[config(default = Duration::from_secs(60))]
+    #[config(partial_attr(serde(with = "humantime_serde::option")))]
+    #[config(partial_attr(serde(default)))]
+    pub prefetch_timeout: Duration,
+
+    /// Upper bound on one range-probe attempt. Recommended: `10s`
+    ///
+    /// The probe only decides whether the multi-chunk fast path may be used; it
+    /// is retried a few times and degrades to a single stream when it keeps
+    /// failing. `ZERO` disables the bound.
+    #[config(default = Duration::from_secs(10))]
+    #[config(partial_attr(serde(with = "humantime_serde::option")))]
+    #[config(partial_attr(serde(default)))]
+    pub probe_timeout: Duration,
+
+    /// Number of range-probe attempts, the first one included. Recommended: `3`
+    ///
+    /// `0` skips the probe, which keeps the download on the single-stream path
+    /// without asking the server whether it supports ranges.
+    #[config(default = 3)]
+    pub probe_attempts: usize,
+
+    /// Wait between range-probe attempts. Recommended: `200ms`
+    #[config(default = Duration::from_millis(200))]
+    #[config(partial_attr(serde(with = "humantime_serde::option")))]
+    #[config(partial_attr(serde(default)))]
+    pub probe_gap: Duration,
+
     /// Local IP addresses to bind for outgoing requests. Recommended: `Vec::new()`
     ///
     /// If you have multiple network interfaces, you can provide their IP addresses;

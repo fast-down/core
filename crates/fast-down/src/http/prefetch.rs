@@ -8,7 +8,7 @@
 use crate::{
     UrlInfo,
     http::{
-        ContentDisposition, ContentRange, GetRequestError, GetResponse, HttpClient, HttpHeaders,
+        ContentDisposition, ContentRange, GetResponse, HttpClient, HttpError, HttpHeaders,
         HttpRequestBuilder, HttpResponse,
     },
     url_info::FileId,
@@ -18,8 +18,50 @@ use std::{borrow::Borrow, future::Future, time::Duration};
 use url::Url;
 
 /// Result of a prefetch operation: the metadata ([`UrlInfo`]) and the initial HTTP response.
-pub type PrefetchResult<Client> =
-    PullResult<(UrlInfo, GetResponse<Client>), GetRequestError<Client>>;
+///
+/// The error is the layer's own [`HttpError`]: a transport failure surfaces as
+/// [`HttpError::Request`], an attempt that outlives its budget as
+/// [`HttpError::Timeout`].
+pub type PrefetchResult<Client> = PullResult<(UrlInfo, GetResponse<Client>), HttpError<Client>>;
+
+/// The caller's budgets and probe policy for one prefetch attempt.
+///
+/// The crate supplies no defaults. How long to wait, how many probe attempts to
+/// spend and how far apart they sit all depend on the caller's latency budget
+/// and on how much it cares about the multi-chunk fast path.
+#[derive(Clone, Copy, Debug)]
+pub struct PrefetchOptions {
+    /// Upper bound on one `bytes=0-0` probe request. [`Duration::ZERO`] disables
+    /// the bound.
+    pub probe_timeout: Duration,
+    /// Upper bound on the metadata request and its response head.
+    /// [`Duration::ZERO`] disables the bound.
+    pub metadata_timeout: Duration,
+    /// Number of probe attempts, the first one included. `0` skips the probe,
+    /// which keeps the download on the single-stream path without asking the
+    /// server whether it supports ranges.
+    pub probe_attempts: usize,
+    /// Wait between probe attempts.
+    pub probe_gap: Duration,
+}
+
+impl PrefetchOptions {
+    /// Build the options explicitly; there is no default.
+    #[must_use]
+    pub const fn new(
+        probe_timeout: Duration,
+        metadata_timeout: Duration,
+        probe_attempts: usize,
+        probe_gap: Duration,
+    ) -> Self {
+        Self {
+            probe_timeout,
+            metadata_timeout,
+            probe_attempts,
+            probe_gap,
+        }
+    }
+}
 
 /// Trait for fetching resource metadata (size, filename, range support) from a URL.
 ///
@@ -27,7 +69,15 @@ pub type PrefetchResult<Client> =
 /// the initial response for subsequent downloading.
 pub trait Prefetch<Client: HttpClient> {
     /// Fetch the resource metadata and the initial response for `url`.
-    fn prefetch(&self, url: Url) -> impl Future<Output = PrefetchResult<Client>> + Send;
+    ///
+    /// `options` carries both budgets and the probe's retry policy. A request
+    /// that outlives its budget fails with [`HttpError::Timeout`], which the
+    /// caller treats like any other failed attempt (typically: retry).
+    fn prefetch(
+        &self,
+        url: Url,
+        options: PrefetchOptions,
+    ) -> impl Future<Output = PrefetchResult<Client>> + Send;
 }
 
 impl<Client, BorrowClient> Prefetch<Client> for BorrowClient
@@ -35,8 +85,8 @@ where
     Client: HttpClient,
     BorrowClient: Borrow<Client> + Sync,
 {
-    async fn prefetch(&self, url: Url) -> PrefetchResult<Client> {
-        prefetch(self.borrow(), url).await
+    async fn prefetch(&self, url: Url, options: PrefetchOptions) -> PrefetchResult<Client> {
+        prefetch_within(self.borrow(), url, options).await
     }
 }
 
@@ -59,22 +109,15 @@ fn get_filename(headers: &impl HttpHeaders, url: &Url) -> String {
         .unwrap_or_else(|| url.to_string().replace('.', "_"))
 }
 
-async fn prefetch<Client: HttpClient>(client: &Client, url: Url) -> PrefetchResult<Client> {
-    prefetch_within(client, url, RANGE_PROBE_TIMEOUT).await
-}
-
-/// [`prefetch`] with the range probe bounded by `probe_timeout`.
-///
-/// Split out so a test can drive the timeout path with a short budget instead of
-/// waiting out the production constant.
+/// [`Prefetch::prefetch`] with the caller's budgets and probe policy applied.
 async fn prefetch_within<Client: HttpClient>(
     client: &Client,
     url: Url,
-    probe_timeout: Duration,
+    options: PrefetchOptions,
 ) -> PrefetchResult<Client> {
     let (result_no_range, range) = tokio::join!(
-        prefetch_no_range(client, url.clone()),
-        is_support_range(client, url, probe_timeout)
+        prefetch_no_range(client, url.clone(), options.metadata_timeout),
+        is_support_range(client, url, options)
     );
     let mut res = result_no_range?;
     if let Some(range) = range {
@@ -97,8 +140,21 @@ async fn prefetch_within<Client: HttpClient>(
 async fn prefetch_no_range<Client: HttpClient>(
     client: &Client,
     url: Url,
+    timeout: Duration,
 ) -> PrefetchResult<Client> {
-    let resp = client.get(url, None).send().await?;
+    // The request and the wait for the response head share one budget: a server
+    // that accepts the connection and then stays silent has to end the attempt
+    // instead of pinning the whole prefetch to it. `ZERO` means the caller wants
+    // no bound at all.
+    let request = client.get(url, None).send();
+    let attempt = if timeout.is_zero() {
+        Ok(request.await)
+    } else {
+        tokio::time::timeout(timeout, request).await
+    };
+    let resp = attempt
+        .map_err(|_| (HttpError::Timeout(timeout), None))?
+        .map_err(|(e, retry)| (HttpError::Request(e), retry))?;
     let headers = resp.headers();
     let size = headers
         .get("content-length")
@@ -123,40 +179,15 @@ async fn prefetch_no_range<Client: HttpClient>(
     ))
 }
 
-/// Number of times the range probe is attempted, the first one included.
-///
-/// The probe only decides whether the download may use the multi-chunk fast
-/// path, so a failed probe must not abort a download whose metadata request
-/// succeeded. It is retried a few times (see [`is_support_range`]) because a
-/// transient failure — timeout, reset, momentary 5xx — must not be mistaken for
-/// the server's answer.
-const RANGE_PROBE_ATTEMPTS: usize = 3;
-
-/// Wait between range-probe attempts.
-///
-/// Every attempt is a single ranged `GET` that runs in parallel with the
-/// metadata request, so a short gap is enough to ride out a reset or a blip.
-const RANGE_PROBE_GAP: Duration = Duration::from_millis(200);
-
-/// Upper bound on one range-probe request.
-///
-/// The probe runs in parallel with the metadata request and only decides whether
-/// the multi-chunk fast path may be used, so a server that accepts the request
-/// and then never answers must not keep `prefetch` waiting forever. A timed-out
-/// attempt counts as one failed attempt, exactly like a reset: the probe retries
-/// and, once the attempts are exhausted, the download degrades to a single
-/// stream.
-const RANGE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Whether the server honours a `bytes=0-0` range request, returning the
 /// `Content-Range` answer it gave when it does.
 ///
 /// A server that genuinely ignores ranges answers with a success status and no
 /// `Content-Range`, which resolves to `None` without any retry: degrading to a
 /// single stream stays a valid outcome. A probe that *fails* — an error, or a
-/// request that outlives [`RANGE_PROBE_TIMEOUT`] — is not that answer, so the
+/// request that outlives the caller's `probe_timeout` — is not that answer, so the
 /// failure is never folded into the "no ranges" result: the cheap probe is
-/// retried up to [`RANGE_PROBE_ATTEMPTS`] times, mirroring the retries the whole
+/// retried up to `options.probe_attempts` times, mirroring the retries the whole
 /// prefetch already gets a layer up, and only a probe that keeps failing for
 /// every attempt falls back to the conservative single-stream download.
 ///
@@ -171,25 +202,31 @@ const RANGE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 async fn is_support_range<Client: HttpClient>(
     client: &Client,
     url: Url,
-    timeout: Duration,
+    options: PrefetchOptions,
 ) -> Option<ContentRange> {
-    let mut attempt = 1;
-    loop {
+    let mut attempt = 0;
+    while attempt < options.probe_attempts {
+        attempt += 1;
         // The request and the wait for an answer share one budget: a server that
         // accepts the connection and then stays silent has to end the attempt
-        // rather than pin the whole `prefetch` to a dead socket.
-        let probe = tokio::time::timeout(timeout, client.get(url.clone(), Some(0..1)).send()).await;
+        // rather than pin the whole `prefetch` to a dead socket. `ZERO` disables
+        // the bound.
+        let request = client.get(url.clone(), Some(0..1)).send();
+        let probe = if options.probe_timeout.is_zero() {
+            Ok(request.await)
+        } else {
+            tokio::time::timeout(options.probe_timeout, request).await
+        };
         match probe {
             Ok(Ok(resp)) => return zero_range_answer(resp.headers()),
-            Ok(Err(_)) | Err(_) if attempt < RANGE_PROBE_ATTEMPTS => {
-                tokio::time::sleep(RANGE_PROBE_GAP).await;
-                attempt += 1;
-            }
             // Retries exhausted: the caller keeps the download alive as a
             // single stream instead of failing on an advisory probe.
-            Ok(Err(_)) | Err(_) => return None,
+            Ok(Err(_)) | Err(_) if attempt >= options.probe_attempts => return None,
+            Ok(Err(_)) | Err(_) => tokio::time::sleep(options.probe_gap).await,
         }
     }
+    // `probe_attempts == 0`: the caller opted out of the probe entirely.
+    None
 }
 
 /// The `bytes 0-0/<size>` value a probe response carries, if any.
@@ -215,6 +252,17 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    /// Budgets and probe policy for the prefetch calls below: these tests
+    /// exercise parsing and retry behaviour, not the timeout paths.
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+    const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
+    const PROBE_ATTEMPTS: usize = 3;
+    const PROBE_GAP: Duration = Duration::from_millis(1);
+
+    fn options() -> PrefetchOptions {
+        PrefetchOptions::new(PROBE_TIMEOUT, METADATA_TIMEOUT, PROBE_ATTEMPTS, PROBE_GAP)
+    }
 
     #[derive(Debug)]
     struct MapHeaders(HashMap<String, String>);
@@ -445,7 +493,7 @@ mod tests {
         let client = ProbeFixture::new(1, true);
         let url = Url::parse("http://example.com/file.bin").unwrap();
 
-        let (info, _resp) = prefetch(&client, url).await.unwrap();
+        let (info, _resp) = prefetch_within(&client, url, options()).await.unwrap();
 
         assert_eq!(
             client.probes(),
@@ -470,7 +518,7 @@ mod tests {
         let client = ProbeFixture::new(0, false);
         let url = Url::parse("http://example.com/file.bin").unwrap();
 
-        let (info, _resp) = prefetch(&client, url).await.unwrap();
+        let (info, _resp) = prefetch_within(&client, url, options()).await.unwrap();
 
         assert_eq!(client.probes(), 1, "an answer must not be retried");
         assert!(!info.supports_range);
@@ -487,7 +535,7 @@ mod tests {
         let client = ProbeFixture::new(0, true).chunked_metadata();
         let url = Url::parse("http://example.com/file.bin").unwrap();
 
-        let (info, _resp) = prefetch(&client, url).await.unwrap();
+        let (info, _resp) = prefetch_within(&client, url, options()).await.unwrap();
 
         assert!(info.supports_range, "the probe answered `bytes 0-0/1024`");
         assert_eq!(
@@ -508,7 +556,7 @@ mod tests {
         let client = ProbeFixture::new(0, false).chunked_metadata();
         let url = Url::parse("http://example.com/file.bin").unwrap();
 
-        let (info, _resp) = prefetch(&client, url).await.unwrap();
+        let (info, _resp) = prefetch_within(&client, url, options()).await.unwrap();
 
         assert_eq!(client.probes(), 1, "an answer must not be retried");
         assert!(!info.supports_range);
@@ -527,12 +575,12 @@ mod tests {
         let client = ProbeFixture::new(usize::MAX, true);
         let url = Url::parse("http://example.com/file.bin").unwrap();
 
-        let (info, _resp) = prefetch(&client, url).await.unwrap();
+        let (info, _resp) = prefetch_within(&client, url, options()).await.unwrap();
 
         assert_eq!(
             client.probes(),
-            RANGE_PROBE_ATTEMPTS,
-            "the probe must be attempted exactly RANGE_PROBE_ATTEMPTS times"
+            PROBE_ATTEMPTS,
+            "the probe must be attempted exactly probe_attempts times"
         );
         assert!(!info.supports_range);
         assert!(!info.fast_download);
@@ -643,9 +691,18 @@ mod tests {
         let client = HangingProbeClient::new(addr);
         let url = Url::parse(&format!("http://{addr}/file.bin")).unwrap();
         let started = std::time::Instant::now();
-        let (info, _resp) = prefetch_within(&client, url, Duration::from_millis(100))
-            .await
-            .expect("a hanging probe must not fail a prefetch whose metadata arrived");
+        let (info, _resp) = prefetch_within(
+            &client,
+            url,
+            PrefetchOptions::new(
+                Duration::from_millis(100),
+                METADATA_TIMEOUT,
+                PROBE_ATTEMPTS,
+                PROBE_GAP,
+            ),
+        )
+        .await
+        .expect("a hanging probe must not fail a prefetch whose metadata arrived");
         let elapsed = started.elapsed();
 
         assert!(
@@ -659,12 +716,117 @@ mod tests {
         );
         assert_eq!(
             client.probes(),
-            RANGE_PROBE_ATTEMPTS,
+            PROBE_ATTEMPTS,
             "a timed-out attempt must be retried like a reset"
         );
         assert!(
             elapsed < Duration::from_secs(5),
             "the probe must end once its timeout budget is spent, took {elapsed:?}"
+        );
+        server.abort();
+    }
+
+    /// A client whose metadata request reaches a real server that accepts the
+    /// connection and never answers, while the ranged probe answers at once with
+    /// no range support. The metadata budget is the only thing under test.
+    #[cfg(feature = "reqwest")]
+    #[derive(Clone, Debug)]
+    struct SilentMetadataClient {
+        /// Address of the server that accepts and stays silent.
+        addr: std::net::SocketAddr,
+    }
+
+    #[cfg(feature = "reqwest")]
+    impl HttpClient for SilentMetadataClient {
+        type RequestBuilder = SilentMetadataRequestBuilder;
+
+        fn get(&self, url: Url, range: Option<fast_pull::ProgressEntry>) -> Self::RequestBuilder {
+            SilentMetadataRequestBuilder {
+                url,
+                ranged: range.is_some(),
+                addr: self.addr,
+            }
+        }
+    }
+
+    #[cfg(feature = "reqwest")]
+    struct SilentMetadataRequestBuilder {
+        url: Url,
+        ranged: bool,
+        addr: std::net::SocketAddr,
+    }
+
+    #[cfg(feature = "reqwest")]
+    impl HttpRequestBuilder for SilentMetadataRequestBuilder {
+        type Response = FixtureResponse;
+        type RequestError = FixtureError;
+
+        async fn send(self) -> PullResult<Self::Response, Self::RequestError> {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            if self.ranged {
+                // A plain `200` without `Content-Range`: no ranges, so the probe
+                // resolves without waiting on the silent server.
+                return Ok(FixtureResponse {
+                    url: self.url,
+                    headers: MapHeaders(HashMap::new()),
+                });
+            }
+
+            let mut stream = tokio::net::TcpStream::connect(self.addr)
+                .await
+                .map_err(|_| (FixtureError, None))?;
+            stream
+                .write_all(b"GET /file.bin HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .map_err(|_| (FixtureError, None))?;
+            // The server holds the connection open without answering, so this read
+            // stays pending and only the metadata timeout can end the attempt.
+            let mut buf = [0u8; 64];
+            let _ = stream.read(&mut buf).await;
+            Err((FixtureError, None))
+        }
+    }
+
+    /// A metadata request that is accepted but never answered must fail once its
+    /// budget is spent, so the caller's retries can run, instead of parking the
+    /// resolve step on a dead socket forever.
+    #[cfg(feature = "reqwest")]
+    #[tokio::test]
+    async fn a_metadata_request_that_never_answers_times_out() {
+        use tokio::net::TcpListener;
+
+        // Hold every accepted connection open without writing a byte.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _socket = socket;
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+
+        let client = SilentMetadataClient { addr };
+        let url = Url::parse(&format!("http://{addr}/file.bin")).unwrap();
+        let budget = Duration::from_millis(100);
+        let started = std::time::Instant::now();
+        let result = prefetch_within(
+            &client,
+            url,
+            PrefetchOptions::new(Duration::from_millis(50), budget, PROBE_ATTEMPTS, PROBE_GAP),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err((HttpError::Timeout(timeout), None)) if timeout == budget),
+            "a metadata request that never answered must time out, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the metadata budget must end the request, took {elapsed:?}"
         );
         server.abort();
     }

@@ -332,7 +332,7 @@ mod tests {
     )]
     use super::*;
     use crate::{
-        http::{HttpPuller, Prefetch},
+        http::{HttpPuller, Prefetch, PrefetchOptions},
         url_info::FileId,
     };
     use fast_pull::{
@@ -344,6 +344,16 @@ mod tests {
     use reqwest::{Client, StatusCode};
     use std::sync::Arc;
     use std::time::Duration;
+
+    /// These tests exercise the client, not the request budgets.
+    fn options() -> PrefetchOptions {
+        PrefetchOptions::new(
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            3,
+            Duration::from_millis(1),
+        )
+    }
 
     #[tokio::test]
     async fn test_redirect_and_content_range() {
@@ -367,7 +377,10 @@ mod tests {
             .await;
 
         let url = Url::parse(&format!("{}/redirect", server.url())).unwrap();
-        let (url_info, _) = client.prefetch(url).await.expect("Request should succeed");
+        let (url_info, _) = client
+            .prefetch(url, options())
+            .await
+            .expect("Request should succeed");
 
         assert_eq!(
             url_info.final_url.as_str(),
@@ -390,7 +403,7 @@ mod tests {
             .create_async()
             .await;
         let url = Url::parse(&format!("{}/test1", server.url())).unwrap();
-        let (url_info, _) = client.prefetch(url).await.unwrap();
+        let (url_info, _) = client.prefetch(url, options()).await.unwrap();
         assert_eq!(url_info.raw_name, "test.txt");
 
         // Test filename* only (UTF-8 encoding)
@@ -403,7 +416,7 @@ mod tests {
             .create_async()
             .await;
         let url = Url::parse(&format!("{}/test_star", server.url())).unwrap();
-        let (url_info, _) = client.prefetch(url).await.unwrap();
+        let (url_info, _) = client.prefetch(url, options()).await.unwrap();
         assert_eq!(url_info.raw_name, "测试.txt");
 
         let _mock_both = server
@@ -415,7 +428,7 @@ mod tests {
             .create_async()
             .await;
         let url = Url::parse(&format!("{}/test_both", server.url())).unwrap();
-        let (url_info, _) = client.prefetch(url).await.unwrap();
+        let (url_info, _) = client.prefetch(url, options()).await.unwrap();
         assert_eq!(url_info.raw_name, "测试.txt");
 
         // Test URL path source
@@ -428,7 +441,7 @@ mod tests {
             server.url()
         ))
         .unwrap();
-        let (url_info, _) = client.prefetch(url).await.unwrap();
+        let (url_info, _) = client.prefetch(url, options()).await.unwrap();
         assert_eq!(url_info.raw_name, "好好好.pdf");
     }
 

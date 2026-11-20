@@ -204,8 +204,19 @@ mod tests {
         clippy::significant_drop_tightening
     )]
     use super::*;
-    use crate::http::Prefetch;
+    use crate::http::{HttpError, Prefetch, PrefetchOptions};
     use reqwest::{Client, StatusCode};
+    use std::time::Duration;
+
+    /// These tests exercise status mapping, not the request budgets.
+    fn options() -> PrefetchOptions {
+        PrefetchOptions::new(
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            3,
+            Duration::from_millis(1),
+        )
+    }
 
     #[tokio::test]
     async fn test_error_handling() {
@@ -218,13 +229,16 @@ mod tests {
             .await;
 
         let url = Url::parse(&format!("{}/404", server.url())).unwrap();
-        match client.prefetch(url).await {
+        match client.prefetch(url, options()).await {
             Ok(info) => unreachable!("404 status code should not success: {info:?}"),
             Err((err, _)) => match err {
-                ReqwestResponseError::Request(error) => unreachable!("{error:?}"),
-                ReqwestResponseError::StatusCode(resp) => {
+                HttpError::Request(ReqwestResponseError::Request(error)) => {
+                    unreachable!("{error:?}")
+                }
+                HttpError::Request(ReqwestResponseError::StatusCode(resp)) => {
                     assert_eq!(resp.status(), StatusCode::NOT_FOUND.as_u16());
                 }
+                other => unreachable!("unexpected prefetch error: {other:?}"),
             },
         }
     }
@@ -245,16 +259,18 @@ mod tests {
             .await;
 
         let url = Url::parse(&format!("{}/boom", server.url())).unwrap();
-        let (err, _) = client.prefetch(url).await.expect_err("502 must fail");
-        assert_eq!(err.status_code(), Some(502));
-        assert_eq!(err.url().unwrap().path(), "/boom");
+        let (err, _) = client
+            .prefetch(url, options())
+            .await
+            .expect_err("502 must fail");
         match err {
-            ReqwestResponseError::StatusCode(resp) => {
+            HttpError::Request(ReqwestResponseError::StatusCode(resp)) => {
                 assert_eq!(resp.status(), 502);
+                assert_eq!(resp.url().path(), "/boom");
                 assert_eq!(resp.header("x-reason"), Some("upstream down"));
                 assert_eq!(resp.body_text().await, "bad gateway");
             }
-            ReqwestResponseError::Request(e) => unreachable!("{e:?}"),
+            other => unreachable!("expected a status code error, got {other:?}"),
         }
     }
 
@@ -272,8 +288,11 @@ mod tests {
             .await;
 
         let url = Url::parse(&format!("{}/raw", server.url())).unwrap();
-        let (err, _) = client.prefetch(url).await.expect_err("503 must fail");
-        let ReqwestResponseError::StatusCode(resp) = err else {
+        let (err, _) = client
+            .prefetch(url, options())
+            .await
+            .expect_err("503 must fail");
+        let HttpError::Request(ReqwestResponseError::StatusCode(resp)) = err else {
             unreachable!("expected a status code error")
         };
         let raw = resp.into_response();
@@ -296,12 +315,15 @@ mod tests {
             .await;
 
         let url = Url::parse(&format!("{}/big", server.url())).unwrap();
-        let (err, _) = client.prefetch(url).await.expect_err("500 must fail");
+        let (err, _) = client
+            .prefetch(url, options())
+            .await
+            .expect_err("500 must fail");
         match err {
-            ReqwestResponseError::StatusCode(resp) => {
+            HttpError::Request(ReqwestResponseError::StatusCode(resp)) => {
                 assert_eq!(resp.body().await.len(), MAX_ERROR_BODY);
             }
-            ReqwestResponseError::Request(e) => unreachable!("{e:?}"),
+            other => unreachable!("expected a status code error, got {other:?}"),
         }
     }
 
@@ -320,16 +342,16 @@ mod tests {
         let client = Client::builder().no_proxy().build().unwrap();
         let url = Url::parse(&format!("http://{addr}/x")).unwrap();
         let (err, _) = client
-            .prefetch(url)
+            .prefetch(url, options())
             .await
             .expect_err("dropped conn must fail");
         match err {
-            ReqwestResponseError::Request(e) => {
+            HttpError::Request(ReqwestResponseError::Request(e)) => {
                 assert!(!e.is_timeout());
                 assert!(e.is_connect() || e.is_request());
                 assert_eq!(e.status(), None);
             }
-            ReqwestResponseError::StatusCode(resp) => unreachable!("{}", resp.status()),
+            other => unreachable!("expected a transport error, got {other:?}"),
         }
     }
 }
