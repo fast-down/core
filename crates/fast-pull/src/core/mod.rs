@@ -31,8 +31,9 @@ const PUSH_POLL: Duration = Duration::from_millis(500);
 /// Shared "last progress" clock, fed whenever a chunk is accepted or a write
 /// completes.
 ///
-/// The hot path is one relaxed store: a monotonic millisecond stamp is enough
-/// for a watchdog that only needs second-scale resolution.
+/// The hot path is one relaxed `fetch_max`: a monotonic millisecond stamp is
+/// enough for a watchdog that only needs second-scale resolution, and the
+/// maximum keeps an out-of-order beat from moving the clock backwards.
 #[derive(Debug)]
 struct ProgressClock {
     start: Instant,
@@ -50,9 +51,14 @@ impl ProgressClock {
     }
 
     /// Record that progress was made.
+    ///
+    /// Concurrent callers may compute their stamps out of order, so the value
+    /// only moves forward: a plain store would let a thread that read the clock
+    /// earlier overwrite a newer stamp and make the session look idle long
+    /// enough to be judged stalled.
     pub fn beat(&self) {
         self.last_ms
-            .store(millis(self.start.elapsed()), Ordering::Relaxed);
+            .fetch_max(millis(self.start.elapsed()), Ordering::Relaxed);
     }
 
     /// How long has passed since the last [`beat`](Self::beat).
@@ -948,5 +954,59 @@ mod tests {
             mock_data,
             "churning threads and granularity together corrupted the bytes"
         );
+    }
+
+    #[test]
+    fn progress_clock_beat_never_moves_the_stamp_backwards() {
+        use super::ProgressClock;
+        use std::sync::atomic::Ordering;
+
+        // A beat from a thread that sampled the clock earlier must not overwrite
+        // a newer stamp: with a plain `store`, `idle()` would jump forward and
+        // the stall watchdog could cancel a session that is still moving.
+        let clock = ProgressClock::new();
+        clock.last_ms.store(1_000_000, Ordering::Relaxed);
+        clock.beat();
+        assert_eq!(
+            clock.last_ms.load(Ordering::Relaxed),
+            1_000_000,
+            "a beat must not move the stamp backwards"
+        );
+        assert_eq!(clock.idle(), Duration::ZERO);
+    }
+
+    #[test]
+    fn progress_clock_concurrent_beats_are_monotonic() {
+        use super::ProgressClock;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let clock = Arc::new(ProgressClock::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let clock = clock.clone();
+            workers.push(std::thread::spawn(move || {
+                for _ in 0..2_000 {
+                    clock.beat();
+                }
+            }));
+        }
+        // The shared stamp must never be observed going backwards while beats
+        // race each other.
+        let reader = clock;
+        let reader_stop = stop.clone();
+        let sampler = std::thread::spawn(move || {
+            let mut last = 0;
+            while !reader_stop.load(Ordering::Relaxed) {
+                let now = reader.last_ms.load(Ordering::Relaxed);
+                assert!(now >= last, "beat moved the stamp from {last} to {now}");
+                last = now;
+            }
+        });
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        sampler.join().unwrap();
     }
 }
