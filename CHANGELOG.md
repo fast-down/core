@@ -49,6 +49,10 @@ made before it was introduced.
   reports `HttpError::Irrecoverable` instead of ending as a clean EOF. For a
   chunked `206` reply the complete length in `Content-Range` is the expected end,
   so a short body is re-pulled from the cursor the engine already accepted.
+- **`fast-down`**: `UrlInfo::supports_range` is replaced by `UrlInfo::range_probe`
+  (`Supported` / `Unsupported` / `Unknown`). A range probe that never answered is
+  no longer read as a server without range support, which used to let a resume
+  overwrite a `.fd` that was still usable.
 
 ### Documentation
 
@@ -109,6 +113,11 @@ made before it was introduced.
   without `reqwest-tls` now surfaces as
   `PlanError::BuildClient(BuildClientError::MissingFeature)` (and the matching
   `Event::BuildClientError`) instead of being silently ignored.
+- An unanswered range probe is no longer treated as `NotResumable`:
+  `ResumeOutcome::Mismatch(StateError::RangeProbeUnknown)` reports it, and
+  `StartPolicy::probe_unknown` decides between keeping the state (`Fail`, the
+  `Auto`/`Resume` default) and downloading the file again (`Fresh`, the `Forced`
+  default).
 
 ### Removed
 
