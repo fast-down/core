@@ -208,10 +208,18 @@ impl Record {
     /// Only call this once the record is known to still describe `info` (see
     /// [`Record::validate`]): overwriting the identity first would make a later
     /// validation compare a value with itself and always pass.
+    ///
+    /// A header is adopted only when the remote carries it. An omitted
+    /// `ETag`/`Last-Modified` says nothing about the resource, so erasing the
+    /// recorded value would discard the only validator the next run still has.
     pub(crate) fn refresh_identity(&mut self, info: &UrlInfo) {
         self.size = info.size;
-        self.etag.clone_from(&info.file_id.etag);
-        self.last_modified.clone_from(&info.file_id.last_modified);
+        if let Some(etag) = info.file_id.etag.as_ref() {
+            self.etag = Some(etag.clone());
+        }
+        if let Some(last_modified) = info.file_id.last_modified.as_ref() {
+            self.last_modified = Some(last_modified.clone());
+        }
     }
 
     /// Layer the caller's fresh overrides over the persisted configuration,
@@ -417,6 +425,38 @@ mod tests {
             record.validate(&remote).is_ok(),
             "after refresh the record trivially matches: callers must validate first"
         );
+    }
+
+    #[test]
+    fn refresh_identity_keeps_headers_the_remote_omits() {
+        // A response that repeats the `ETag` but omits `Last-Modified` must not
+        // erase the recorded validator: the omitted header says nothing about the
+        // resource, and dropping it would weaken the next run's check.
+        let mut record = record_with(100, "e");
+        record.last_modified = Some("Mon, 01 Jan 2024 00:00:00 GMT".into());
+
+        record.refresh_identity(&info(100, "e"));
+
+        assert_eq!(record.etag.as_deref(), Some("e"));
+        assert_eq!(
+            record.last_modified.as_deref(),
+            Some("Mon, 01 Jan 2024 00:00:00 GMT"),
+            "an omitted header must keep its recorded value"
+        );
+    }
+
+    #[test]
+    fn refresh_identity_adopts_headers_the_remote_carries() {
+        let mut record = record_with(100, "old");
+        record.last_modified = Some("old".into());
+        let mut remote = info(100, "new");
+        remote.file_id.last_modified = Some("new".into());
+
+        record.refresh_identity(&remote);
+
+        assert_eq!(record.etag.as_deref(), Some("new"));
+        assert_eq!(record.last_modified.as_deref(), Some("new"));
+        assert_eq!(record.size, 100);
     }
 
     #[test]

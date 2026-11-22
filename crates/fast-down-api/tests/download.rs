@@ -618,6 +618,97 @@ async fn truncated_part_is_mismatch() {
     );
 }
 
+/// A forced resume accepts the remote's identity change only because the size
+/// still matches, so the recorded ranges still describe the bytes it continues.
+/// The `.fd` it leaves behind keeps the identity it was seeded with: adopting the
+/// remote's would launder a spliced pair into something a later `Auto` run
+/// resumes, hiding the fact that the first half came from another version. Such a
+/// run must see the change and download the whole file instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forced_resume_keeps_the_recorded_identity() {
+    let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 241) as u8).collect();
+    // Slow enough that the cancel below lands before the transfer completes.
+    let (_server, url) =
+        start_server_throttled(payload.clone(), "v2", true, Some(Duration::from_millis(50))).await;
+    let dir = temp_dir("forced_identity");
+    let (final_path, info) = probe(&url, &dir).await;
+    let fd = seed_partial(&url, &dir, &final_path, &info, "v1", &payload, PARTIAL).await;
+
+    // Both identity headers differ from the remote, so keeping them is visible.
+    let stale_last_modified = "Tue, 01 Jan 2019 00:00:00 GMT";
+    let mut seeded = Record::load(&fd).await.expect("read seeded .fd");
+    seeded.last_modified = Some(stale_last_modified.into());
+    seeded.store(&fd).await.expect("rewrite seeded .fd");
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    assert!(
+        matches!(
+            &ready.outcome,
+            ResumeOutcome::Mismatch(StateError::FileChanged { .. })
+        ),
+        "precondition: same size, different identity, got {:?}",
+        ready.outcome
+    );
+
+    let handle = ready.start(StartMode::Forced, tx, &ctx);
+    // Stop right after the run announces itself, before its bytes arrive.
+    loop {
+        match rx.recv().await {
+            Ok(Event::Start { .. }) => {
+                ctx.cancel();
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => panic!("the run ended before it started: {e:?}"),
+        }
+    }
+    while rx.recv().await.is_ok() {}
+    assert_eq!(handle.await, TerminationReason::Cancelled);
+
+    let record = Record::load(&fd)
+        .await
+        .expect("an interrupted forced run keeps its .fd");
+    assert_eq!(
+        record.etag.as_deref(),
+        Some("v1"),
+        "the forced resume must not adopt the remote ETag: the early bytes belong to the old one"
+    );
+    assert_eq!(
+        record.last_modified.as_deref(),
+        Some(stale_last_modified),
+        "the forced resume must not adopt the remote Last-Modified either"
+    );
+
+    // The identity is still the old one, so the next run cannot mistake the pair
+    // for the current file: `Auto` re-downloads from zero instead of continuing
+    // the splice.
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    assert!(
+        !matches!(&ready.outcome, ResumeOutcome::Resumable),
+        "a pair left by a forced resume must not validate as resumable, got {:?}",
+        ready.outcome
+    );
+    let final_path = ready.final_path.clone();
+    let handle = ready.start(StartMode::Auto, tx, &ctx);
+    while rx.recv().await.is_ok() {}
+    assert_eq!(handle.await, TerminationReason::Completed);
+    assert_eq!(
+        tokio::fs::read(&final_path).await.expect("read final file"),
+        payload,
+        "the whole file must come from the remote, not from the stale prefix"
+    );
+}
+
 /// A `.part` shorter than the recorded progress cannot be continued, even when
 /// the recorded identity also changed: `Forced` accepts the latter, and must not
 /// turn the former into a resume that pads the missing span with zeros and then
