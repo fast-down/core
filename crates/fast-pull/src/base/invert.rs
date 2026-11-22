@@ -13,6 +13,10 @@ use crate::ProgressEntry;
 /// [`Merge::merge_progress`](crate::Merge::merge_progress). Unsorted or overlapping input
 /// makes the iterator emit nonsensical reversed gaps; a `debug_assert` catches it in
 /// debug builds. Reversed entries (`start > end`) are tolerated and ignored.
+///
+/// The iterator is fused even when `I` is not: once it returns `None` it keeps
+/// returning `None`, so a late item from a non-fused inner iterator cannot
+/// produce a gap past `total_size`.
 #[derive(Debug)]
 pub struct InvertIter<I: Iterator<Item = ProgressEntry>> {
     /// Iterator over the already-downloaded (sorted) ranges.
@@ -23,6 +27,15 @@ pub struct InvertIter<I: Iterator<Item = ProgressEntry>> {
     total_size: u64,
     /// Merge entries shorter than this into the surrounding gap.
     window: u64,
+    /// Set once the scan has reached the end of the source.
+    ///
+    /// [`InvertIter`] implements [`FusedIterator`](std::iter::FusedIterator)
+    /// for every inner iterator, so it must keep returning `None` even when the
+    /// inner one is not fused and yields more items after its first `None`.
+    /// Without this latch the next call would resume scanning that iterator and
+    /// could emit a gap past `total_size`. Once set, `next` returns `None`
+    /// without touching the input.
+    done: bool,
 }
 
 impl<I> Iterator for InvertIter<I>
@@ -31,6 +44,12 @@ where
 {
     type Item = ProgressEntry;
     fn next(&mut self) -> Option<Self::Item> {
+        // A non-fused inner iterator may produce more items after its first
+        // `None`; once the scan has ended the output stays `None`, so a late
+        // item cannot fabricate a gap beyond `total_size`.
+        if self.done {
+            return None;
+        }
         let mut gap_start = self.prev_end;
         let mut last_end = gap_start;
         for range in self.iter.by_ref() {
@@ -56,6 +75,7 @@ where
         }
         // Every path ends the iteration here, so the cursor always reaches the
         // end: a later `next` must not fabricate a gap from a stale `prev_end`.
+        self.done = true;
         self.prev_end = self.total_size;
         if gap_start < self.total_size {
             Some(gap_start..self.total_size)
@@ -77,6 +97,7 @@ where
         prev_end: 0,
         total_size,
         window,
+        done: false,
     }
 }
 
@@ -203,6 +224,36 @@ mod tests {
         // Regression: with everything downloaded `prev_end` used to stay at 0,
         // so a call after the first `None` fabricated a whole-file gap.
         let mut it = invert(std::iter::once(0..30), 30, 1);
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next(), None);
+    }
+
+    /// An iterator that breaks the fused contract on purpose: after its first
+    /// `None` it yields another range.
+    struct NonFusedRanges {
+        calls: usize,
+    }
+
+    impl Iterator for NonFusedRanges {
+        type Item = ProgressEntry;
+        fn next(&mut self) -> Option<Self::Item> {
+            self.calls += 1;
+            match self.calls {
+                1 => Some(0..10),
+                2 => None,
+                _ => Some(40..50),
+            }
+        }
+    }
+
+    #[test]
+    fn invert_ignores_items_a_non_fused_inner_yields_after_none() {
+        // `InvertIter` is `FusedIterator` for every inner iterator, so it must
+        // stay exhausted instead of resuming a non-fused inner and emitting the
+        // out-of-range gap 30..40.
+        let mut it = invert(NonFusedRanges { calls: 0 }, 30, 1);
+        assert_eq!(it.next(), Some(10..30));
+        assert_eq!(it.next(), None);
         assert_eq!(it.next(), None);
         assert_eq!(it.next(), None);
     }
