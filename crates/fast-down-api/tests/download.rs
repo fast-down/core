@@ -1207,6 +1207,68 @@ async fn resume_with_the_crate_defaults_lands_next_to_the_fd() {
     );
 }
 
+/// A `.fd` remembers where its download was heading: resuming under the crate
+/// defaults must land the file under the recorded `filename`, not under the name
+/// the freshly probed URL would suggest.
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_takes_the_filename_from_the_fd() {
+    let payload: Vec<u8> = (0..4096usize).map(|i| (i % 251) as u8).collect();
+    let (_server, url) = start_server(payload.clone(), "v1", true).await;
+    let dir = temp_dir("resume_recorded_name");
+    let (_, info) = probe(&url, &dir).await;
+
+    // The pair keeps its own `<stem>.fd`/`<stem>.part` names; only the finished
+    // file is called `custom.mkv`.
+    let fd = dir.join("out.bin").with_added_extension("fd");
+    let tmp = fd.with_extension("part");
+    let recorded = PartialConfig {
+        save_dir: Some(dir.clone()),
+        filename: Some("custom.mkv".to_string()),
+        parse_filename: Some(false),
+        ..PartialConfig::default()
+    };
+    let mut record = Record::new(Url::parse(&url).unwrap(), recorded);
+    record.size = info.size;
+    record.etag = info.file_id.etag.clone();
+    record.last_modified = info.file_id.last_modified.clone();
+    let progress = payload.len() as u64 / 2;
+    record.set_progress(vec![0..progress]);
+    record.store(&fd).await.expect("seed .fd");
+    std::fs::write(&tmp, &payload[..progress as usize]).expect("seed .part");
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::at_path(
+        Url::parse(&url).unwrap(),
+        fd.clone(),
+        PartialConfig::default(),
+    )
+    .build(&tx)
+    .await
+    .expect("resuming with the crate defaults must resolve a path");
+    assert!(
+        matches!(&ready.outcome, ResumeOutcome::Resumable),
+        "the seeded identity and progress must be resumable, got {:?}",
+        ready.outcome
+    );
+    assert_eq!(
+        ready.final_path.file_name().and_then(|n| n.to_str()),
+        Some("custom.mkv"),
+        "the recorded filename decides the output name: {:?}",
+        ready.final_path
+    );
+
+    let handle = ready.start(StartMode::Auto, tx, &ctx);
+    while rx.recv().await.is_ok() {}
+    assert_eq!(handle.await, TerminationReason::Completed);
+
+    assert_eq!(std::fs::read(dir.join("custom.mkv")).unwrap(), payload);
+    assert!(
+        !fd.exists(),
+        "the .fd must be removed after a completed resume"
+    );
+}
+
 /// `save_dir` is a new-download setting: a pinned `.fd` keeps its pair where it
 /// is instead of relocating the output to whatever the caller configured.
 #[tokio::test(flavor = "multi_thread")]

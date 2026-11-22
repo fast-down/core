@@ -6,15 +6,30 @@ use std::{borrow::Cow, path::PathBuf};
 use url::Url;
 
 pub fn gen_path(url: &Url, info: &UrlInfo, config: &Config) -> std::io::Result<PathBuf> {
-    let mut filename = sanitize_filename(
-        if config.filename.is_empty() || config.parse_filename {
-            auto_ext(&info.raw_name, info.content_type.as_deref())
-        } else {
-            Cow::Borrowed(config.filename.as_str())
-        }
-        .as_ref(),
-        248,
-    );
+    let name = if config.filename.is_empty() || config.parse_filename {
+        auto_ext(&info.raw_name, info.content_type.as_deref())
+    } else {
+        Cow::Borrowed(config.filename.as_str())
+    };
+    gen_path_named(url, config, name.as_ref())
+}
+
+/// The output path for a configuration whose name is fixed without the remote.
+///
+/// A non-empty `filename` with [`Config::parse_filename`] off is used verbatim,
+/// so its destination is known before the prefetch. `None` means the name (or
+/// the directory it implies) depends on the response and only [`gen_path`] can
+/// resolve it. This lets plan validation refuse a path collision without
+/// touching the network.
+pub fn gen_path_from_name(url: &Url, config: &Config) -> Option<std::io::Result<PathBuf>> {
+    if config.filename.is_empty() || config.parse_filename {
+        return None;
+    }
+    Some(gen_path_named(url, config, &config.filename))
+}
+
+fn gen_path_named(url: &Url, config: &Config, initial: &str) -> std::io::Result<PathBuf> {
+    let mut filename = sanitize_filename(initial, 248);
     let mut save_dir = soft_canonicalize::soft_canonicalize(&config.save_dir)?;
     if config.parse_filename && !config.filename.is_empty() {
         let path = PathBuf::from(parse_filename_template(&config.filename, url, &filename));

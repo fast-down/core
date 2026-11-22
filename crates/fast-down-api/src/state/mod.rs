@@ -10,7 +10,8 @@ use crate::utils::gen_path;
 use crate::{PartialConfig, Tx, engine::prefetch};
 use fast_down::fast_puller::CookieStore;
 use inherit_config::ConfigLayer;
-use std::path::PathBuf;
+use path_helper::comparable;
+use std::path::{Path, PathBuf};
 use url::Url;
 
 /// A download that has not been resolved against the remote yet.
@@ -67,8 +68,8 @@ impl State {
         }
     }
 
-    /// Resolve this download against the remote: prefetch, compute the output
-    /// path, and probe for resumable state.
+    /// Resolve this download against the remote: prefetch, probe for resumable
+    /// state, and compute the output path.
     ///
     /// Nothing is written to disk. The returned [`Ready`] keeps the live
     /// prefetch response for `start` to reuse, and reports what starting would
@@ -81,12 +82,18 @@ impl State {
     ///   none.
     ///
     /// A pinned `fd_path` is probed exactly; otherwise the base `<final>.fd` is
-    /// tried. Resume is skipped entirely when the server does not support
-    /// ranged requests or the caller disabled it.
+    /// tried. When a `.fd` is found, its recorded `filename` and
+    /// `parse_filename` decide the output name; the caller's values only fill
+    /// fields the record left unset. The directory always comes from the
+    /// `.fd`'s own location, so the pair can never be split. Resume is skipped
+    /// entirely when the server does not support ranged requests or the caller
+    /// disabled it.
     ///
     /// # Errors
     /// Returns [`PlanError`] when the HTTP client cannot be built, the prefetch
-    /// exhausts its retries, or the output path cannot be computed. A `.fd` that
+    /// exhausts its retries, or the output path cannot be computed. An empty
+    /// `save_dir` on a new download and a `.fd` that names its own `.part` are
+    /// local mistakes and are reported before any request is sent. A `.fd` that
     /// exists but cannot be read is reported rather than silently replaced. A
     /// `.fd` path that collides with its `.part` or with the output — for
     /// example a pinned `out.part`, or a `filename` equal to the `.fd`'s name —
@@ -115,8 +122,6 @@ impl State {
         let mut partial = record.config.clone();
         partial.downloaded_chunk = None;
         let mut config = partial.clone().build();
-        let cookie_store = CookieStore::new(config.cookie_store);
-        let (info, resp) = prefetch(url, &config, &cookie_store, tx).await?;
 
         // The output has to be reachable from the pair: the `.part` sits next to
         // the `.fd` and `finalize` renames it there, so a destination elsewhere
@@ -124,6 +129,9 @@ impl State {
         // across volumes. A pinned `.fd` therefore owns the directory, and
         // `save_dir` applies only to a fresh download; a name template still
         // applies, resolved under that directory.
+        //
+        // This and the other local checks run before the probe: a configuration
+        // mistake must not cost a network round-trip.
         match fd_path.as_ref().and_then(|fd| fd.parent()) {
             Some(dir) => config.save_dir = dir.to_path_buf(),
             None if config.save_dir.as_os_str().is_empty() => {
@@ -131,116 +139,88 @@ impl State {
             }
             None => {}
         }
-        let final_path = gen_path(url, &info, &config).map_err(PlanError::GenPath)?;
+
+        // The `.fd`, its `.part` and the output must be three different files:
+        // `part_path` only swaps the extension, so an `.fd` already ending in
+        // `.part` names its own partial file (the sink would overwrite the
+        // state). That is visible without the remote, so it is refused here; the
+        // output collision needs the resolved name and is checked below.
+        if let Some(fd) = fd_path.as_ref() {
+            let tmp = crate::utils::part_path(fd);
+            if comparable(fd) == comparable(&tmp) {
+                return Err(PlanError::BadStatePath(fd.clone()));
+            }
+            // An explicit, non-template `filename` is known before the probe, so
+            // the remaining half of the collision check can run early too.
+            if let Some(Ok(resolved)) = crate::utils::gen_path_from_name(url, &config)
+                && comparable(fd) == comparable(&resolved)
+            {
+                return Err(PlanError::BadStatePath(fd.clone()));
+            }
+        }
+
+        let cookie_store = CookieStore::new(config.cookie_store);
+        let (info, resp) = prefetch(url, &config, &cookie_store, tx).await?;
 
         // Whether the caller pinned a specific `.fd` (via [`State::at_path`]). A
         // `Fresh` outcome keeps that pin, and a `.fd` whose `.part` is missing
         // keeps its own location even unpinned; otherwise `start` claims a free
         // pair.
         let caller_pinned = fd_path.is_some();
-        // The `.fd` to probe: the pinned one, or the default `<final>.fd`. No
-        // clone: the resume paths move it into the result, and a fresh path only
-        // needs `caller_pinned` to decide whether to keep it.
-        let probe_fd_path = fd_path.unwrap_or_else(|| final_path.with_added_extension("fd"));
+        // The `.fd` to probe: the pinned one, or the default next to the output
+        // the caller's configuration resolves to. A record found there may still
+        // move the output afterwards, but the state that was read stays this
+        // file.
+        let probe_fd_path = match fd_path {
+            Some(fd) => fd,
+            None => gen_path(url, &info, &config)
+                .map_err(PlanError::GenPath)?
+                .with_added_extension("fd"),
+        };
 
-        // The `.fd`, its `.part` and the output must be three different files:
-        // `part_path` only swaps the extension, so an `.fd` already ending in
-        // `.part` names its own partial file (the sink would overwrite the
-        // state), and an output named like the `.fd` makes `finalize`'s rename
-        // replace the state with the finished file.
-        if !crate::utils::paths_are_distinct(
-            &probe_fd_path,
-            &crate::utils::part_path(&probe_fd_path),
-            &final_path,
-        ) {
-            return Err(PlanError::BadStatePath(probe_fd_path));
-        }
+        let (state, plan) = plan_output(url, &info, &config, &partial, &probe_fd_path).await?;
+        let final_path = plan.final_path;
 
         // A clean, caller-configured record carrying the current identity but no
-        // progress: what every `Fresh` path falls back to.
+        // progress: what every `Fresh` path falls back to. Built lazily, so a
+        // resume that never falls back pays for no copy of the configuration.
         let fresh_record = || {
-            let mut fresh = Record::new(url.clone(), partial.clone());
+            let mut fresh_partial = partial.clone();
+            if let Some((filename, parse_filename)) = &plan.recorded_name {
+                if fresh_partial.filename.is_none() {
+                    fresh_partial.filename.clone_from(filename);
+                }
+                if fresh_partial.parse_filename.is_none() {
+                    fresh_partial.parse_filename = *parse_filename;
+                }
+            }
+            let mut fresh = Record::new(url.clone(), fresh_partial);
             fresh.refresh_identity(&info);
             fresh
         };
-
-        let (record, outcome, fd_path) = if config.resume {
-            match Record::load(&probe_fd_path).await {
-                Ok(mut old) if info.fast_download => {
-                    let tmp = crate::utils::part_path(&probe_fd_path);
-                    // Every judgement reads the OLD state and must run before
-                    // any mutation: `validate` compares the recorded identity,
-                    // and `part_state` measures the file against the recorded
-                    // progress. `merge_config` overwrites the progress, so it
-                    // cannot run first.
-                    let validation = old.validate(&info);
-                    let part = old.part_state(&tmp).await;
-
-                    // The caller's URL always wins; the identity is only
-                    // refreshed when the state still describes this file, so a
-                    // `Mismatch` keeps its self-consistent old identity.
-                    old.set_url(url);
-                    if validation.is_ok() {
-                        old.refresh_identity(&info);
-                    }
-                    old.merge_config(&partial);
-
-                    match (validation, part) {
-                        // A `.part` shorter than the recorded progress is unsafe
-                        // to continue whatever the identity verdict says: the sink
-                        // would extend it with zeros over the missing span and the
-                        // run would still report completion. Report the truncation
-                        // (over a possible identity change) so a `Forced` policy,
-                        // which accepts a same-size identity change, cannot force a
-                        // resume over the missing bytes.
-                        (_, PartState::Short { actual, recorded }) => (
-                            old,
-                            ResumeOutcome::Mismatch(StateError::Truncated {
-                                actual_size: actual,
-                                recorded_size: recorded,
-                            }),
-                            Some(probe_fd_path),
-                        ),
-                        (Err(e), _) => (old, ResumeOutcome::Mismatch(e), Some(probe_fd_path)),
-                        (Ok(()), PartState::Ready) => {
-                            (old, ResumeOutcome::Resumable, Some(probe_fd_path))
-                        }
-                        // The `.part` is gone: nothing safe to continue, but the
-                        // `.fd` still names the pair and remembers its progress.
-                        // Keep that location so a later start reuses it instead
-                        // of orphaning it under a new `name (1)` stem.
-                        (Ok(()), PartState::Missing) => {
-                            (fresh_record(), ResumeOutcome::Fresh, Some(probe_fd_path))
-                        }
-                    }
-                }
-                // A `.fd` exists, but the server cannot serve ranges: resume is
-                // impossible whatever the `.part` looks like.
-                Ok(_) => (
-                    fresh_record(),
-                    ResumeOutcome::Mismatch(StateError::NotResumable),
-                    Some(probe_fd_path),
-                ),
-                Err(StateError::NotFound(_)) => (
-                    fresh_record(),
-                    ResumeOutcome::Fresh,
-                    caller_pinned.then_some(probe_fd_path),
-                ),
-                // Any other read/decode failure means the state exists but is
-                // unusable: classify it as a mismatch so `Auto` falls back to a
-                // fresh download while `Resume` reports it.
-                Err(e) => (
-                    fresh_record(),
-                    ResumeOutcome::Mismatch(e),
-                    Some(probe_fd_path),
-                ),
+        // Where the `.fd`/`.part` pair lives is decided here, once: a `.fd` that
+        // was read keeps its location whatever its content turns out to mean,
+        // while a run that read nothing may still claim a free pair.
+        let (record, outcome, fd_path) = match state {
+            ResumeState::Loaded(old) => {
+                let (record, outcome) =
+                    classify(*old, url, &info, &partial, &probe_fd_path, &fresh_record).await;
+                (record, outcome, Some(probe_fd_path))
             }
-        } else {
-            (
+            // Nothing was read and the caller named no path: the location is
+            // undecided, so `start` claims a free pair.
+            ResumeState::Disabled | ResumeState::Missing => (
                 fresh_record(),
                 ResumeOutcome::Fresh,
                 caller_pinned.then_some(probe_fd_path),
-            )
+            ),
+            // The `.fd` cannot be used, but it is still there and still names the
+            // pair: keep it so the next start finds it again.
+            ResumeState::Broken(e) => (
+                fresh_record(),
+                ResumeOutcome::Mismatch(e),
+                Some(probe_fd_path),
+            ),
         };
 
         Ok(Ready {
@@ -253,5 +233,158 @@ impl State {
             outcome,
             cookie_store,
         })
+    }
+}
+
+/// What the probed `.fd` means for this run.
+enum ResumeState {
+    /// The caller disabled resume, so no state was read.
+    Disabled,
+    /// A `.fd` was read successfully. Boxed because a `Record` carries the whole
+    /// persisted configuration, which dwarfs the other variants.
+    Loaded(Box<Record>),
+    /// There is no `.fd` at the probed path.
+    Missing,
+    /// A `.fd` exists but cannot be read or decoded.
+    Broken(StateError),
+}
+
+/// What output-path resolution hands on to the rest of `build`.
+struct PlannedOutput {
+    /// The file this run will rename the `.part` to.
+    final_path: PathBuf,
+    /// The record's name fields, when a record was read. A `Fresh` fallback must
+    /// keep them so it keeps resolving the same output.
+    recorded_name: Option<(Option<String>, Option<bool>)>,
+}
+
+/// Read any recorded state and resolve the output path against it.
+///
+/// The record remembers where its download was heading, so its configuration
+/// wins and the caller's only fills what the record left unset. A `Fresh`
+/// fallback keeps the record's name fields for the same reason: a run
+/// interrupted before completion must resolve the same output when it resumes.
+///
+/// Reading the record here rather than in `build` is what keeps the output name
+/// stable: the path is computed from the state that is about to be continued.
+#[allow(clippy::result_large_err)]
+async fn plan_output(
+    url: &Url,
+    info: &fast_down::UrlInfo,
+    config: &crate::Config,
+    partial: &PartialConfig,
+    probe_fd_path: &std::path::Path,
+) -> Result<(ResumeState, PlannedOutput), PlanError> {
+    let state = if config.resume {
+        match Record::load(probe_fd_path).await {
+            Ok(record) => ResumeState::Loaded(Box::new(record)),
+            Err(StateError::NotFound(_)) => ResumeState::Missing,
+            Err(e) => ResumeState::Broken(e),
+        }
+    } else {
+        ResumeState::Disabled
+    };
+    let recorded = match &state {
+        ResumeState::Loaded(record) => Some(record.as_ref()),
+        ResumeState::Disabled | ResumeState::Missing | ResumeState::Broken(_) => None,
+    };
+
+    let path_partial = recorded.map_or_else(
+        || partial.clone(),
+        |old| {
+            let mut recorded = old.config.clone();
+            recorded.inherit_from(partial);
+            recorded
+        },
+    );
+    let mut path_config = path_partial.build();
+    // The directory always comes from this run: a pinned `.fd` owns it, and a
+    // new download uses the caller's `save_dir`.
+    path_config.save_dir.clone_from(&config.save_dir);
+    let final_path = gen_path(url, info, &path_config).map_err(PlanError::GenPath)?;
+
+    // Only the name is shared with the caller's layer; every other field stays
+    // the caller's, because a fresh start must not inherit the record's tuning.
+    let recorded_name =
+        recorded.map(|old| (old.config.filename.clone(), old.config.parse_filename));
+
+    // With the name resolved, the last collision is visible: an output named
+    // like the `.fd` makes `finalize`'s rename replace the state with the
+    // finished file.
+    if !crate::utils::paths_are_distinct(
+        probe_fd_path,
+        &crate::utils::part_path(probe_fd_path),
+        &final_path,
+    ) {
+        return Err(PlanError::BadStatePath(probe_fd_path.to_path_buf()));
+    }
+    Ok((
+        state,
+        PlannedOutput {
+            final_path,
+            recorded_name,
+        },
+    ))
+}
+
+/// Decide what a read `.fd` means for this run.
+///
+/// Every judgement reads the OLD record and runs before any mutation: `validate`
+/// compares the recorded identity, and `part_state` measures the file against
+/// the recorded progress, while `merge_config` overwrites the progress.
+///
+/// The pair's location is not this function's to decide: a record that was read
+/// stays where it was found, whatever the verdict.
+async fn classify(
+    mut old: Record,
+    url: &Url,
+    info: &fast_down::UrlInfo,
+    partial: &PartialConfig,
+    probe_fd_path: &Path,
+    fresh_record: impl Fn() -> Record,
+) -> (Record, ResumeOutcome) {
+    // A `.fd` exists, but the server cannot serve ranges: resume is impossible
+    // whatever the `.part` looks like.
+    if !info.fast_download {
+        return (
+            fresh_record(),
+            ResumeOutcome::Mismatch(StateError::NotResumable),
+        );
+    }
+
+    let tmp = crate::utils::part_path(probe_fd_path);
+    let validation = old.validate(info);
+    let part = old.part_state(&tmp).await;
+
+    // The caller's URL always wins; the identity is only refreshed when the
+    // state still describes this file, so a `Mismatch` keeps its self-consistent
+    // old identity.
+    old.set_url(url);
+    if validation.is_ok() {
+        old.refresh_identity(info);
+    }
+    old.merge_config(partial);
+
+    match (validation, part) {
+        // A `.part` shorter than the recorded progress is unsafe to continue
+        // whatever the identity verdict says: the sink would extend it with
+        // zeros over the missing span and the run would still report completion.
+        // Report the truncation (over a possible identity change) so a `Forced`
+        // policy, which accepts a same-size identity change, cannot force a
+        // resume over the missing bytes.
+        (_, PartState::Short { actual, recorded }) => (
+            old,
+            ResumeOutcome::Mismatch(StateError::Truncated {
+                actual_size: actual,
+                recorded_size: recorded,
+            }),
+        ),
+        (Err(e), _) => (old, ResumeOutcome::Mismatch(e)),
+        (Ok(()), PartState::Ready) => (old, ResumeOutcome::Resumable),
+        // The `.part` is gone: nothing safe to continue, but the `.fd` still
+        // names the pair and remembers its progress. Keep that location so a
+        // later start reuses it instead of orphaning it under a new `name (1)`
+        // stem.
+        (Ok(()), PartState::Missing) => (fresh_record(), ResumeOutcome::Fresh),
     }
 }
