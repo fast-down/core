@@ -1563,6 +1563,32 @@ async fn a_filename_equal_to_the_fd_name_is_refused() {
     );
 }
 
+/// A `filename` equal to the `.part`'s name makes `finalize` rename the partial
+/// file onto itself, so the run ends with no output at all. The colliding name
+/// is known before the probe, so the refusal must not cost a round trip.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_filename_equal_to_the_part_name_is_refused_before_the_probe() {
+    // Nothing listens on port 1: reaching the network would surface as a
+    // prefetch error instead of the path error this must report.
+    let url = Url::parse("http://127.0.0.1:1/file.bin").unwrap();
+    let dir = temp_dir("bad_part_output");
+    let canonical = std::fs::canonicalize(&dir).expect("canonicalize temp dir");
+    let fd = canonical.join("out.fd");
+    let mut cfg = make_config(&dir);
+    cfg.filename = Some("out.part".to_string());
+    cfg.parse_filename = Some(false);
+
+    let (tx, _rx) = create_channel();
+    let err = State::at_path(url, fd.clone(), cfg)
+        .build(&tx)
+        .await
+        .expect_err("an output named like the .part must not resolve");
+    assert!(
+        matches!(&err, PlanError::BadStatePath(path) if path == &fd),
+        "expected PlanError::BadStatePath({fd:?}), got {err:?}"
+    );
+}
+
 /// A server whose responses set a session cookie and whose *ranged* responses
 /// require it back, so probe traffic and download traffic are split the way a
 /// real session splits them.

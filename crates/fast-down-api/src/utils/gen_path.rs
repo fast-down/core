@@ -29,12 +29,12 @@ pub fn gen_path_from_name(url: &Url, config: &Config) -> Option<std::io::Result<
 }
 
 fn gen_path_named(url: &Url, config: &Config, initial: &str) -> std::io::Result<PathBuf> {
-    let mut filename = sanitize_filename(initial, 248);
+    let mut filename = checked_filename(initial)?;
     let mut save_dir = soft_canonicalize::soft_canonicalize(&config.save_dir)?;
     if config.parse_filename && !config.filename.is_empty() {
         let path = PathBuf::from(parse_filename_template(&config.filename, url, &filename));
         if let Some(s) = path.file_name() {
-            filename = sanitize_filename(s.to_string_lossy().as_ref(), 248);
+            filename = checked_filename(s.to_string_lossy().as_ref())?;
         }
         if let Some(parent_path) = path.parent()
             && let Ok(new_save_dir) = soft_canonicalize(save_dir.join(sanitize_path(parent_path)))
@@ -44,6 +44,36 @@ fn gen_path_named(url: &Url, config: &Config, initial: &str) -> std::io::Result<
         }
     }
     Ok(save_dir.join(&filename))
+}
+
+/// Sanitize one output name and refuse a name that ends up naming nothing.
+///
+/// A name made only of whitespace, or one the platform reduces to nothing, would
+/// otherwise leave the join with an empty component, making `final_path` equal
+/// to `save_dir`: the `.part` would be renamed onto a directory, or onto the
+/// state file's directory itself. Reported as `InvalidInput` so the caller sees
+/// a bad configuration rather than a filesystem failure later.
+///
+/// The raw input is checked as well as the result: `sanitize_filename` maps a
+/// blank name onto its replacement character (`_`), so `"   "` comes back
+/// non-blank and only the input still shows the name was empty.
+fn checked_filename(name: &str) -> std::io::Result<String> {
+    if name.trim().is_empty() {
+        return Err(blank_name(name));
+    }
+    let cleaned = sanitize_filename(name, 248);
+    if cleaned.trim().is_empty() {
+        return Err(blank_name(name));
+    }
+    Ok(cleaned)
+}
+
+/// The configuration error for an output name that names nothing.
+fn blank_name(name: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("the output filename {name:?} is blank"),
+    )
 }
 
 #[cfg(test)]
@@ -104,6 +134,39 @@ mod tests {
         let cfg = make_config(&dir, "myname.txt", false);
         let p = gen_path(&url, &info, &cfg).unwrap();
         assert_eq!(p.file_name().unwrap(), "myname.txt");
+    }
+
+    #[tokio::test]
+    async fn whitespace_only_filename_is_refused() {
+        // A blank name must not resolve to `save_dir` itself: the join would
+        // leave the directory as the output, and `finalize` would then rename
+        // the `.part` onto a directory.
+        let dir = tempdir("blank_name");
+        let url = Url::parse("https://example.com/path/data.bin").unwrap();
+        let info = make_info("data.bin", None);
+        let cfg = make_config(&dir, "   ", false);
+        let err = gen_path(&url, &info, &cfg).expect_err("a blank filename must be refused");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "a blank name is a configuration error: {err}"
+        );
+        assert!(
+            err.to_string().contains("is blank"),
+            "the failure must name the problem, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn template_that_sanitizes_to_nothing_is_refused() {
+        // The same check applies on the template branch, where the leaf is
+        // sanitized after expansion.
+        let dir = tempdir("blank_template");
+        let url = Url::parse("https://example.com/path/data.bin").unwrap();
+        let info = make_info("data.bin", None);
+        let cfg = make_config(&dir, " ", true);
+        let err = gen_path(&url, &info, &cfg).expect_err("an empty template leaf must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[tokio::test]

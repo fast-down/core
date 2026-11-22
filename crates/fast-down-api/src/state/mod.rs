@@ -7,10 +7,10 @@ pub use ready::*;
 pub use record::*;
 
 use crate::utils::gen_path;
+use crate::utils::path_key;
 use crate::{PartialConfig, Tx, engine::prefetch};
 use fast_down::fast_puller::CookieStore;
 use inherit_config::ConfigLayer;
-use path_helper::comparable;
 use std::path::{Path, PathBuf};
 use url::Url;
 
@@ -147,13 +147,16 @@ impl State {
         // output collision needs the resolved name and is checked below.
         if let Some(fd) = fd_path.as_ref() {
             let tmp = crate::utils::part_path(fd);
-            if comparable(fd) == comparable(&tmp) {
+            // The pair is fixed here, so the easy half of the collision check — a
+            // state file naming its own partial file — needs no response.
+            if path_key(fd) == path_key(&tmp) {
                 return Err(PlanError::BadStatePath(fd.clone()));
             }
-            // An explicit, non-template `filename` is known before the probe, so
-            // the remaining half of the collision check can run early too.
+            // An explicit, non-template `filename` fixes the output as well, so
+            // all three pairs can be checked before the probe. A template leaves
+            // it to `plan_output`, once the response has named the file.
             if let Some(Ok(resolved)) = crate::utils::gen_path_from_name(url, &config)
-                && comparable(fd) == comparable(&resolved)
+                && !crate::utils::paths_are_distinct(fd, &tmp, &resolved)
             {
                 return Err(PlanError::BadStatePath(fd.clone()));
             }

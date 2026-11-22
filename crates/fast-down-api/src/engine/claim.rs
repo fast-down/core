@@ -9,8 +9,8 @@
 //! in the *same* process is refused just like another process would be; there
 //! is no separate in-process registry to keep in step with it.
 //!
-//! Keys are normalized first (`soft_canonicalize`, plus case folding on Windows
-//! and macOS), so `./out.fd`, `dir/../out.fd` and `OUT.FD` all name one pair.
+//! Keys are normalized first (see `utils::path_key`), so `./out.fd`,
+//! `dir/../out.fd` and `OUT.FD` all name one pair.
 //!
 //! The locked file lives under `<temp>/fast-down-locks` and is named after a
 //! hash of the key, so a download directory never gains a stray `.lock`. It is
@@ -19,8 +19,8 @@
 //! `temp_dir()`, the lock's semantics do not depend on the filesystem the
 //! download writes to.
 
+use crate::utils::path_key;
 use fs4::TryLockError;
-use soft_canonicalize::soft_canonicalize;
 use std::{
     fs::{File, OpenOptions},
     io,
@@ -36,16 +36,6 @@ static LOCK_DIR: LazyLock<PathBuf> = LazyLock::new(|| std::env::temp_dir().join(
 pub struct Claim {
     /// The locked handle; closing it releases the OS lock.
     file: File,
-}
-
-/// Normalize `fd_path` into the key the lock file is derived from.
-fn key_of(fd_path: &Path) -> PathBuf {
-    let key = soft_canonicalize(fd_path).unwrap_or_else(|_| fd_path.to_path_buf());
-    // Windows and macOS compare paths case-insensitively by default, so `OUT.FD`
-    // and `out.fd` name the same pair and must share one lock.
-    #[cfg(any(windows, target_os = "macos"))]
-    let key = PathBuf::from(key.to_string_lossy().to_lowercase());
-    key
 }
 
 /// The lock file paired with `key`.
@@ -70,7 +60,7 @@ fn lock_path(key: &Path) -> PathBuf {
 /// one. `Err` means the lock file itself could not be created, opened, or
 /// locked; the caller reports that rather than silently running unprotected.
 pub fn claim(fd_path: &Path) -> io::Result<Option<Claim>> {
-    let key = key_of(fd_path);
+    let key = path_key(fd_path);
     std::fs::create_dir_all(&*LOCK_DIR)?;
     let file = OpenOptions::new()
         .read(true)
@@ -182,7 +172,7 @@ mod tests {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(lock_path(&key_of(&path)))
+            .open(lock_path(&path_key(&path)))
             .unwrap();
         assert!(
             matches!(
@@ -201,7 +191,7 @@ mod tests {
     fn leftover_lock_file_is_harmless() {
         let path = fd_path("stale");
         std::fs::create_dir_all(&*LOCK_DIR).unwrap();
-        std::fs::write(lock_path(&key_of(&path)), b"").unwrap();
+        std::fs::write(lock_path(&path_key(&path)), b"").unwrap();
         assert!(claim(&path).unwrap().is_some());
     }
 }
