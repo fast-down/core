@@ -89,6 +89,7 @@ async fn main() {
             retry_gap: std::time::Duration::from_secs(1),
             push_queue_cap: 16,
             stall_timeout: std::time::Duration::from_secs(60),
+            max_unproductive_attempts: 3,
         },
     );
     while result.recv().await.is_ok() {}

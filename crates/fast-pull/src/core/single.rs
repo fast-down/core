@@ -40,6 +40,21 @@ pub struct DownloadOptions {
     /// same window bounds retrying a final flush from its first failure.
     /// [`Duration::ZERO`] disables the guard.
     pub stall_timeout: Duration,
+    /// How many consecutive restarts may fail to beat the furthest byte reached
+    /// before the session is cancelled.
+    ///
+    /// A pull error that leaves the stream unusable abandons the attempt and
+    /// restarts it from byte 0, because a server without range support has no
+    /// cursor to resume from. Every delivered chunk counts as progress for
+    /// [`stall_timeout`](Self::stall_timeout), so a source that keeps sending the
+    /// same prefix and failing would restart forever. Once this many consecutive
+    /// restarts do not get past the furthest attempt, the session is cancelled
+    /// and `is_aborted()` reports the truncated download.
+    ///
+    /// `0` disables the bound: the restarts are then limited only by
+    /// [`stall_timeout`](Self::stall_timeout), which a source that delivers
+    /// anything keeps at bay.
+    pub max_unproductive_attempts: u32,
 }
 
 /// Start a single-threaded sequential download.
@@ -56,6 +71,13 @@ pub struct DownloadOptions {
 /// error, and the push driver flushes whatever it was given. This is the
 /// opposite of [`download_multi`](crate::multi::download_multi), where an ended
 /// stream only ends the pull attempt and the same range is requested again.
+///
+/// An irrecoverable pull error abandons the attempt and restarts it from byte 0
+/// (there is no cursor to resume from on a server without Range support). After
+/// [`max_unproductive_attempts`](DownloadOptions::max_unproductive_attempts)
+/// consecutive restarts that do not get past the furthest attempt so far, the
+/// session is cancelled instead of retrying forever; `is_aborted()` then reports
+/// the truncated download.
 ///
 /// The session is finished once the push driver has drained `rx_push` and
 /// flushed; the `event_chain` sender lives inside that driver, so it is dropped
@@ -166,7 +188,17 @@ pub fn download_single<R: Puller, W: Pusher>(
     let watch_tx = tx.clone();
     let pull_token = token.clone();
     let pull_handle = tokio::spawn(async move {
-        let _panic_guard = PanicGuard(pull_token);
+        let _panic_guard = PanicGuard(pull_token.clone());
+        // An attempt that fails irrecoverably restarts from byte 0, so a puller
+        // that always delivers the same prefix and then fails would repeat
+        // forever: every delivered chunk beats the stall watchdog, which
+        // therefore never fires. Count the attempts that fail to get further
+        // than the best one so far and end the session once they pile up.
+        // `max_unproductive_attempts` of `0` keeps the old retry-forever
+        // behaviour and leaves the stall watchdog as the only bound.
+        let max_unproductive = options.max_unproductive_attempts;
+        let mut furthest: u64 = 0;
+        let mut unproductive: u32 = 0;
         'redownload: loop {
             let _ = tx.send(Event::Pulling(ID));
             let mut downloaded: u64 = 0;
@@ -213,7 +245,23 @@ pub fn download_single<R: Puller, W: Pusher>(
                             // (fresh client, next local source IP) instead of
                             // reusing the one that just failed. Like a recoverable
                             // error this only re-requests the range after the
-                            // backoff; it does not end the session.
+                            // backoff; it does not end the session unless the
+                            // restarts stop making progress (above).
+                            if downloaded <= furthest {
+                                unproductive += 1;
+                                if max_unproductive != 0 && unproductive >= max_unproductive {
+                                    // Nothing was gained by restarting, so the next
+                                    // attempt would repeat the same prefix again.
+                                    // Cancel the session instead; the caller sees
+                                    // `is_aborted()` and the API reports the
+                                    // download as incomplete.
+                                    pull_token.cancel();
+                                    return;
+                                }
+                            } else {
+                                furthest = downloaded;
+                                unproductive = 0;
+                            }
                             drop(stream);
                             puller = puller.clone();
                             continue 'redownload;
@@ -319,6 +367,7 @@ mod tests {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
 
@@ -353,6 +402,7 @@ mod tests {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
 
@@ -445,6 +495,7 @@ mod tests {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
 
@@ -505,6 +556,7 @@ mod tests {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
 
@@ -545,7 +597,7 @@ mod tests {
 
     use parking_lot::Mutex;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[derive(Debug)]
     struct FatalErr;
@@ -691,6 +743,34 @@ mod tests {
         }
     }
 
+    /// Like [`StreamErrOncePuller`] but every attempt delivers the same prefix
+    /// and then fails irrecoverably — the shape that used to restart from byte 0
+    /// forever. `attempts` counts how many `pull` calls were made.
+    #[derive(Debug, Clone)]
+    struct AlwaysTruncatedPuller {
+        data: Arc<[u8]>,
+        prefix: usize,
+        attempts: Arc<AtomicUsize>,
+    }
+    impl crate::Puller for AlwaysTruncatedPuller {
+        type Error = FatalErr;
+        fn pull(
+            &mut self,
+            _range: Option<&crate::ProgressEntry>,
+        ) -> impl Future<
+            Output = crate::PullResult<impl crate::PullStream<Self::Error>, Self::Error>,
+        > + Send {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let delivered = &self.data[..self.prefix];
+            let items: Vec<crate::PullResult<Bytes, FatalErr>> = delivered
+                .chunks(2)
+                .map(|c| Ok(Bytes::copy_from_slice(c)))
+                .chain(std::iter::once(Err((FatalErr, Some(Duration::ZERO)))))
+                .collect();
+            std::future::ready(Ok(stream::iter(items)))
+        }
+    }
+
     /// Like [`StreamErrOncePuller`] but yields a *recoverable* stream error first,
     /// so the `is_irrecoverable == false` fall-through is exercised.
     #[derive(Debug, Clone)]
@@ -743,6 +823,7 @@ mod tests {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
         while result.event_chain().recv().await.is_ok() {}
@@ -764,6 +845,7 @@ mod tests {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
         while result.event_chain().recv().await.is_ok() {}
@@ -787,6 +869,7 @@ mod tests {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 0,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -816,6 +899,7 @@ mod tests {
                 // Only the floor keeps this from flooding, so the window must
                 // not end the session before enough retries are observed.
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
         let started = std::time::Instant::now();
@@ -861,6 +945,7 @@ mod tests {
                 retry_gap: Duration::from_millis(10),
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_millis(100),
+                max_unproductive_attempts: 3,
             },
         );
         let mut flush_errors = 0;
@@ -894,10 +979,102 @@ mod tests {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
         while result.event_chain().recv().await.is_ok() {}
         assert_eq!(&**receive.lock(), mock_data);
+    }
+
+    #[tokio::test]
+    async fn test_single_repeated_truncated_attempts_abort_the_session() {
+        // Every attempt delivers the same 1 KiB prefix and then fails
+        // irrecoverably. Each delivered chunk beats the stall watchdog, so the
+        // session used to restart from byte 0 forever; the unproductive-attempt
+        // guard must end it instead.
+        let mock_data = build_mock_data(4 * 1024);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let puller = AlwaysTruncatedPuller {
+            data: Arc::from(mock_data.as_slice()),
+            prefix: 1024,
+            attempts: attempts.clone(),
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let result = download_single(
+            puller,
+            pusher,
+            DownloadOptions {
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                // Long enough that only the retry guard can end the session.
+                stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
+            },
+        );
+        let mut finished = false;
+        timeout(Duration::from_secs(5), async {
+            while let Ok(event) = result.event_chain().recv().await {
+                if matches!(event, Event::Finished(_)) {
+                    finished = true;
+                }
+            }
+        })
+        .await
+        .expect("a puller that restarts from byte 0 forever must not hang the session");
+        assert!(
+            result.is_aborted(),
+            "repeated attempts without progress must cancel the session"
+        );
+        assert!(
+            !finished,
+            "a truncated download must not be reported as finished"
+        );
+        // The first attempt makes progress; the next three do not, so the fourth
+        // one ends the session.
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn test_single_unproductive_attempts_zero_disables_the_bound() {
+        // `0` keeps retrying: the guard never cancels, so the session is still
+        // restarting after more attempts than the default bound allows.
+        let mock_data = build_mock_data(4 * 1024);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let puller = AlwaysTruncatedPuller {
+            data: Arc::from(mock_data.as_slice()),
+            prefix: 1024,
+            attempts: attempts.clone(),
+        };
+        let pusher = MemPusher::with_capacity(mock_data.len());
+        let result = download_single(
+            puller,
+            pusher,
+            DownloadOptions {
+                retry_gap: Duration::ZERO,
+                push_queue_cap: 1024,
+                stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 0,
+            },
+        );
+        let probe = attempts.clone();
+        timeout(Duration::from_secs(5), async {
+            while probe.load(Ordering::SeqCst) < 6 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("with the bound disabled the pull must keep restarting");
+        result.abort();
+        timeout(Duration::from_secs(5), async {
+            while result.event_chain().recv().await.is_ok() {}
+        })
+        .await
+        .expect("abort must end the session");
+        assert!(result.is_aborted());
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 6,
+            "the guard must not cancel when its bound is 0"
+        );
     }
 
     #[tokio::test]
@@ -918,6 +1095,7 @@ mod tests {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
         while result.event_chain().recv().await.is_ok() {}
@@ -943,6 +1121,7 @@ mod tests {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
         while result.event_chain().recv().await.is_ok() {}
@@ -1017,6 +1196,7 @@ mod tests {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
         // Drain events so `event_chain` does not pin the task open; the timeout
@@ -1077,6 +1257,7 @@ mod tests {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
         while result.event_chain().recv().await.is_ok() {}
@@ -1133,6 +1314,7 @@ mod tests {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_millis(100),
+                max_unproductive_attempts: 3,
             },
         );
         let mut stalled = false;
@@ -1220,6 +1402,7 @@ mod tests {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_millis(500),
+                max_unproductive_attempts: 3,
             },
         );
         let mut stalled = false;
@@ -1250,6 +1433,7 @@ mod tests {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 16,
                 stall_timeout: Duration::ZERO,
+                max_unproductive_attempts: 3,
             },
         );
         timeout(Duration::from_secs(5), async {
@@ -1322,6 +1506,7 @@ mod tests {
                 retry_gap: Duration::ZERO,
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_millis(50),
+                max_unproductive_attempts: 3,
             },
         );
         while result.event_chain().recv().await.is_ok() {}
@@ -1379,6 +1564,7 @@ mod tests {
                 push_queue_cap: 16,
                 // Only the panic detection can end this session.
                 stall_timeout: Duration::ZERO,
+                max_unproductive_attempts: 3,
             },
         );
         timeout(Duration::from_secs(5), async {

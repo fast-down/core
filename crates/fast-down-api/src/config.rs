@@ -187,6 +187,22 @@ pub struct Config {
     #[config(partial_attr(serde(default)))]
     pub stall_timeout: Duration,
 
+    /// How many consecutive single-stream restarts may fail to make progress
+    /// before the run is abandoned. Recommended: `3`
+    ///
+    /// A pull error that leaves the stream unusable restarts the attempt from
+    /// byte 0 (a server without range support has no cursor to resume from). A
+    /// source that keeps delivering the same prefix and failing would otherwise
+    /// restart forever, and every delivered chunk keeps
+    /// [`Config::stall_timeout`] from firing. Once this many consecutive
+    /// restarts do not get past the furthest byte reached, the run is cancelled
+    /// and the download is reported as incomplete.
+    ///
+    /// `0` disables the bound, leaving [`Config::stall_timeout`] as the only
+    /// limit.
+    #[config(default = 3)]
+    pub max_unproductive_attempts: u32,
+
     /// Connect timeout. Recommended: `10s`
     ///
     /// Bounds one TCP connect, including DNS resolution, the proxy tunnel, and

@@ -126,4 +126,5 @@ fn main() {}
 
 For a sequential, single-threaded download, swap `download_multi` for
 `fast_pull::single::download_single` and use `fast_pull::single::DownloadOptions`
-(which has `retry_gap`, `push_queue_cap`, and `stall_timeout`).
+(which has `retry_gap`, `push_queue_cap`, `stall_timeout`, and
+`max_unproductive_attempts`).

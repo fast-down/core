@@ -676,6 +676,7 @@ fn start_session(
                 retry_gap: config.retry_gap,
                 push_queue_cap: config.write_queue_cap,
                 stall_timeout: config.stall_timeout,
+                max_unproductive_attempts: config.max_unproductive_attempts,
             },
         )
     }

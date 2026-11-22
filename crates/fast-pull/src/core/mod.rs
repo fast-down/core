@@ -635,6 +635,7 @@ mod tests {
                 retry_gap: Duration::from_secs(1),
                 push_queue_cap: 1024,
                 stall_timeout: Duration::from_secs(60),
+                max_unproductive_attempts: 3,
             },
         );
         // `DownloadResult` is `Clone`.
