@@ -26,7 +26,7 @@ and `Pusher` traits, and the file/memory pushers) and adds the following on top 
    hops, per RFC 9110 §15.4.
 2. **URL info resolution** — `UrlInfo` and `FileId` capture a resource's size, suggested
    filename, content type, range support, and a stable identity derived from the
-   `ETag` / `Last-Modified` headers, which powers incremental and resumable downloads.
+   `ETag` / `Last-Modified` headers, which validates resumable downloads.
 3. **Proxy support** — the `Proxy` enum selects no proxy, the system proxy, or a custom
    proxy URL for outgoing requests.
 4. **Result + event stream** — download functions return a `DownloadResult` whose

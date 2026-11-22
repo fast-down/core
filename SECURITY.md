@@ -6,12 +6,12 @@ The workspace publishes four independently versioned crates. Security fixes are
 applied to the latest published release of each. Older major versions are not
 maintained.
 
-| Crate           | Supported            |
-| --------------- | -------------------- |
-| `fast-steal`    | latest `7.x`         |
-| `fast-pull`     | latest `7.x`         |
-| `fast-down`     | latest `7.x`         |
-| `fast-down-api` | latest `0.x`         |
+| Crate           | Supported      |
+| --------------- | -------------- |
+| `fast-steal`    | latest `8.x`   |
+| `fast-pull`     | latest `8.x`   |
+| `fast-down`     | latest `9.x`   |
+| `fast-down-api` | latest `0.2.x` |
 
 If you are on an older version, please upgrade before reporting, as the issue
 may already be fixed.

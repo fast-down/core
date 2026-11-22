@@ -1,4 +1,5 @@
-//! Minimal example: two-phase resolve (`State::build`) + run (`Ready::start`).
+//! Minimal example of the `State` → `Ready` → `Run` stages: resolve with
+//! `State::build`, then start the `Ready` plan with `Ready::start`.
 //!
 //! Shows inspecting the resolved plan before committing to it.
 //!

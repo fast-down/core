@@ -15,7 +15,7 @@ cancel cooperatively.
 
 - **Concurrent, resumable downloads** powered by the `fast-down` engine (work-stealing, range requests).
 - **One state type, one source of truth**: a [`Record`] is the `.fd` file itself, and every entry point resolves into the same [`Ready`] value before anything is written.
-- **Two-phase by construction**: [`State::build`] prefetches, resolves paths, and probes the disk _without writing a single byte_, returning a [`Ready`] you can inspect before committing.
+- **Three stages, `State` → `Ready` → `Run`**: [`State::build`] prefetches, resolves paths, and probes the disk _without writing a single byte_, returning a [`Ready`] you can inspect before committing; `Ready::start` then turns that plan into a running download.
 - **Event stream**: a single channel carries prefetch, disk allocation, per-worker progress, resume, rename, and lifecycle events. Every run ends with exactly one `Event::Terminated(TerminationReason)`.
 - **Cooperative cancellation**: cancelling mid-flight preserves the `.part` / `.fd` files so you can resume later.
 - **Configurable**: threads, chunk size, write method (`Mmap` / `Std`), proxies, headers, retries, disk pre-allocation, and more via `PartialConfig`.
