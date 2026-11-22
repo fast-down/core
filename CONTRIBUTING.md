@@ -39,17 +39,38 @@ Run the same checks CI runs before opening a pull request. A full local pass:
 # Formatting
 cargo fmt --all
 
-# Lints. `fast-steal`'s `std`/`spin` lock backends are mutually exclusive.
-cargo hack clippy --all-targets --feature-powerset \
-  --mutually-exclusive-features std,spin --at-least-one-of std,spin
+# Lints. `fast-steal`'s `std`/`spin` lock backends are mutually exclusive, so
+# it gets its own pass: `--at-least-one-of std,spin` filters the empty feature
+# set for *every* package, not just the one that needs a backend.
+RUSTFLAGS="-D warnings" cargo hack clippy --all-targets --feature-powerset \
+  --exclude fast-steal --locked
+RUSTFLAGS="-D warnings" cargo hack clippy -p fast-steal --all-targets \
+  --feature-powerset --mutually-exclusive-features std,spin \
+  --at-least-one-of std,spin --locked
 
 # Tests
-cargo hack test --feature-powerset --depth 1 \
-  --mutually-exclusive-features std,spin --at-least-one-of std,spin
-cargo test --all-features
+cargo hack test --feature-powerset --depth 1 --verbose \
+  --exclude fast-steal --locked
+cargo hack test -p fast-steal --feature-powerset --depth 1 --verbose \
+  --mutually-exclusive-features std,spin --at-least-one-of std,spin --locked
+cargo test --all-features --verbose --locked
 
 # Documentation
-cargo doc --no-deps --all-features
+RUSTDOCFLAGS="-D warnings" cargo hack doc --feature-powerset --depth 1 \
+  --no-deps --exclude fast-steal --locked
+RUSTDOCFLAGS="-D warnings" cargo hack doc -p fast-steal --feature-powerset \
+  --depth 1 --no-deps --mutually-exclusive-features std,spin \
+  --at-least-one-of std,spin --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps --locked
+
+# Dependencies: advisories/licenses/bans/sources, then unused deps on nightly.
+cargo deny --locked --all-features check
+cargo hack udeps --feature-powerset --exclude fast-steal --locked
+cargo hack udeps -p fast-steal --feature-powerset \
+  --mutually-exclusive-features std,spin --at-least-one-of std,spin --locked
+
+# Public API, checked against the published version.
+cargo semver-checks --all-features
 ```
 
 `fast-steal` additionally builds on a bare-metal target. Verify the `no_std`
@@ -57,13 +78,14 @@ path still compiles when you touch that crate:
 
 ```sh
 cargo build -p fast-steal --no-default-features --features spin \
-  --target thumbv7em-none-eabi
+  --target thumbv7em-none-eabi --locked
 ```
 
-The workspace denies warnings (`RUSTFLAGS="-D warnings"`), and clippy runs with
-the `all`, `cargo`, `nursery`, and `pedantic` groups at `deny`. Fix lints rather
-than silencing them; if a lint genuinely does not apply, add a targeted
-`#[allow(...)]` with a short reason.
+The workspace denies warnings: CI sets `RUSTFLAGS="-D warnings"` for clippy and
+`RUSTDOCFLAGS="-D warnings"` for the doc checks, as in the commands above.
+Clippy runs with the `all`, `cargo`, `nursery`, and `pedantic` groups at `deny`.
+Fix lints rather than silencing them; if a lint genuinely does not apply, add a
+targeted `#[allow(...)]` with a short reason.
 
 ## Coding conventions
 
