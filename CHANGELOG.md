@@ -118,6 +118,10 @@ made before it was introduced.
   `StartPolicy::probe_unknown` decides between keeping the state (`Fail`, the
   `Auto`/`Resume` default) and downloading the file again (`Fresh`, the `Forced`
   default).
+- A `.fd` with no recorded progress next to a `.part` that holds no bytes now
+  resolves as `Fresh` over the same pair instead of a 0% `Resumable`;
+  `PartState::Empty` names that leftover and `PartState::Ready` means there are
+  bytes to continue.
 
 ### Removed
 
