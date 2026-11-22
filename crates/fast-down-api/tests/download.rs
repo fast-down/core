@@ -53,6 +53,9 @@ struct FileData {
     /// That splits probe traffic from download traffic the way a real session
     /// does: the probe earns the cookie, the range requests must reuse it.
     session: Option<&'static str>,
+    /// When set, every request that asks for a `Range` fails with a `500`: the
+    /// range probe can never learn whether ranges are supported.
+    fail_ranges: bool,
 }
 
 #[derive(Clone)]
@@ -101,6 +104,7 @@ async fn handle(
     let throttle = data.throttle;
     let stall = data.stall;
     let session = data.session;
+    let fail_ranges = data.fail_ranges;
     drop(data);
 
     let range = req
@@ -110,6 +114,12 @@ async fn handle(
         .map(str::to_string);
     if range.is_some() {
         server.ranged_requests.fetch_add(1, Ordering::Relaxed);
+    }
+    if fail_ranges && range.is_some() {
+        return Ok(Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(http_body_util::Full::new(Bytes::new()).boxed())
+            .expect("500"));
     }
 
     // Range traffic must present the cookie the probe earned -- except the
@@ -278,6 +288,27 @@ async fn start_server_with(
             throttle,
             stall,
             session: None,
+            fail_ranges: false,
+        })),
+        ranged_requests: Arc::new(AtomicU64::new(0)),
+    };
+    let url = server.serve().await;
+    (server, url)
+}
+
+/// A server whose metadata request succeeds but whose ranged requests always
+/// fail with a `500`, so the range probe never gets an answer.
+async fn start_server_failing_probe(body: Vec<u8>, etag: &str) -> (TestServer, String) {
+    let server = TestServer {
+        data: Arc::new(RwLock::new(FileData {
+            body,
+            etag: etag.to_string(),
+            last_modified: "Wed, 21 Oct 2026 07:28:00 GMT".to_string(),
+            supports_range: true,
+            throttle: None,
+            stall: false,
+            session: None,
+            fail_ranges: true,
         })),
         ranged_requests: Arc::new(AtomicU64::new(0)),
     };
@@ -1589,6 +1620,190 @@ async fn a_filename_equal_to_the_part_name_is_refused_before_the_probe() {
     );
 }
 
+/// A range probe that never gets an answer says nothing about the server, so the
+/// state may still be resumable. Planning reports that as its own mismatch, and
+/// the default policy refuses without touching the `.fd`: replacing it on a
+/// guess is what the probe's third state exists to prevent.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_range_probe_is_a_mismatch_not_a_fresh_start() {
+    let payload: Vec<u8> = (0..4096usize).map(|i| (i % 251) as u8).collect();
+    let (_server, url) = start_server_failing_probe(payload.clone(), "v1").await;
+    let dir = temp_dir("probe_unknown");
+    let (final_path, info) = probe(&url, &dir).await;
+    assert_eq!(
+        info.range_probe,
+        fast_down::RangeProbe::Unknown,
+        "precondition: every probe attempt failed"
+    );
+    assert!(
+        !info.fast_download,
+        "an unknown probe may only plan a single stream"
+    );
+
+    let progress = payload.len() as u64 / 2;
+    let fd = seed_partial(&url, &dir, &final_path, &info, "v1", &payload, progress).await;
+    let before = std::fs::read(&fd).expect("read seeded .fd");
+
+    let (tx, rx) = create_channel();
+    let ready = State::at_path(Url::parse(&url).unwrap(), fd.clone(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("an unanswered probe must still resolve a plan");
+    assert!(
+        matches!(
+            &ready.outcome,
+            ResumeOutcome::Mismatch(StateError::RangeProbeUnknown)
+        ),
+        "an unanswered probe must surface as its own mismatch, got {:?}",
+        ready.outcome
+    );
+
+    let ctx = Ctx::new();
+    let drain = tokio::spawn(run_to_end(rx));
+    let _handle = ready.start(StartMode::Auto, tx, &ctx);
+    assert_eq!(
+        drain.await.unwrap(),
+        TerminationReason::Failed,
+        "the default policy must refuse rather than replace a resumable state"
+    );
+    assert_eq!(
+        std::fs::read(&fd).expect("read .fd after the refused start"),
+        before,
+        "the .fd must be byte-for-byte unchanged"
+    );
+}
+
+/// The same unanswered probe, with a policy that says "download anyway": the
+/// whole file arrives as a single stream and the recorded progress is replaced.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_probe_unknown_policy_can_still_download_single_stream() {
+    use fast_down_api::{Recovery, StartPolicy};
+
+    let payload: Vec<u8> = (0..4096usize).map(|i| (i % 251) as u8).collect();
+    let (_server, url) = start_server_failing_probe(payload.clone(), "v1").await;
+    let dir = temp_dir("probe_unknown_fresh");
+    let (final_path, info) = probe(&url, &dir).await;
+    let fd = seed_partial(&url, &dir, &final_path, &info, "v1", &payload, 1024).await;
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::at_path(Url::parse(&url).unwrap(), fd.clone(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    let policy = StartPolicy {
+        probe_unknown: Recovery::Fresh,
+        ..StartPolicy::auto()
+    };
+    let out_path = ready.final_path.clone();
+    let drain = tokio::spawn(run_to_end(rx));
+    let _handle = ready.start(policy, tx, &ctx);
+    assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
+    assert_eq!(
+        tokio::fs::read(&out_path).await.expect("read final file"),
+        payload,
+        "the whole file must come from the remote"
+    );
+    assert!(
+        !fd.exists(),
+        "a completed run must remove the state it replaced"
+    );
+}
+
+/// `StartMode::Forced` keeps the "try anyway" spirit for a mismatched identity,
+/// but an unanswered range probe is not something it can force: the plan stays on
+/// the single-stream path, which starts from byte zero. So the preset re-downloads
+/// the whole file instead of announcing a resume it cannot perform, and the run
+/// completes with the right bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forced_policy_redownloads_when_the_probe_is_unknown() {
+    let payload: Vec<u8> = (0..4096usize).map(|i| (i % 251) as u8).collect();
+    let (_server, url) = start_server_failing_probe(payload.clone(), "v1").await;
+    let dir = temp_dir("probe_unknown_forced");
+    let (final_path, info) = probe(&url, &dir).await;
+    let fd = seed_partial(&url, &dir, &final_path, &info, "v1", &payload, 1024).await;
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::at_path(Url::parse(&url).unwrap(), fd.clone(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    let out_path = ready.final_path.clone();
+
+    let drain = tokio::spawn(run_to_end(rx));
+    let _handle = ready.start(StartMode::Forced, tx, &ctx);
+    assert_eq!(
+        drain.await.unwrap(),
+        TerminationReason::Completed,
+        "the forced run must complete, not refuse, when the probe is unanswered"
+    );
+    assert_eq!(
+        tokio::fs::read(&out_path).await.expect("read final file"),
+        payload,
+        "the fallback must produce the right bytes"
+    );
+    assert!(!fd.exists(), "a completed run removes its state");
+}
+
+/// With no recorded state there is nothing to protect, so an unanswered probe
+/// simply keeps the run single-stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_range_probe_still_downloads_without_state() {
+    let payload: Vec<u8> = (0..4096usize).map(|i| (i % 251) as u8).collect();
+    let (_server, url) = start_server_failing_probe(payload.clone(), "v1").await;
+    let dir = temp_dir("probe_unknown_nostate");
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    assert!(
+        matches!(&ready.outcome, ResumeOutcome::Fresh),
+        "nothing to resume means a fresh plan, got {:?}",
+        ready.outcome
+    );
+    let out_path = ready.final_path.clone();
+    let drain = tokio::spawn(run_to_end(rx));
+    let _handle = ready.start(StartMode::Auto, tx, &ctx);
+    assert_eq!(drain.await.unwrap(), TerminationReason::Completed);
+    assert_eq!(
+        tokio::fs::read(&out_path).await.expect("read final file"),
+        payload
+    );
+}
+
+/// A probe answered with an ordinary `200` and no `Content-Range` is the server
+/// saying it does not serve ranges. Unlike an unanswered probe, that is a
+/// definite answer, so an existing `.fd` is a `NotResumable` mismatch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_definite_no_ranges_answer_reports_not_resumable() {
+    let payload: Vec<u8> = (0..4096usize).map(|i| (i % 251) as u8).collect();
+    let (_server, url) = start_server(payload.clone(), "v1", false).await;
+    let dir = temp_dir("probe_unsupported");
+    let (final_path, info) = probe(&url, &dir).await;
+    assert_eq!(
+        info.range_probe,
+        fast_down::RangeProbe::Unsupported,
+        "precondition: the server answered without Content-Range"
+    );
+
+    let progress = payload.len() as u64 / 2;
+    let fd = seed_partial(&url, &dir, &final_path, &info, "v1", &payload, progress).await;
+
+    let (tx, _rx) = create_channel();
+    let ready = State::at_path(Url::parse(&url).unwrap(), fd, make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("a definite answer must resolve the plan");
+    match ready.outcome {
+        ResumeOutcome::Mismatch(StateError::NotResumable) => {}
+        other => panic!("expected Mismatch(NotResumable), got {other:?}"),
+    }
+}
+
 /// A server whose responses set a session cookie and whose *ranged* responses
 /// require it back, so probe traffic and download traffic are split the way a
 /// real session splits them.
@@ -1606,6 +1821,7 @@ async fn start_server_with_session(
             throttle: None,
             stall: false,
             session: Some(session),
+            fail_ranges: false,
         })),
         ranged_requests: Arc::new(AtomicU64::new(0)),
     };

@@ -6,7 +6,7 @@
 //! the [`crate::FileId`] used for resumable downloads.
 
 use crate::{
-    UrlInfo,
+    RangeProbe, UrlInfo,
     http::{
         ContentDisposition, ContentRange, GetResponse, HttpClient, HttpError, HttpHeaders,
         HttpRequestBuilder, HttpResponse, content_encoding,
@@ -122,24 +122,32 @@ async fn prefetch_within<Client: HttpClient>(
     url: Url,
     options: PrefetchOptions,
 ) -> PrefetchResult<Client> {
-    let (result_no_range, range) = tokio::join!(
+    let (result_no_range, probe) = tokio::join!(
         prefetch_no_range(client, url.clone(), options.metadata_timeout),
         is_support_range(client, url, options)
     );
     let mut res = result_no_range?;
-    if let Some(range) = range {
-        res.0.supports_range = true;
-        // A chunked metadata response declares no length, so the only size on
-        // offer is the one the probe's `Content-Range` names. Without it the
-        // fast path would stay closed even though the server honours ranges.
-        if res.0.size == 0
-            && let Some(complete) = range.complete_length()
-        {
-            res.0.size = complete;
+    match probe {
+        ProbeAnswer::Supported(range) => {
+            res.0.range_probe = RangeProbe::Supported;
+            // A chunked metadata response declares no length, so the only size on
+            // offer is the one the probe's `Content-Range` names. Without it the
+            // fast path would stay closed even though the server honours ranges.
+            if res.0.size == 0
+                && let Some(complete) = range.complete_length()
+            {
+                res.0.size = complete;
+            }
+            if res.0.size != 0 {
+                res.0.fast_download = true;
+            }
         }
-        if res.0.size != 0 {
-            res.0.fast_download = true;
-        }
+        // An answered request without a usable `Content-Range` is the server
+        // saying "no ranges", which is a valid single-stream outcome.
+        ProbeAnswer::Unsupported => res.0.range_probe = RangeProbe::Unsupported,
+        // No attempt produced an answer: range support is unknown, and callers
+        // must not treat that as the server refusing ranges.
+        ProbeAnswer::Unknown => res.0.range_probe = RangeProbe::Unknown,
     }
     Ok(res)
 }
@@ -181,7 +189,7 @@ async fn prefetch_no_range<Client: HttpClient>(
             final_url: final_url.clone(),
             raw_name: get_filename(headers, final_url),
             size,
-            supports_range: false,
+            range_probe: RangeProbe::Unknown,
             fast_download: false,
             file_id: FileId::new(
                 headers.get("etag").ok().as_deref(),
@@ -191,6 +199,17 @@ async fn prefetch_no_range<Client: HttpClient>(
         },
         resp,
     ))
+}
+
+/// What the ranged probe found out.
+enum ProbeAnswer {
+    /// The server answered with a usable `Content-Range`.
+    Supported(ContentRange),
+    /// The server answered, but without a usable `Content-Range`: it does not
+    /// serve ranges.
+    Unsupported,
+    /// Every attempt failed without an answer, so range support is unknown.
+    Unknown,
 }
 
 /// Whether the server honours a `bytes=0-0` range request, returning the
@@ -203,7 +222,9 @@ async fn prefetch_no_range<Client: HttpClient>(
 /// failure is never folded into the "no ranges" result: the cheap probe is
 /// retried up to `options.probe_attempts` times, mirroring the retries the whole
 /// prefetch already gets a layer up, and only a probe that keeps failing for
-/// every attempt falls back to the conservative single-stream download.
+/// every attempt reports [`ProbeAnswer::Unknown`] instead: the caller learns the
+/// probe never answered, so it can refuse to replace state that may still be
+/// resumable.
 ///
 /// The parsed value is returned rather than a bare `true` because the probe's
 /// `Content-Range` is also where a chunked metadata response's size comes from.
@@ -217,7 +238,7 @@ async fn is_support_range<Client: HttpClient>(
     client: &Client,
     url: Url,
     options: PrefetchOptions,
-) -> Option<ContentRange> {
+) -> ProbeAnswer {
     let mut attempt = 0;
     while attempt < options.probe_attempts {
         attempt += 1;
@@ -232,15 +253,23 @@ async fn is_support_range<Client: HttpClient>(
             tokio::time::timeout(options.probe_timeout, request).await
         };
         match probe {
-            Ok(Ok(resp)) => return zero_range_answer(resp.headers()),
+            Ok(Ok(resp)) => {
+                return zero_range_answer(resp.headers())
+                    .map_or(ProbeAnswer::Unsupported, ProbeAnswer::Supported);
+            }
             // Retries exhausted: the caller keeps the download alive as a
-            // single stream instead of failing on an advisory probe.
-            Ok(Err(_)) | Err(_) if attempt >= options.probe_attempts => return None,
+            // single stream instead of failing on an advisory probe, but the plan
+            // is told the probe never answered.
+            Ok(Err(_)) | Err(_) if attempt >= options.probe_attempts => {
+                return ProbeAnswer::Unknown;
+            }
             Ok(Err(_)) | Err(_) => tokio::time::sleep(options.probe_gap).await,
         }
     }
-    // `probe_attempts == 0`: the caller opted out of the probe entirely.
-    None
+    // `probe_attempts == 0`: the caller opted out of the probe entirely. That is
+    // a configuration choice, not an unanswered probe, so it must not become
+    // `Unknown` (which would stop every plan that has state to protect).
+    ProbeAnswer::Unsupported
 }
 
 /// The `bytes 0-0/<size>` value a probe response carries, if any.
@@ -529,9 +558,10 @@ mod tests {
             2,
             "a failed probe must be retried once before it counts as an answer"
         );
-        assert!(
-            info.supports_range,
-            "the successful retry must still advertise range support"
+        assert_eq!(
+            info.range_probe,
+            RangeProbe::Supported,
+            "an answered probe must be recorded as a definite answer"
         );
         assert!(
             info.fast_download,
@@ -550,8 +580,36 @@ mod tests {
         let (info, _resp) = prefetch_within(&client, url, options()).await.unwrap();
 
         assert_eq!(client.probes(), 1, "an answer must not be retried");
-        assert!(!info.supports_range);
         assert!(!info.fast_download);
+        assert_eq!(
+            info.range_probe,
+            RangeProbe::Unsupported,
+            "an answered request without Content-Range is a definite `no ranges`"
+        );
+    }
+
+    /// `probe_attempts == 0` is the caller turning the probe off, not a probe
+    /// that failed. Reporting it as `Unknown` would make every plan with state
+    /// wait for an answer that will never come.
+    #[tokio::test]
+    async fn opting_out_of_the_probe_is_not_an_unknown_answer() {
+        let client = ProbeFixture::new(usize::MAX, true);
+        let url = Url::parse("http://example.com/file.bin").unwrap();
+
+        let (info, _resp) = prefetch_within(
+            &client,
+            url,
+            PrefetchOptions::new(PROBE_TIMEOUT, METADATA_TIMEOUT, 0, PROBE_GAP),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.probes(), 0, "the probe must not run at all");
+        assert_eq!(
+            info.range_probe,
+            RangeProbe::Unsupported,
+            "an opted-out probe answered nothing, so it is not an unknown answer"
+        );
     }
 
     /// `Accept-Encoding: identity` only negotiates: a server may code the body
@@ -586,7 +644,7 @@ mod tests {
 
         let (info, _resp) = prefetch_within(&client, url, options()).await.unwrap();
 
-        assert!(info.supports_range, "the probe answered `bytes 0-0/1024`");
+        assert_eq!(info.range_probe, RangeProbe::Supported);
         assert_eq!(
             info.size, 1024,
             "the complete length must come from the probe's Content-Range"
@@ -608,8 +666,8 @@ mod tests {
         let (info, _resp) = prefetch_within(&client, url, options()).await.unwrap();
 
         assert_eq!(client.probes(), 1, "an answer must not be retried");
-        assert!(!info.supports_range);
         assert!(!info.fast_download);
+        assert_eq!(info.range_probe, RangeProbe::Unsupported);
         assert_eq!(
             info.size, 0,
             "a server that says no ranges declares no size"
@@ -631,8 +689,12 @@ mod tests {
             PROBE_ATTEMPTS,
             "the probe must be attempted exactly probe_attempts times"
         );
-        assert!(!info.supports_range);
         assert!(!info.fast_download);
+        assert_eq!(
+            info.range_probe,
+            RangeProbe::Unknown,
+            "a probe that never answered must not be reported as `no ranges`"
+        );
     }
 
     /// Answers the metadata request from memory and lets the ranged probe reach a
@@ -754,11 +816,12 @@ mod tests {
         .expect("a hanging probe must not fail a prefetch whose metadata arrived");
         let elapsed = started.elapsed();
 
-        assert!(
-            !info.supports_range,
-            "a probe that never answered cannot claim range support"
-        );
         assert!(!info.fast_download, "the fast path needs a range answer");
+        assert_eq!(
+            info.range_probe,
+            RangeProbe::Unknown,
+            "a timed-out probe leaves range support unknown"
+        );
         assert_eq!(
             info.size, 1024,
             "the metadata request still supplies the size"

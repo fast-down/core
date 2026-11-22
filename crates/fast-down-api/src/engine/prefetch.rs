@@ -255,8 +255,9 @@ mod tests {
             Some("etag-test"),
             "etag must be read from the response"
         );
-        assert!(
-            info.supports_range,
+        assert_eq!(
+            info.range_probe,
+            fast_down::RangeProbe::Supported,
             "a 206 content-range response must advertise range support"
         );
         assert!(

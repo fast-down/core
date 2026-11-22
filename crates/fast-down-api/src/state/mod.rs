@@ -97,7 +97,10 @@ impl State {
     /// exists but cannot be read is reported rather than silently replaced. A
     /// `.fd` path that collides with its `.part` or with the output — for
     /// example a pinned `out.part`, or a `filename` equal to the `.fd`'s name —
-    /// is refused as [`PlanError::BadStatePath`].
+    /// is refused as [`PlanError::BadStatePath`]. An unanswered range probe in
+    /// front of an existing `.fd` becomes a [`ResumeOutcome::Mismatch`] carrying
+    /// [`StateError::RangeProbeUnknown`], which the start policy decides on:
+    /// nothing is replaced unless the caller asks for it.
     ///
     /// # Events
     /// `build` publishes on `tx` as it resolves the remote: an
@@ -346,15 +349,6 @@ async fn classify(
     probe_fd_path: &Path,
     fresh_record: impl Fn() -> Record,
 ) -> (Record, ResumeOutcome) {
-    // A `.fd` exists, but the server cannot serve ranges: resume is impossible
-    // whatever the `.part` looks like.
-    if !info.fast_download {
-        return (
-            fresh_record(),
-            ResumeOutcome::Mismatch(StateError::NotResumable),
-        );
-    }
-
     let tmp = crate::utils::part_path(probe_fd_path);
     let validation = old.validate(info);
     let part = old.part_state(&tmp).await;
@@ -367,6 +361,27 @@ async fn classify(
         old.refresh_identity(info);
     }
     old.merge_config(partial);
+
+    // The probe never answered, so whether this server can resume is unknown: it
+    // may well serve ranges. Report that instead of reading it as "no ranges",
+    // and keep the recorded progress — a policy that forces the resume needs it.
+    match info.range_probe {
+        fast_down::RangeProbe::Supported | fast_down::RangeProbe::Unsupported => {}
+        // `Unknown`, and any state a newer `fast-down` adds: range support is not
+        // established, so the recorded state may still be resumable.
+        _ => {
+            return (old, ResumeOutcome::Mismatch(StateError::RangeProbeUnknown));
+        }
+    }
+
+    // A `.fd` exists, but the server cannot serve ranges: resume is impossible
+    // whatever the `.part` looks like.
+    if !info.fast_download {
+        return (
+            fresh_record(),
+            ResumeOutcome::Mismatch(StateError::NotResumable),
+        );
+    }
 
     match (validation, part) {
         // A `.part` shorter than the recorded progress is unsafe to continue

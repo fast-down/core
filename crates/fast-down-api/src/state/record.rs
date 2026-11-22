@@ -282,7 +282,7 @@ mod tests {
         UrlInfo {
             size,
             raw_name: "video.mp4".to_string(),
-            supports_range: true,
+            range_probe: fast_down::RangeProbe::Supported,
             fast_download: true,
             final_url: url(),
             file_id: FileId::new(Some(etag), None),

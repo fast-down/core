@@ -388,7 +388,7 @@ mod tests {
         );
         assert_eq!(url_info.size, 1024);
         assert_eq!(url_info.raw_name, "你好.txt");
-        assert!(url_info.supports_range);
+        assert_eq!(url_info.range_probe, crate::RangeProbe::Supported);
     }
 
     #[tokio::test]

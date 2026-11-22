@@ -28,8 +28,16 @@ pub struct UrlInfo {
         doc = "Enable the `sanitize-filename` feature to use the `filename()` method for sanitization."
     )]
     pub raw_name: String,
-    /// Whether the server supports HTTP range requests (used to split the download into concurrent chunks).
-    pub supports_range: bool,
+    /// What the range probe learned, including the case where it could not
+    /// determine range support at all.
+    ///
+    /// A failed probe is not a "no ranges" answer: a server that ignores ranges
+    /// answers the request without a `Content-Range`, while a probe that errors
+    /// or times out tells us nothing. Callers that would overwrite resumable
+    /// state must therefore treat [`RangeProbe::Unknown`] differently from
+    /// [`RangeProbe::Unsupported`].
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub range_probe: RangeProbe,
     /// Whether the resource can be downloaded with the optimized fast (multi-chunk) path.
     pub fast_download: bool,
     /// The URL the response was actually served from, after any redirects.
@@ -38,6 +46,26 @@ pub struct UrlInfo {
     pub file_id: FileId,
     /// The `Content-Type` header value, if the server provided one.
     pub content_type: Option<String>,
+}
+
+/// The outcome of the `bytes=0-0` range probe.
+///
+/// The probe only decides whether the multi-chunk fast path and resuming are
+/// possible, so a failed probe must not be mistaken for a server that refuses
+/// ranges: the former says nothing about the resource, the latter is an answer.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RangeProbe {
+    /// The server answered the ranged request with a `Content-Range`.
+    Supported,
+    /// The server answered the ranged request without a usable `Content-Range`:
+    /// it does not serve ranges.
+    Unsupported,
+    /// No attempt produced an answer (transport error, non-success status or
+    /// timeout), so range support is unknown.
+    #[default]
+    Unknown,
 }
 
 #[cfg(feature = "sanitize-filename")]
@@ -145,7 +173,7 @@ mod tests {
         let info = UrlInfo {
             size: 10,
             raw_name: "a/b:c*?.txt".to_string(),
-            supports_range: true,
+            range_probe: RangeProbe::Supported,
             fast_download: true,
             final_url: Url::parse("http://example.com/x").unwrap(),
             file_id: FileId::default(),
@@ -169,7 +197,7 @@ mod tests {
         let info = UrlInfo {
             size: 0,
             raw_name: format!("{}.mp4", "中文文件名".repeat(100)),
-            supports_range: false,
+            range_probe: RangeProbe::Unsupported,
             fast_download: false,
             final_url: Url::parse("http://example.com/x").unwrap(),
             file_id: FileId::default(),
@@ -199,7 +227,7 @@ mod tests {
         let info = UrlInfo {
             size: 0,
             raw_name: String::new(),
-            supports_range: false,
+            range_probe: RangeProbe::Unsupported,
             fast_download: false,
             final_url: Url::parse("http://example.com/x").unwrap(),
             file_id: FileId::default(),

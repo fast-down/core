@@ -53,6 +53,17 @@ pub enum StateError {
     /// The server does not support ranged requests, so resume is impossible.
     #[error("server does not support resumable (range) requests")]
     NotResumable,
+    /// The range probe never answered, so whether the server can resume is
+    /// unknown.
+    ///
+    /// This is not [`StateError::NotResumable`]: the server may well serve
+    /// ranges and the probe merely failed. Starting over would replace state
+    /// that is probably still resumable, so what happens is the caller's policy
+    /// ([`StartPolicy::probe_unknown`](crate::StartPolicy)).
+    #[error(
+        "the server's range support could not be probed, so the recorded state may still be resumable"
+    )]
+    RangeProbeUnknown,
 }
 
 impl StateError {

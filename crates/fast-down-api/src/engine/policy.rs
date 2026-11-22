@@ -11,6 +11,11 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartMode {
     /// Resume when possible, otherwise download the whole file.
+    ///
+    /// An unanswered range probe is the one exception: the state may still be
+    /// resumable, so resuming is refused instead of replaced. Use
+    /// [`StartPolicy`] with `probe_unknown: Recovery::Fresh` to download
+    /// anyway.
     Auto,
     /// Resume only: refuse (via [`Event::ResumeError`](crate::Event::ResumeError))
     /// when the recorded state exists but no longer describes the remote.
@@ -19,7 +24,12 @@ pub enum StartMode {
     Fresh,
     /// Continue from a mismatched state when the size still matches.
     ///
-    /// Soundness of a forced resume is decided by
+    /// An unanswered range probe is not forced: the run stays on the single-stream
+    /// path, which always starts from byte zero, so the preset re-downloads the
+    /// file ([`Recovery::Fresh`](crate::Recovery::Fresh)) instead of
+    /// announcing a resume it cannot perform.
+    ///
+    /// Soundness of a forced identity change is decided by
     /// [`StateError::force_safe`](crate::StateError::force_safe); when the
     /// mismatch is not force-safe, `start` reports the failure instead of
     /// continuing.
@@ -87,6 +97,14 @@ pub struct StartPolicy {
     pub size_changed: Recovery,
     /// The server does not support ranged requests.
     pub not_resumable: Recovery,
+    /// The range probe never answered, so whether the remote can resume is
+    /// unknown.
+    ///
+    /// Only [`Recovery`] is offered: a plan the probe could not classify stays on
+    /// the single-stream path, which starts from byte zero, so there is nothing to
+    /// force — the choice is between keeping the state and refusing the run, and
+    /// replacing it with a whole-file download.
+    pub probe_unknown: Recovery,
     /// The remote's identity headers changed but the size still matches.
     pub identity_changed: IdentityRecovery,
 }
@@ -99,6 +117,11 @@ impl Default for StartPolicy {
 
 impl StartPolicy {
     /// Resume when possible, otherwise download the whole file.
+    ///
+    /// The one mismatch this does not resolve is an unanswered range probe: the
+    /// state is probably still resumable, and a whole-file download would
+    /// replace it. Set [`probe_unknown`](Self::probe_unknown) to
+    /// [`Recovery::Fresh`] to download anyway.
     #[must_use]
     pub const fn auto() -> Self {
         Self {
@@ -108,6 +131,7 @@ impl StartPolicy {
             unreadable: Recovery::Fresh,
             size_changed: Recovery::Fresh,
             not_resumable: Recovery::Fresh,
+            probe_unknown: Recovery::Fail,
             identity_changed: IdentityRecovery::Fresh,
         }
     }
@@ -124,6 +148,7 @@ impl StartPolicy {
             unreadable: Recovery::Fail,
             size_changed: Recovery::Fail,
             not_resumable: Recovery::Fail,
+            probe_unknown: Recovery::Fail,
             identity_changed: IdentityRecovery::Fail,
         }
     }
@@ -138,6 +163,7 @@ impl StartPolicy {
             unreadable: Recovery::Fresh,
             size_changed: Recovery::Fresh,
             not_resumable: Recovery::Fresh,
+            probe_unknown: Recovery::Fresh,
             identity_changed: IdentityRecovery::Fresh,
         }
     }
@@ -152,6 +178,7 @@ impl StartPolicy {
             unreadable: Recovery::Fail,
             size_changed: Recovery::Fail,
             not_resumable: Recovery::Fail,
+            probe_unknown: Recovery::Fresh,
             identity_changed: IdentityRecovery::Force,
         }
     }

@@ -70,6 +70,13 @@ const fn decide(policy: StartPolicy, outcome: &ResumeOutcome) -> Fate {
                 Recovery::Fresh => Fate::Fresh,
                 Recovery::Fail => Fate::Fail,
             },
+            // The probe never answered, so the state may still be resumable. The
+            // default keeps it and refuses; `Fresh` replaces it with a whole-file
+            // download.
+            StateError::RangeProbeUnknown => match policy.probe_unknown {
+                Recovery::Fresh => Fate::Fresh,
+                Recovery::Fail => Fate::Fail,
+            },
             // The size still matches, so the recorded ranges still describe
             // these bytes whatever the identity headers say.
             StateError::FileChanged { .. } if error.force_safe() => match policy.identity_changed {
@@ -936,7 +943,7 @@ mod tests {
         let info = UrlInfo {
             size: 1,
             raw_name: "out.bin".to_string(),
-            supports_range: true,
+            range_probe: fast_down::RangeProbe::Supported,
             fast_download: true,
             final_url: url::Url::parse("https://example.com/out.bin").unwrap(),
             file_id: fast_down::FileId::default(),

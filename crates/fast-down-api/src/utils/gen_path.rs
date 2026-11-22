@@ -90,7 +90,7 @@ mod tests {
         UrlInfo {
             size: 100,
             raw_name: raw_name.to_string(),
-            supports_range: true,
+            range_probe: fast_down::RangeProbe::Supported,
             fast_download: true,
             final_url: Url::parse("https://example.com/x").unwrap(),
             file_id: fast_down::FileId::new(None, None),
