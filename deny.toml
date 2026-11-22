@@ -17,14 +17,14 @@ allow = [
   "BSD-3-Clause",
   "Unicode-3.0",
   "ISC",
-  "OpenSSL",
   "CDLA-Permissive-2.0"
 ]
 confidence-threshold = 1.0
 
 [bans]
-# We don't maintain a fixed Cargo.lock so enforcing
-# `multiple-versions = "deny"` is impractical.
+# The workspace does commit `Cargo.lock` (CI builds with `--locked`), but
+# duplicate transitive versions are common and not automatically a problem,
+# so they are reviewed in the report instead of denied.
 multiple-versions = "allow"
 wildcards = "deny"
 
