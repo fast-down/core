@@ -10,7 +10,7 @@
 use super::{
     build_pipeline,
     claim::{self, Claim},
-    open_create, paths,
+    open_create, open_create_new, paths,
     policy::{IdentityRecovery, Recovery, StartPolicy},
     stats::StatsTracker,
 };
@@ -538,12 +538,29 @@ async fn resolve_target(
         // is reused even when its `.part` is missing.
         let claim = claim_or_report(&fd_path, tx)?;
         let tmp = crate::utils::part_path(&fd_path);
-        if let Err(e) = open_create().open(&tmp).await {
-            let _ = tx.send(Event::BuildPusherError(e));
-            return Err(TerminationReason::Failed);
-        }
+        // A pinned location is only where the state would live, not necessarily
+        // an existing pair. Creating the `.part` exclusively answers "is this
+        // pair new?" in one call instead of stat-then-open, so nothing can add a
+        // file in between; the `.fd` half of that question is cheaper to read
+        // than to create, and the claim above already keeps another run of this
+        // library out.
+        let part_is_new = match open_create_new().open(&tmp).await {
+            Ok(_) => true,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                if let Err(e) = open_create().open(&tmp).await {
+                    let _ = tx.send(Event::BuildPusherError(e));
+                    return Err(TerminationReason::Failed);
+                }
+                false
+            }
+            Err(e) => {
+                let _ = tx.send(Event::BuildPusherError(e));
+                return Err(TerminationReason::Failed);
+            }
+        };
+        let fresh = part_is_new && tokio::fs::metadata(&fd_path).await.is_err();
         record = fresh_over(&record, origin_config, info);
-        (claim, fd_path, tmp, false)
+        (claim, fd_path, tmp, fresh)
     } else {
         let (claim, fd_path, tmp_path) = paths::claim_pair(final_path, tx).await?;
         (claim, fd_path, tmp_path, true)
@@ -833,10 +850,11 @@ async fn finalize(
 
 /// Drop a pair this run created when it holds no recorded progress.
 ///
-/// Both conditions matter: `fresh` keeps a resumed or pinned pair (never ours to
-/// delete) while the progress check keeps a cancelled mid-download pair, whose
-/// recorded bytes are still worth resuming. The removal lives here rather than
-/// in a standalone helper so there is no unchecked way to delete a pair.
+/// Both conditions matter: `fresh` keeps a pair this run did not create (a
+/// resumed pair, or a pinned location whose files were already on disk), while
+/// the progress check keeps a cancelled mid-download pair, whose recorded bytes
+/// are still worth resuming. The removal lives here rather than in a standalone
+/// helper so there is no unchecked way to delete a pair.
 async fn discard_unused_pair(fresh: bool, record: &Record, fd_path: &Path, tmp_path: &Path) {
     if fresh && record.progress().is_empty() {
         let _ = fs::remove_file(tmp_path).await;

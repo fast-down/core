@@ -960,6 +960,83 @@ async fn cancel_before_provisioning_reports_cancelled_without_files() {
     );
 }
 
+/// A `.fd` that records no progress, next to a zero-byte `.part`, is the
+/// leftover of a run that stopped before its first byte. There is nothing to
+/// continue, so it must resolve as fresh instead of a 0% resumable task.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_zero_byte_pair_is_not_resumable() {
+    let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 223) as u8).collect();
+    let (_server, url) = start_server(payload, "v1", true).await;
+    let dir = temp_dir("zero_pair");
+    let (final_path, info) = probe(&url, &dir).await;
+    let fd = final_path.with_added_extension("fd");
+
+    let mut record = Record::new(Url::parse(&url).unwrap(), make_config(&dir));
+    record.size = info.size;
+    record.etag = info.file_id.etag.clone();
+    record.last_modified = info.file_id.last_modified.clone();
+    record.store(&fd).await.expect("seed .fd");
+    std::fs::write(fd.with_extension("part"), b"").expect("seed empty .part");
+
+    let (tx, _rx) = create_channel();
+    let ready = State::new(Url::parse(&url).unwrap(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    assert!(
+        matches!(&ready.outcome, ResumeOutcome::Fresh),
+        "an empty pair has nothing to continue, got {:?}",
+        ready.outcome
+    );
+    assert!(
+        ready.progress().is_empty(),
+        "a fresh start must carry no recorded progress: {:?}",
+        ready.progress()
+    );
+}
+
+/// A pinned `.fd` that does not exist yet is a pair this run creates, so a
+/// cancel before the first byte must remove it: the caller pinned a location,
+/// not a file it already owned.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_pinned_fresh_start_leaves_no_pair() {
+    let payload: Vec<u8> = (0..FILE_SIZE).map(|i| (i % 227) as u8).collect();
+    // The body never produces a byte, so the cancel cannot lose a race against
+    // the transfer's first write.
+    let (_server, url) = start_server_stalled(payload, "v1", true).await;
+    let dir = temp_dir("pinned_fresh_cancel");
+    let fd = dir.join("out.bin").with_added_extension("fd");
+    let part = fd.with_extension("part");
+
+    let (tx, rx) = create_channel();
+    let ctx = Ctx::new();
+    let ready = State::at_path(Url::parse(&url).unwrap(), fd.clone(), make_config(&dir))
+        .build(&tx)
+        .await
+        .expect("build");
+    assert!(
+        matches!(&ready.outcome, ResumeOutcome::Fresh),
+        "a pinned but absent .fd starts fresh, got {:?}",
+        ready.outcome
+    );
+
+    let handle = ready.start(StartMode::Auto, tx, &ctx);
+    let mut started = false;
+    while let Some(event) = next_event(&rx).await {
+        if matches!(event, Event::Start { .. }) {
+            started = true;
+            break;
+        }
+    }
+    assert!(started, "the run must reach Start");
+    ctx.cancel();
+    while next_event(&rx).await.is_some() {}
+    assert_eq!(handle.await, TerminationReason::Cancelled);
+
+    assert!(!fd.exists(), "the .fd this run created must be removed");
+    assert!(!part.exists(), "the .part this run created must be removed");
+}
+
 /// A second run pinned to the same `.fd` while the first is still running must be
 /// refused instead of interleaving writes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

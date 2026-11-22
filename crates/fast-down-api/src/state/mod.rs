@@ -75,7 +75,9 @@ impl State {
     /// prefetch response for `start` to reuse, and reports what starting would
     /// do:
     ///
-    /// * [`ResumeOutcome::Resumable`] — a valid `.fd` with a usable `.part`.
+    /// * [`ResumeOutcome::Resumable`] — a valid `.fd` with a usable `.part`. A
+    ///   pair that holds no bytes and records no progress is *not* resumable:
+    ///   there is nothing to continue, so it is reported as fresh.
     /// * [`ResumeOutcome::Mismatch`] — state exists but cannot be continued.
     /// * [`ResumeOutcome::Fresh`] — nothing to continue from; `start` reuses the
     ///   known `.fd` location, or claims a free `.fd`/`.part` pair when there is
@@ -398,11 +400,10 @@ async fn classify(
             }),
         ),
         (Err(e), _) => (old, ResumeOutcome::Mismatch(e)),
+        // Nothing to continue: the `.part` is gone, or it exists but holds no
+        // bytes with no progress recorded. Start a fresh download over the same
+        // location instead of a 0% resume.
+        (Ok(()), PartState::Empty | PartState::Missing) => (fresh_record(), ResumeOutcome::Fresh),
         (Ok(()), PartState::Ready) => (old, ResumeOutcome::Resumable),
-        // The `.part` is gone: nothing safe to continue, but the `.fd` still
-        // names the pair and remembers its progress. Keep that location so a
-        // later start reuses it instead of orphaning it under a new `name (1)`
-        // stem.
-        (Ok(()), PartState::Missing) => (fresh_record(), ResumeOutcome::Fresh),
     }
 }

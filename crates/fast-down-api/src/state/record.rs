@@ -124,6 +124,11 @@ impl Record {
     /// [`PartState::Missing`] — an unreadable `.part` cannot be verified, so
     /// starting clean is the only safe choice, and a genuinely unopenable path
     /// surfaces later as a sink error.
+    ///
+    /// [`PartState::Empty`] is the leftover of a run that stopped before its first
+    /// byte: the file exists, but it holds no bytes and the record claims none.
+    /// It is not [`PartState::Ready`] because there is nothing to continue — a
+    /// resume over it would keep a 0% task alive.
     pub async fn part_state(&self, tmp_path: &Path) -> PartState {
         let Ok(meta) = tokio::fs::metadata(tmp_path).await else {
             return PartState::Missing;
@@ -135,6 +140,8 @@ impl Record {
         let recorded = self.recorded_end();
         if actual < recorded {
             PartState::Short { actual, recorded }
+        } else if actual == 0 {
+            PartState::Empty
         } else {
             PartState::Ready
         }
@@ -266,6 +273,10 @@ pub enum PartState {
     },
     /// The file exists and is at least as long as the recorded progress.
     Ready,
+    /// The file exists but holds no bytes, and the record claims none either: a
+    /// run that stopped before writing its first byte left it behind. There is
+    /// nothing to continue.
+    Empty,
 }
 
 #[cfg(test)]
@@ -523,6 +534,17 @@ mod tests {
         record.config.downloaded_chunk = Some(vec![0..50]);
 
         assert_eq!(record.part_state(&part).await, PartState::Missing);
+
+        // Zero bytes with zero recorded progress is the leftover of a run that
+        // stopped before its first byte, not a resumable pair.
+        tokio::fs::write(&part, Vec::new()).await.unwrap();
+        record.config.downloaded_chunk = None;
+        assert_eq!(
+            record.part_state(&part).await,
+            PartState::Empty,
+            "an empty .part has nothing to continue"
+        );
+        record.config.downloaded_chunk = Some(vec![0..50]);
 
         tokio::fs::write(&part, vec![0u8; 10]).await.unwrap();
         assert_eq!(
