@@ -39,7 +39,6 @@ use portable_atomic::AtomicU128;
 /// `Task` deliberately implements neither `PartialEq` nor `Eq`: equality had two
 /// meanings (same progress cursor, same worker identity) that callers kept
 /// confusing. Ask for one explicitly with `same_cursor` or `same_identity`.
-#[derive(Debug)]
 pub struct Task {
     inner: Arc<TaskInner>,
     /// Set only on the value moved into a worker: dropping it marks that
@@ -47,6 +46,23 @@ pub struct Task {
     /// it exists for its `Drop`.
     #[allow(dead_code, reason = "held only for its Drop impl")]
     keep_alive: Option<AliveGuard>,
+}
+
+/// Renders the cursor as a plain range plus the worker's liveness, which is what
+/// a caller can observe through this handle.
+///
+/// Hand-written rather than derived: the packed `AtomicU128` state is an
+/// implementation detail, and printing it would be both unreadable and a
+/// snapshot taken field-by-field *outside* the atomic (it could show a torn
+/// range that never existed). A derived impl would also demand `Debug` of the
+/// non-`Clone` liveness guard.
+impl fmt::Debug for Task {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Task")
+            .field("range", &self.get())
+            .field("alive", &self.is_alive())
+            .finish()
+    }
 }
 
 /// Non-`Clone` liveness guard for one registered worker.
@@ -75,9 +91,8 @@ struct TaskInner {
     /// Atomic state packing `start` (high 64 bits) and `end` (low 64 bits).
     ///
     /// Private to this module, as is [`TaskInner`] itself: the only way in is
-    /// through [`Task`]'s accessors ([`Task::start`], [`Task::end`],
-    /// [`Task::get`], [`Task::safe_add_start`], ...), which is what keeps the
-    /// packed encoding an implementation detail.
+    /// through [`Task`]'s accessors ([`Task::get`], [`Task::safe_add_start`],
+    /// ...), which is what keeps the packed encoding an implementation detail.
     state: Arc<AtomicU128>,
     /// `true` until the identity's `AliveGuard` is dropped (or forever for an
     /// identity that was never registered, which then liveness-tracks like a
@@ -137,28 +152,40 @@ impl Task {
             keep_alive: None,
         }
     }
-    /// Makes this the registered task value handed to a worker: a fresh
-    /// identity (same progress cursor) whose alive flag is cleared when this
-    /// value is dropped.
+    /// Builds a registered identity around an existing cursor `state`.
     ///
-    /// Only queue registration calls this. The queue keeps its own unarmed
-    /// clone and moves this value into the worker, so the guard marks exactly
-    /// the worker's lifetime rather than the registration's.
-    pub(crate) fn armed(self) -> Self {
+    /// The building block shared by [`new_armed`](Task::new_armed) (which also
+    /// makes a cursor) and [`share_state`](Task::share_state) (which takes its
+    /// peer's): a fresh identity and guard over the same packed state.
+    pub(crate) fn armed_on(state: Arc<AtomicU128>) -> Self {
         let alive = Arc::new(AtomicBool::new(true));
         Self {
             inner: Arc::new(TaskInner {
-                state: self.inner.state.clone(),
+                state,
                 alive: alive.clone(),
             }),
             keep_alive: Some(AliveGuard(alive)),
         }
     }
+    /// Builds an armed task straight from `range`, for a queue refill.
+    ///
+    /// Equivalent to [`new`](Task::new) plus an armed identity, without the
+    /// unarmed intermediate: that intermediate's own `TaskInner` was allocated
+    /// only to be dropped one line later, and every refill runs while the
+    /// queue's lock is held.
+    ///
+    /// # Panics
+    /// Panics when `range.start > range.end`, like [`new`](Task::new).
+    pub(crate) fn new_armed(range: Range<u64>) -> Self {
+        assert!(range.start <= range.end);
+        Self::armed_on(Arc::new(AtomicU128::new(Self::pack(range))))
+    }
     /// Returns `true` while the worker registered against this identity is alive.
     ///
     /// The flag starts `false` for an unregistered identity (every [`Task::new`]
-    /// and every clone of one) and becomes `true` only for a value produced by
-    /// [`armed`](Task::armed); dropping that value clears it again.
+    /// and every clone of one) and becomes `true` only for the value
+    /// [`Executor::execute`](crate::Executor::execute) hands to a worker; dropping
+    /// that value clears it again.
     #[must_use]
     pub(crate) fn is_alive(&self) -> bool {
         self.inner.alive.load(Ordering::Acquire)
@@ -186,7 +213,7 @@ impl Task {
     /// makes forward progress; then returns the slice that was claimed.
     ///
     /// `start` must be a cursor value the caller actually observed via
-    /// `start` or `get`; a `start` that runs *ahead*
+    /// [`get`](Task::get); a `start` that runs *ahead*
     /// of the task's real cursor is rejected, because honouring it would skip
     /// work no worker ever executed. A *stale* `start` is still accepted, but the
     /// returned span then begins at the real cursor and is shorter than `bias` —
@@ -246,17 +273,22 @@ impl Task {
     /// new task and keeping `start..mid` in `self`.
     ///
     /// The split only proceeds when both halves are at least `min_chunk_size`,
-    /// i.e. `remain >= min_chunk_size * 2`. That test runs *inside* the
+    /// i.e. `remain / 2 >= min_chunk_size`. That test runs *inside* the
     /// compare-and-swap loop against the same atomic snapshot the commit
     /// observes, so a concurrent cursor-sharer (`share_state`) advancing `start`
     /// between the call and the commit cannot leak a half smaller than
     /// `min_chunk_size`. When the range is too small to split under
     /// `min_chunk_size`, returns `Ok(None)` without modifying `self`.
     ///
+    /// The threshold is `remain / 2 < min` rather than `remain < min * 2`: the
+    /// latter doubles `min` and saturates for `min > u64::MAX / 2`, which made
+    /// the test vacuous for every `remain` below `u64::MAX` and let a range of
+    /// `u64::MAX` split into halves far below `min`.
+    ///
     /// `min_chunk_size == 0` is refused with the same `Ok(None)`: a zero minimum
     /// makes the size test vacuous, and on an empty range `midpoint` collapses to
     /// `start`, so the split would report success while returning the empty
-    /// `start..start` and leaving `self` unchanged — a public
+    /// `start..start` and leaving `self` unchanged — a
     /// `while task.split_two(0)?.is_some() {}` drain loop would never terminate.
     /// The refusal is unconditional for `0` so that "a reported split always
     /// consumed something" stays a property of the whole API; callers that want to
@@ -264,7 +296,7 @@ impl Task {
     ///
     /// # Errors
     /// 1. Returns [`RangeError`] when `start > end`
-    /// 2. Returns `None` when `min_chunk_size == 0` or `remain < min_chunk_size * 2`,
+    /// 2. Returns `None` when `min_chunk_size == 0` or `remain / 2 < min_chunk_size`,
     ///    without modifying itself
     pub(crate) fn split_two(&self, min_chunk_size: u64) -> Result<Option<Range<u64>>, RangeError> {
         let mut old_state = self.inner.state.load(Ordering::Acquire);
@@ -276,7 +308,7 @@ impl Task {
             if min_chunk_size == 0 {
                 return Ok(None);
             }
-            if range.end - range.start < min_chunk_size.saturating_mul(2) {
+            if (range.end - range.start) / 2 < min_chunk_size {
                 return Ok(None);
             }
             let mid = range.start.midpoint(range.end);
@@ -324,17 +356,6 @@ impl Task {
             }
         }
     }
-    /// Returns the number of [`Task`] references currently sharing this task's
-    /// progress *cursor* (the `state` `Arc<AtomicU128>`).
-    ///
-    /// A speculative twin bumps it (via [`share_state`](Task::share_state)); a
-    /// plain `clone` does not, because it copies the identity rather than adding
-    /// a cursor reference. Only `steal` consults it, to cap how many workers
-    /// share one cursor.
-    #[must_use]
-    pub(crate) fn sharer_count(&self) -> usize {
-        Arc::strong_count(&self.inner.state)
-    }
     /// Returns `true` when both handles share the same progress cursor.
     ///
     /// This is the relation `Task` used to express through `PartialEq`. It is now
@@ -364,7 +385,7 @@ impl Task {
     /// lets the liveness sweep in `set_threads` still track each worker
     /// independently even after sharing.
     pub(crate) fn share_state(&mut self, other: &Self) {
-        *self = Self::from_state(other.inner.state.clone()).armed();
+        *self = Self::armed_on(other.inner.state.clone());
     }
 }
 /// Creates a [`Task`] from a `start..end` range.
@@ -478,7 +499,7 @@ mod tests {
     /// carries no guard of its own.
     #[test]
     fn armed_marks_only_the_value_that_carries_the_guard() {
-        let armed = Task::new(1..10).armed();
+        let armed = Task::new_armed(1..10);
         let observer = armed.clone();
         assert!(armed.is_alive());
         assert!(observer.is_alive(), "a clone shares the identity's flag");
@@ -780,54 +801,17 @@ mod tests {
         assert_eq!(bad.remain(), 0);
     }
 
-    /// `sharer_count` counts strong refs to the *shared cursor*: a speculative
-    /// sharer (`share_state`) bumps it, a plain `clone` does not.
-    #[test]
-    fn task_sharer_count_tracks_cursor_sharers() {
-        let task = Task::new(0..10);
-        assert_eq!(task.sharer_count(), 1);
-
-        // A speculative sharer aliases the same cursor and holds its own strong
-        // ref to it.
-        let mut twin = Task::new(0..0);
-        twin.share_state(&task);
-        assert_eq!(
-            task.sharer_count(),
-            2,
-            "the twin holds a strong ref to the cursor"
-        );
-        assert!(
-            twin.same_cursor(&task),
-            "twins share the cursor but not the identity"
-        );
-        drop(twin);
-        assert_eq!(
-            task.sharer_count(),
-            1,
-            "dropping the twin releases its cursor ref"
-        );
-
-        // A plain `clone` shares the worker identity, not an extra cursor ref, so
-        // it must NOT change `sharer_count`.
-        let _alias = task.clone();
-        assert_eq!(
-            task.sharer_count(),
-            1,
-            "clone shares identity, not a cursor ref"
-        );
-    }
-
     /// `is_alive` follows the worker's own guard, independent of how many twins
     /// share the cursor.
     #[test]
     fn is_alive_tracks_the_guard_not_the_cursor() {
-        let armed = Task::new(0..10).armed();
+        let armed = Task::new_armed(0..10);
         let observer = armed.clone();
         assert!(observer.is_alive());
 
         // A speculative twin carries its own guard, so the victim's death does
         // not flip the twin's flag.
-        let victim = Task::new(0..10).armed();
+        let victim = Task::new_armed(0..10);
         let mut twin = Task::new(0..0);
         twin.share_state(&victim);
         let twin_observer = twin.clone();
@@ -857,5 +841,65 @@ mod tests {
         let hi = task.split_two(1).unwrap().unwrap();
         assert_eq!(hi, (u64::MAX - 2)..u64::MAX);
         assert_eq!(task.get(), (u64::MAX - 3)..(u64::MAX - 2));
+    }
+
+    /// A `min_chunk_size` above half of `u64::MAX` must still be honoured.
+    ///
+    /// The old `remain < min * 2` threshold saturated at `u64::MAX`, making the
+    /// test vacuous: a `u64::MAX` range split into halves far below `min`.
+    #[test]
+    fn split_two_honours_a_min_chunk_size_above_half_the_range() {
+        let big_min = u64::MAX / 2 + 1;
+        let task = Task::new(0..u64::MAX);
+        assert_eq!(task.split_two(big_min), Ok(None));
+        assert_eq!(task.get(), 0..u64::MAX, "a refused split changes nothing");
+
+        // Exactly half is the boundary: both halves are at least `min`.
+        let task = Task::new(0..u64::MAX);
+        let hi = task.split_two(u64::MAX / 2).unwrap().unwrap();
+        assert_eq!(hi.start, u64::MAX / 2);
+        assert!(hi.end - hi.start >= u64::MAX / 2);
+        assert!(task.remain() >= u64::MAX / 2);
+    }
+
+    /// `new_armed` builds the cursor and the armed identity in one step, without
+    /// the throw-away unarmed intermediate: same range, a live guard, and a drop
+    /// that clears it.
+    #[test]
+    fn new_armed_is_an_armed_task_over_the_range() {
+        let armed = Task::new_armed(3..9);
+        assert_eq!(armed.get(), 3..9);
+        assert!(armed.is_alive());
+
+        let observer = armed.clone();
+        assert!(observer.is_alive());
+        drop(armed);
+        assert!(
+            !observer.is_alive(),
+            "dropping the armed value marks the worker dead"
+        );
+        assert_eq!(observer.get(), 3..9, "the cursor survives the guard");
+    }
+
+    /// `new_armed` inherits `new`'s panic contract.
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn new_armed_panics_on_an_inverted_range() {
+        let _ = Task::new_armed(core::ops::Range { start: 10, end: 5 });
+    }
+
+    /// `Debug` shows the observable cursor and liveness instead of the packed
+    /// `AtomicU128` state.
+    #[test]
+    fn debug_shows_the_range_not_the_packed_state() {
+        use std::format;
+        let t = Task::new_armed(3..9);
+        let text = format!("{t:?}");
+        assert!(text.contains("3..9"), "range missing from {text}");
+        assert!(text.contains("alive: true"), "liveness missing from {text}");
+        assert!(
+            !text.contains("AtomicU128") && !text.contains("state"),
+            "the packed state leaked into Debug: {text}"
+        );
     }
 }

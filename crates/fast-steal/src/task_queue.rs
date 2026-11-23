@@ -9,7 +9,7 @@
 extern crate alloc;
 use crate::{Executor, Handle, Task};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
-use core::ops::Range;
+use core::{fmt, ops::Range};
 // The queue's critical sections are short and synchronous (a few `VecDeque`
 // operations, never held across an await), so both locks are safe. With `std`
 // the queue uses `parking_lot` (parks waiting threads instead of spinning); on
@@ -39,7 +39,8 @@ pub enum StealOutcome {
     /// deregistered as a side effect (it is leaving); only
     /// [`set_threads`](TaskQueue::set_threads) registers it again.
     NoWork,
-    /// `id` matches no registered worker, so nothing was changed.
+    /// The caller was registered but `task` is not its registered task, or `id`
+    /// matches no registered worker. Nothing was changed.
     Unregistered,
 }
 
@@ -48,9 +49,27 @@ pub enum StealOutcome {
 /// Workers created by [`Executor::execute`] call [`steal`](TaskQueue::steal) to obtain
 /// new work when their current task is exhausted. The queue supports splitting,
 /// speculative execution, and dynamic thread adjustment.
-#[derive(Debug)]
 pub struct TaskQueue<H: Handle> {
     inner: Arc<Mutex<TaskQueueInner<H>>>,
+}
+/// Shows the pool sizes only, never the handles: a `Handle` implementation is
+/// not required to be `Debug`, and the queue is the wrong place to print
+/// runtime-specific state.
+///
+/// Uses `try_lock`, so formatting the queue from inside a queue operation (a
+/// panic message while the lock is held, for example) reports `<locked>` instead
+/// of deadlocking on a non-reentrant lock.
+impl<H: Handle> fmt::Debug for TaskQueue<H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut dbg = f.debug_struct("TaskQueue");
+        match self.inner.try_lock() {
+            Some(guard) => dbg
+                .field("running", &guard.running.len())
+                .field("waiting", &guard.waiting.len()),
+            None => dbg.field("lock", &"<locked>"),
+        };
+        dbg.finish()
+    }
 }
 impl<H: Handle> Clone for TaskQueue<H> {
     fn clone(&self) -> Self {
@@ -59,7 +78,6 @@ impl<H: Handle> Clone for TaskQueue<H> {
         }
     }
 }
-#[derive(Debug)]
 struct TaskQueueInner<H: Handle> {
     running: VecDeque<(Task, H)>,
     waiting: VecDeque<Task>,
@@ -75,6 +93,40 @@ impl<H: Handle> TaskQueueInner<H> {
             .max_by_key(|task| task.remain())
             .cloned()
     }
+    /// Number of live registrations sharing `task`'s progress cursor.
+    ///
+    /// This is what the speculative cap must count. Sizing the cursor's `Arc`
+    /// refcount instead would also count dead registrations, plain identity
+    /// clones held by observers, and tasks parked in `waiting`, all of which
+    /// inflate the count without putting another worker on the cursor.
+    fn live_sharers(&self, task: &Task) -> usize {
+        self.running
+            .iter()
+            .filter(|(registered, _)| registered.is_alive() && registered.same_cursor(task))
+            .count()
+    }
+    /// Drops dead registrations, returning any range they had not claimed to
+    /// `waiting`.
+    ///
+    /// The queue is the last owner of a registration's task, so dropping the
+    /// entry would lose work a surviving worker could still do. Returns whether a
+    /// live worker remains; after the retain every entry is live.
+    fn sweep_dead(&mut self) -> bool {
+        let mut reclaimed = Vec::new();
+        self.running.retain(|(task, _)| {
+            if task.is_alive() {
+                return true;
+            }
+            if let Ok(Some(range)) = task.take() {
+                reclaimed.push(Task::new(range));
+            }
+            false
+        });
+        if !reclaimed.is_empty() {
+            self.waiting.extend(reclaimed);
+        }
+        !self.running.is_empty()
+    }
 }
 impl<H: Handle> TaskQueue<H> {
     /// Creates a queue from an iterator of `start..end` ranges, each wrapped in its
@@ -86,7 +138,9 @@ impl<H: Handle> TaskQueue<H> {
         let waiting: VecDeque<_> = tasks.map(Task::new).collect();
         Self {
             inner: Arc::new(Mutex::new(TaskQueueInner {
-                running: VecDeque::with_capacity(waiting.len()),
+                // `running` starts empty: pre-sizing it to `waiting.len()` would
+                // allocate a slot per pending task that no worker has claimed.
+                running: VecDeque::new(),
                 waiting,
             })),
         }
@@ -95,15 +149,25 @@ impl<H: Handle> TaskQueue<H> {
     /// [`steal`](TaskQueue::steal) or [`set_threads`](TaskQueue::set_threads) can
     /// pick it up.
     ///
+    /// Before appending, dead registrations are swept and their unclaimed ranges
+    /// join `waiting` (see [`steal`](TaskQueue::steal), which does the same), so
+    /// an `add` after a worker panicked does not leave that worker's range
+    /// stranded behind a live-looking entry.
+    ///
     /// Returns `true` if at least one worker is currently registered and live
     /// (so the task will be picked up on that worker's next [`steal`](TaskQueue::steal)), or
     /// `false` if no live worker exists — in which case the task stays stranded
     /// in `waiting` until a [`set_threads`](TaskQueue::set_threads) call spawns a
     /// worker to rescue it.
+    ///
+    /// The return value is **best effort**: it reports whether a live worker
+    /// exists at the moment of the call, not that one will call `steal` again. A
+    /// worker that has already decided to exit (it found no work, or its handle
+    /// was aborted) still counts, and the task then waits for `set_threads`.
     #[must_use]
     pub fn add(&self, task: Task) -> bool {
         let mut guard = self.inner.lock();
-        let live = guard.running.iter().any(|(task, _)| task.is_alive());
+        let live = guard.sweep_dead();
         guard.waiting.push_back(task);
         live
     }
@@ -113,7 +177,8 @@ impl<H: Handle> TaskQueue<H> {
     /// [`Handle::is_self`](crate::Handle::is_self)). The function first hands out a
     /// pending task from the waiting queue; if none is available it steals a half
     /// range from the busiest running task via `Task::split_two`
-    /// (when at least `min_chunk_size * 2` work remains), or, if `max_speculative > 1`
+    /// (when each half would still be at least `min_chunk_size` long), or, if
+    /// `max_speculative > 1`
     /// and fewer than `max_speculative` workers already share that task's progress
     /// cursor, shares that same task speculatively.
     ///
@@ -122,55 +187,61 @@ impl<H: Handle> TaskQueue<H> {
     /// reaching `Task::split_two`'s zero-minimum refusal.
     ///
     /// `max_speculative` caps the number of workers that share one progress cursor.
-    /// It is compared against the count of strong references *to that cursor*
-    /// (`Task::sharer_count`, bumped only by `share_state`): a plain `Task::clone`
-    /// shares the worker identity and leaves the speculative cap untouched. `<= 1`
-    /// disables speculation entirely, so a peer too small to split is left alone.
+    /// It is compared against the count of *live registrations* sharing that
+    /// cursor: dead entries, observer clones and tasks parked in `waiting` do not
+    /// count, because none of them is another worker executing the cursor.
+    /// `<= 1` disables speculation entirely, so a peer too small to split is left
+    /// alone.
     ///
     /// # Preconditions
     ///
-    /// - **`task` must already be exhausted** for this worker. Every path that
-    ///   reports [`Refilled`](StealOutcome::Refilled) **overwrites `*task`** with
-    ///   the new work, dropping the `Task` the caller passed in — and with it the
-    ///   worker's identity and liveness guard (and, for a speculative sharer, its
-    ///   reference to the shared cursor). Calling `steal` with work still
-    ///   remaining therefore silently discards that remaining range: the queue
-    ///   cannot reclaim it, because the advancing cursor is the only record of
-    ///   it. A `debug_assert!` enforces this in debug builds, after the caller
-    ///   has been authenticated.
     /// - `id` must be the id of a worker the queue registered (a handle returned
     ///   by [`Executor::execute`](crate::Executor::execute) from this queue), and
     ///   that entry must still be registered. `steal` authenticates the caller
     ///   solely through [`Handle::is_self`](crate::Handle::is_self), which it calls
     ///   under the queue lock for every registered worker; see that method's
     ///   contract for what such a predicate may do.
-    /// - **`task` must be the task that worker is registered against.** The queue
-    ///   keeps a strong `Task` per worker and replaces it on a refill, so a caller
-    ///   passing any other task would overwrite some other worker's registration.
-    ///   A `debug_assert!` compares the registered entry's *identity* with
-    ///   `*task` and fires on a mismatch (sharing the progress cursor is not
-    ///   enough: a speculative twin has its own registration).
+    /// - **`task` must be the task that worker is registered against.** This is
+    ///   enforced at run time, not only under `debug_assertions`: the queue keeps
+    ///   a strong `Task` per worker and replaces it on a refill, so a caller
+    ///   passing any other task would overwrite another worker's registration and
+    ///   strand its range. A mismatch reports
+    ///   [`Unregistered`](StealOutcome::Unregistered) and changes nothing. Identity
+    ///   is what counts (`same_identity`): sharing the progress cursor is not
+    ///   enough, because a speculative twin has its own registration.
+    /// - **`task` should be exhausted.** Every path that reports
+    ///   [`Refilled`](StealOutcome::Refilled) **overwrites `*task`**, dropping the
+    ///   `Task` the caller passed in — and with it the worker's identity and
+    ///   liveness guard (and, for a speculative sharer, its reference to the
+    ///   shared cursor). Whatever is still unclaimed in it is first taken and put
+    ///   back into the queue, so a caller that skips this precondition loses no
+    ///   work; it is still a misuse, because the range is handed out again while
+    ///   the caller may believe it owns it.
     ///
-    /// Both `debug_assert!`s run **after** the caller has been authenticated: an
-    /// unregistered caller has no registration to compare against and changes no
-    /// queue state, so it must report [`Unregistered`](StealOutcome::Unregistered)
-    /// without tripping either assertion, even in debug builds.
+    /// A dead registration is swept before the caller is authenticated: its
+    /// unclaimed range joins `waiting`, exactly as in
+    /// [`set_threads`](TaskQueue::set_threads). Without that, a worker that
+    /// panicked would leave its range stranded behind an entry the liveness scan
+    /// skips.
     ///
     /// Returns a [`StealOutcome`] describing the three possible outcomes:
     /// - [`Refilled`](StealOutcome::Refilled): `*task` now holds fresh work (the
     ///   previous value is overwritten, see above) and the worker's registration
-    ///   is re-pointed at it.
+    ///   is re-pointed at it. "Fresh" is what the queue handed out, not a
+    ///   guarantee that work remains: a speculative twin can drain the shared
+    ///   cursor before the caller looks again.
     /// - [`NoWork`](StealOutcome::NoWork): the worker was registered, but
     ///   nothing was stealable. It is *deregistered* as a side effect — finding
     ///   no work means it is leaving — and only
     ///   [`set_threads`](TaskQueue::set_threads) registers it again. `*task` is
     ///   left as the caller passed it.
     /// - [`Unregistered`](StealOutcome::Unregistered): `id` matches no
-    ///   registered worker, e.g. because
-    ///   [`Handle::is_self`](crate::Handle::is_self) misidentifies its worker or
-    ///   because a previous `NoWork` already deregistered it. Nothing is
-    ///   changed: no queue state is touched, no worker is deregistered, no work
-    ///   is handed out, and `*task` keeps its previous value.
+    ///   registered worker, or `task` is not that worker's registered task. E.g.
+    ///   [`Handle::is_self`](crate::Handle::is_self) misidentifies its worker, a
+    ///   previous `NoWork` already deregistered it, or the caller passed a peer's
+    ///   task. Nothing is changed: no queue state is touched, no worker is
+    ///   deregistered, no work is handed out, and `*task` keeps its previous
+    ///   value.
     pub fn steal(
         &self,
         id: &H::Id,
@@ -180,46 +251,38 @@ impl<H: Handle> TaskQueue<H> {
     ) -> StealOutcome {
         let min_chunk_size = min_chunk_size.max(1);
         let mut guard = self.inner.lock();
-        let mut worker_idx = None;
-        for (i, (_, handle)) in guard.running.iter().enumerate() {
-            if handle.is_self(id) {
-                worker_idx = Some(i);
-                break;
-            }
-        }
-        let Some(worker_idx) = worker_idx else {
+        guard.sweep_dead();
+        let Some(worker_idx) = guard.running.iter().position(|(_, h)| h.is_self(id)) else {
             return StealOutcome::Unregistered;
         };
         // Authenticated: only now is there a registration to validate the
         // caller's task against. An `Unregistered` caller above has already
-        // returned, so it cannot trip either assertion.
-        debug_assert!(
-            guard.running[worker_idx].0.same_identity(task),
-            "steal must be called with this worker's registered task; passed {:?}",
-            task.get()
-        );
-        debug_assert!(
-            task.remain() == 0,
-            "steal overwrites `*task`, so the caller must pass an exhausted task; \
-             {:?} still has unclaimed work that would be lost",
-            task.get()
-        );
+        // returned, so it cannot disturb the queue.
+        if !guard.running[worker_idx].0.same_identity(task) {
+            return StealOutcome::Unregistered;
+        }
+        // `*task` is about to be overwritten. Hand anything it still holds back
+        // to the queue so a caller that skipped the exhaustion precondition
+        // cannot silently drop a range: the queue is the only other owner.
+        if let Ok(Some(range)) = task.take() {
+            guard.waiting.push_back(Task::new(range));
+        }
         let mut found = false;
         while let Some(new_task) = guard.waiting.pop_front() {
             // Exhausted (`Ok(None)`) and corrupted (`Err`) tasks are skipped,
             // never handed to a worker.
             if let Ok(Some(range)) = new_task.take() {
-                *task = Task::new(range).armed();
+                *task = Task::new_armed(range);
                 found = true;
                 break;
             }
         }
         if !found && let Some(steal_task) = guard.fattest(Some(task)) {
             if let Ok(Some(range)) = steal_task.split_two(min_chunk_size) {
-                *task = Task::new(range).armed();
+                *task = Task::new_armed(range);
                 found = true;
             } else if max_speculative > 1
-                && steal_task.sharer_count() < max_speculative
+                && guard.live_sharers(&steal_task) < max_speculative
                 && steal_task.remain() > 0
             {
                 task.share_state(&steal_task);
@@ -238,14 +301,12 @@ impl<H: Handle> TaskQueue<H> {
     ///
     /// # What it actually does
     ///
-    /// - **`threads` is clamped to at least 1** (`threads.max(1)`), so
+    /// - **`threads` is taken literally, clamped only to at least 1.**
     ///   `set_threads(0, ..)` keeps one worker rather than pausing the pool.
-    ///   `min_chunk_size` is likewise clamped to at least 1.
-    /// - **`threads` is otherwise trusted: there is no upper bound.** The queue
-    ///   does not validate the requested count against the work available; a
-    ///   huge `threads` simply spawns until `waiting` and splittable ranges run
-    ///   out, which can be arbitrarily expensive. Callers that accept the count
-    ///   from untrusted input must bound it themselves.
+    ///   Growth is fed by splitting the fattest range, so the pool stops on its
+    ///   own once no range can be split under `min_chunk_size`; how many workers
+    ///   a machine can actually run is the executor's call, not this queue's.
+    ///   `min_chunk_size` is clamped to at least 1.
     /// - It first sweeps dead workers out of `running` (`Task::is_alive`), taking
     ///   any unclaimed range they still held back into `waiting`, then
     ///   grows or shrinks toward the requested count.
@@ -278,16 +339,21 @@ impl<H: Handle> TaskQueue<H> {
     ///   observed the abort is gone, which is exactly why [`Handle::abort`] carries
     ///   its own contract. A speculative sharer's reclaimed `Task` aliases its
     ///   surviving twin's cursor, and the shared `take` handshake partitions that
-    ///   cursor safely instead of executing it twice. **This is the only path that
-    ///   reclaims**: aborting a worker's handle alone leaves its unclaimed range
-    ///   lost with the task.
+    ///   cursor safely instead of executing it twice. **Every path that drops a
+    ///   registration reclaims first** — this shrink, the liveness sweep, and the
+    ///   sweeps at the top of [`steal`](TaskQueue::steal) and
+    ///   [`add`](TaskQueue::add) — so a worker that exited or panicked does not
+    ///   take its unclaimed range with it.
     /// - **[`Executor::execute`] is called while the queue's lock is held** (both for
     ///   the `waiting` drain and for each split), so an executor must not re-enter
     ///   the queue synchronously from it.
     ///
     /// Returns `None` when growth is needed and no `executor` was supplied;
     /// `Some(())` otherwise, including when the request was already satisfied or no
-    /// work was available to spawn for.
+    /// work was available to spawn for. The liveness sweep runs before that
+    /// decision, so a `None` return may already have dropped dead registrations
+    /// and moved their unclaimed ranges back to `waiting`; call again with an
+    /// executor to grow.
     #[must_use]
     pub fn set_threads<E: Executor<Handle = H>>(
         &self,
@@ -298,20 +364,10 @@ impl<H: Handle> TaskQueue<H> {
         let threads = threads.max(1);
         let min_chunk_size = min_chunk_size.max(1);
         let mut guard = self.inner.lock();
-        // Sweep dead workers, but take their unclaimed interval first: the queue
-        // is the last owner of that task once the entry goes away, so dropping
-        // the entry would lose work a surviving worker could still do.
-        let mut reclaimed = Vec::new();
-        guard.running.retain(|(task, _)| {
-            if task.is_alive() {
-                return true;
-            }
-            if let Ok(Some(range)) = task.take() {
-                reclaimed.push(Task::new(range));
-            }
-            false
-        });
-        guard.waiting.extend(reclaimed);
+        // One scan both reclaims dead registrations and yields the live count:
+        // after the sweep every entry is live, so `running.len()` is the pool
+        // size to compare against `threads`.
+        guard.sweep_dead();
         let len = guard.running.len();
         if len < threads {
             let executor = executor?;
@@ -330,7 +386,7 @@ impl<H: Handle> TaskQueue<H> {
                 // The guard has to travel with the value moved into `execute`;
                 // the queue keeps an unarmed clone (see `Task::clone`) that
                 // shares the identity and reads the same alive flag.
-                let armed = Task::new(range).armed();
+                let armed = Task::new_armed(range);
                 let registered = armed.clone();
                 let handle = executor.execute(armed, self.clone());
                 guard.running.push_back((registered, handle));
@@ -339,7 +395,7 @@ impl<H: Handle> TaskQueue<H> {
                 && let Some(steal_task) = guard.fattest(None)
                 && let Ok(Some(range)) = steal_task.split_two(min_chunk_size)
             {
-                let armed = Task::new(range).armed();
+                let armed = Task::new_armed(range);
                 let registered = armed.clone();
                 let handle = executor.execute(armed, self.clone());
                 guard.running.push_back((registered, handle));
@@ -379,14 +435,24 @@ impl<H: Handle> TaskQueue<H> {
     /// Aborted twins are *deregistered* (removed from `running`) so a later
     /// [`set_threads`](TaskQueue::set_threads) liveness sweep does not mistake
     /// them for live workers. Their remaining work is **not** reclaimed into
-    /// `waiting`: the aborted twins share the caller's cursor, so that
-    /// caller's cursor, so the caller's own still-live task already owns and
-    /// advances that remaining range. Reclaiming would only add a redundant
-    /// `waiting` entry — the `take` handshake that `steal` applies to a shared
-    /// cursor partitions it atomically, so a reclaimed twin would *not* execute
-    /// the same bytes twice. The production caller `fast-pull` therefore invokes
-    /// this only after the shared range has finished, letting the caller's task
-    /// carry the work to completion.
+    /// `waiting`: an aborted twin shares the caller's cursor, so the caller's own
+    /// still-live task already owns and advances whatever range is left.
+    /// Reclaiming would only add a redundant `waiting` entry — the `take`
+    /// handshake that `steal` applies to a shared cursor partitions it
+    /// atomically, so a reclaimed twin would *not* execute the same bytes twice.
+    ///
+    /// # Caller obligations
+    ///
+    /// "Abort the twins once the shared range is finished" is *not* a safe
+    /// precondition to rely on. `fast-pull`, the production caller, invokes this
+    /// as soon as its own claim reaches the shared end — before it publishes
+    /// (writes) that claim — so a twin may still hold a span it has claimed but
+    /// not yet written. No range is lost here (the twin's cursor is shared, and
+    /// its claim is gone from it), but an [`Handle::abort`] that kills the twin
+    /// mid-publish *does* truncate that span, which is exactly what that method's
+    /// contract forbids. A caller that aborts twins must therefore implement
+    /// cooperative cancellation, or cancel only after the twins have observed the
+    /// end of the cursor.
     pub fn cancel_task(&self, task: &Task, id: &H::Id) {
         let mut guard = self.inner.lock();
         // Both guards at once: a registered caller, whose own entry aliases the
@@ -429,45 +495,62 @@ mod tests {
     struct TokioExecutor {
         tx: mpsc::UnboundedSender<(u64, u64)>,
         speculative: usize,
+        next_id: std::sync::atomic::AtomicUsize,
     }
     #[derive(Clone)]
-    struct TokioHandle(AbortHandle);
+    struct TokioHandle {
+        id: usize,
+        abort: AbortHandle,
+    }
 
     impl Handle for TokioHandle {
-        type Id = ();
+        type Id = usize;
         fn abort(&mut self) {
-            self.0.abort();
+            self.abort.abort();
         }
-        fn is_self(&self, (): &Self::Id) -> bool {
-            false
+        fn is_self(&self, id: &Self::Id) -> bool {
+            self.id == *id
         }
     }
 
     impl Executor for TokioExecutor {
         type Handle = TokioHandle;
         fn execute(&self, mut task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
+            let id = self
+                .next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let tx = self.tx.clone();
             let speculative = self.speculative;
             let handle = tokio::spawn(async move {
                 loop {
-                    // Keep the worker alive briefly so the shrink-mid-run test can
-                    // observe in-flight work without paying the recursive-fib cost.
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    while task.start() < task.end() {
-                        let i = task.start();
-                        let res = fib_fast(i);
-                        let Ok(_) = task.safe_add_start(i, 1) else {
-                            continue;
-                        };
-                        tx.send((i, res)).unwrap();
+                    // The worker's cooperative cancellation point: `abort` lands
+                    // here, between claiming one unit and claiming the next, so a
+                    // claimed span is always published. Without it the future
+                    // never suspends and `abort` could never take effect.
+                    tokio::task::yield_now().await;
+                    let range = task.get();
+                    if range.start >= range.end {
+                        if task_queue.steal(&id, &mut task, 1, speculative)
+                            != StealOutcome::Refilled
+                        {
+                            break;
+                        }
+                        continue;
                     }
-                    if task_queue.steal(&(), &mut task, 1, speculative) != StealOutcome::Refilled {
-                        break;
+                    let i = range.start;
+                    let res = fib_fast(i);
+                    // Another (speculative) worker may have claimed `i` first; its
+                    // claim wins and this duplicate result is simply dropped.
+                    if task.safe_add_start(i, 1).is_ok() {
+                        tx.send((i, res)).unwrap();
                     }
                 }
             });
             let abort_handle = handle.abort_handle();
-            TokioHandle(abort_handle)
+            TokioHandle {
+                id,
+                abort: abort_handle,
+            }
         }
     }
 
@@ -483,7 +566,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_task_queue() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let executor = TokioExecutor { tx, speculative: 1 };
+        let executor = TokioExecutor {
+            tx,
+            speculative: 1,
+            next_id: std::sync::atomic::AtomicUsize::new(0),
+        };
         let pre_data = [1..20, 41..48];
         let task_queue = TaskQueue::new(pre_data.iter().cloned());
         task_queue.set_threads(8, 1, Some(&executor)).unwrap();
@@ -1116,9 +1203,16 @@ mod tests {
             "an observer's clone must not keep the exited worker alive"
         );
 
-        // The liveness sweep agrees and collects the dead entry.
-        let _ = q.set_threads::<SyncExecutor>(1, 1, None);
-        assert_eq!(q.inner.lock().running.len(), 0);
+        // The liveness sweep agrees and collects the dead entry, then grows back
+        // to one worker on the reclaimed range.
+        q.set_threads(1, 1, Some(&ex)).unwrap();
+        let guard = q.inner.lock();
+        assert_eq!(guard.running.len(), 1);
+        assert!(
+            guard.running[0].0.is_alive(),
+            "the dead entry was replaced, not kept"
+        );
+        drop(guard);
     }
 
     /// `add`'s return value tracks real liveness, not strong counts: with the
@@ -1140,10 +1234,15 @@ mod tests {
             !q.add(Task::new(200..210)),
             "a clone outliving the worker must not count as a live worker"
         );
-        assert!(
-            !q.inner.lock().running[0].0.is_alive(),
-            "the worker is dead even though its identity is still referenced"
+        // `add` also sweeps the dead registration, handing its range back.
+        let guard = q.inner.lock();
+        assert!(guard.running.is_empty(), "the dead worker was reaped");
+        assert_eq!(
+            guard.waiting.len(),
+            3,
+            "the first add, the dead worker's range, and the second add all wait"
         );
+        assert_eq!(guard.waiting[1].get(), 0..10, "the reaped range is queued");
     }
 
     /// An unregistered caller is reported as [`StealOutcome::Unregistered`] — not
@@ -1175,19 +1274,31 @@ mod tests {
     }
 
     /// A registered caller may only refill *its own* registered task. Passing a
-    /// peer's (exhausted, so only the identity check can fire) task must fail
-    /// fast in debug builds instead of silently hijacking the peer's slot.
+    /// peer's task must be rejected at run time, in every build: a debug-only
+    /// assertion would let a release build overwrite the peer's registration and
+    /// strand its range.
     #[test]
-    #[cfg_attr(debug_assertions, should_panic(expected = "registered task"))]
-    #[allow(clippy::should_panic_without_expect)]
     fn steal_rejects_a_task_registered_to_another_worker() {
         let ex = SyncExecutor::new();
         let q = TaskQueue::new([0..10, 100..200].into_iter());
         q.set_threads(2, 1, Some(&ex)).unwrap();
-        // Worker 1's task, drained so the exhaustion assertion would pass; the
+        // Worker 1's task, drained so only the identity check can fire; the
         // mismatch is purely in who the task is registered to.
         let mut t = ex.drained_task_of(1);
-        let _ = q.steal(&0, &mut t, 1, 1);
+        assert_eq!(
+            q.steal(&0, &mut t, 1, 1),
+            StealOutcome::Unregistered,
+            "a caller may not refill with a peer's registration"
+        );
+        assert_eq!(t.get(), 200..200, "the rejected task is untouched");
+        let guard = q.inner.lock();
+        assert_eq!(guard.running.len(), 2, "nobody was deregistered");
+        assert_eq!(
+            guard.running[0].0.get(),
+            0..10,
+            "the caller's registration was not overwritten"
+        );
+        assert_eq!(guard.waiting.len(), 0, "no work was handed out");
     }
 
     /// The three outcomes are distinct: `NoWork` deregisters the registered worker
@@ -1292,32 +1403,30 @@ mod tests {
         );
     }
 
-    /// The overwrite contract is enforced, not merely documented: calling `steal`
-    /// with work still left in the caller's task must fail fast in debug builds
-    /// instead of silently dropping that range.
+    /// A caller that passes a task with work still left must not lose it: the
+    /// refill overwrites `*task`, so the unclaimed range is taken and handed back
+    /// to the queue first.
     #[test]
-    #[cfg_attr(debug_assertions, should_panic(expected = "exhausted"))]
-    #[allow(clippy::should_panic_without_expect)]
-    fn steal_with_a_live_task_fails_fast() {
+    fn steal_reclaims_a_callers_unclaimed_range() {
         let ex = SyncExecutor::new();
         let q = TaskQueue::new([0..10, 100..200].into_iter());
         q.set_threads(2, 1, Some(&ex)).unwrap();
-        // Worker 1 still owns 100..200: a refill here would discard it.
+        // Worker 1 still owns all of 100..200.
         let mut t = ex.task_of(1);
-        let _ = q.steal(&1, &mut t, 1, 1);
-    }
-
-    /// The misuse panic names the offending range instead of dumping the packed
-    /// `u128` state, so a caller need not decode the implementation detail.
-    #[test]
-    #[cfg_attr(debug_assertions, should_panic(expected = "0..10"))]
-    #[allow(clippy::should_panic_without_expect)]
-    fn steal_with_a_live_task_names_the_range_in_the_panic() {
-        let ex = SyncExecutor::new();
-        let q = TaskQueue::new([0..10, 100..200].into_iter());
-        q.set_threads(2, 1, Some(&ex)).unwrap();
-        let mut t = ex.task_of(0);
-        let _ = q.steal(&0, &mut t, 1, 1);
+        assert_eq!(q.steal(&1, &mut t, 1, 1), StealOutcome::Refilled);
+        // The range it held came back through `waiting` and was handed to the
+        // same worker, so none of it was dropped.
+        assert_eq!(t.get(), 100..200);
+        assert_eq!(
+            q.inner.lock().waiting.len(),
+            0,
+            "the reclaimed range was handed out, not duplicated"
+        );
+        assert_eq!(
+            ex.task_of(1).get(),
+            100..100,
+            "the old cursor was drained by the reclaim, so nobody re-executes it"
+        );
     }
 
     #[test]
@@ -1373,11 +1482,10 @@ mod tests {
         );
     }
 
-    /// The speculation cap limits how many workers share one cursor. Each sharer
-    /// holds its own strong ref to the cursor (via `share_state`), and the cap
-    /// `sharer_count() < max_speculative` admits a new sharer only while fewer
-    /// than `max_speculative` workers already alias that cursor — keeping the
-    /// total at `max_speculative`.
+    /// The speculation cap limits how many *live registrations* share one cursor.
+    /// The cap `live_sharers() < max_speculative` admits a new sharer only while
+    /// fewer than `max_speculative` live workers already alias that cursor,
+    /// keeping the total at `max_speculative`.
     #[test]
     fn steal_caps_the_number_of_speculative_sharers() {
         let ex = SyncExecutor::new();
@@ -1390,19 +1498,25 @@ mod tests {
         ex.rebind(0, &t0);
         assert!(t0.same_cursor(&ex.task_of(2)));
         // Worker 1 tries to become the third sharer of that same crumb and is
-        // refused: the sharer count now exceeds the cap.
+        // refused: the live sharer count has reached the cap.
         let mut t1 = ex.drained_task_of(1);
         assert_eq!(q.steal(&1, &mut t1, 1, 2), StealOutcome::NoWork);
+        let target = ex.task_of(2);
+        let guard = q.inner.lock();
+        let sharers = guard
+            .running
+            .iter()
+            .filter(|(task, _)| task.is_alive() && task.same_cursor(&target))
+            .count();
         assert_eq!(
-            ex.task_of(2).sharer_count(),
-            2,
+            sharers, 2,
             "the refused worker must not become a third sharer"
         );
     }
 
-    /// `min_chunk_size * 2` saturates, so a huge caller-supplied value (forwarded
-    /// by `fast-pull` from `options.min_chunk_size`) skips the split instead of
-    /// panicking or wrapping.
+    /// `min_chunk_size * 2` used to saturate, so a huge caller-supplied value
+    /// (forwarded by `fast-pull` from `options.min_chunk_size`) skipped the split
+    /// instead of panicking or wrapping.
     #[test]
     fn steal_skips_split_on_a_huge_min_chunk_size() {
         let ex = SyncExecutor::new();
@@ -1410,7 +1524,7 @@ mod tests {
         q.set_threads(2, 1, Some(&ex)).unwrap();
         let mut t = ex.drained_task_of(0);
         // No panic, no silent disable: the split branch is simply never taken
-        // (`remain >= u64::MAX` is false), so the fat peer keeps its whole range.
+        // (`remain / 2 < min`), so the fat peer keeps its whole range.
         assert_eq!(q.steal(&0, &mut t, u64::MAX, 1), StealOutcome::NoWork);
         assert_eq!(
             ex.task_of(1).get(),
@@ -1419,15 +1533,15 @@ mod tests {
         );
     }
 
-    /// The identical `min_chunk_size * 2` in `set_threads`'s split-to-grow loop
-    /// saturates too, so the branch is skipped rather than panicking.
+    /// The same threshold in `set_threads`'s split-to-grow loop refuses a huge
+    /// `min_chunk_size`, so the branch is skipped rather than panicking.
     #[test]
     fn set_threads_skips_split_on_a_huge_min_chunk_size() {
         let ex = SyncExecutor::new();
         let q = TaskQueue::new(core::iter::once(0..100));
         assert!(q.set_threads(2, u64::MAX, Some(&ex)).is_some());
         // The single waiting task is still spawned, but no extra split worker is
-        // created because `remain >= u64::MAX` is always false.
+        // created because `remain / 2 < min` is true.
         assert_eq!(q.inner.lock().running.len(), 1);
     }
 
@@ -1516,9 +1630,9 @@ mod tests {
         q.set_threads(2, 1, Some(&ex)).unwrap();
         assert_eq!(q.inner.lock().running.len(), 2);
         ex.kill(0);
-        // No executor: the sweep still runs, and growth cannot refill the pool
-        // from the range the sweep just reclaimed.
-        let _ = q.set_threads::<SyncExecutor>(2, 1, None);
+        // Shrinking to the one live worker needs no executor, and the call has
+        // real work to do (drop the dead entry), so `None` is not an early return.
+        let _ = q.set_threads::<SyncExecutor>(1, 1, None);
         assert_eq!(q.inner.lock().running.len(), 1, "the dead slot is swept");
     }
 
@@ -1528,16 +1642,17 @@ mod tests {
     #[test]
     fn running_sweep_reclaims_a_dead_workers_range() {
         let ex = SyncExecutor::new();
-        let q = TaskQueue::new(core::iter::once(0..10));
-        q.set_threads(1, 1, Some(&ex)).unwrap();
+        let q = TaskQueue::new([0..10, 100..110].into_iter());
+        q.set_threads(2, 1, Some(&ex)).unwrap();
 
-        // The worker exits without claiming anything.
+        // Worker 0 exits without claiming anything.
         ex.kill(0);
-        // The sweep runs before an executor is needed, so `None` is fine here.
+        // Shrinking to the one live worker needs no executor, so `None` still
+        // performs the sweep instead of early-returning.
         let _ = q.set_threads::<SyncExecutor>(1, 1, None);
 
         let guard = q.inner.lock();
-        assert_eq!(guard.running.len(), 0, "the dead slot is swept");
+        assert_eq!(guard.running.len(), 1, "the dead slot is swept");
         assert_eq!(guard.waiting.len(), 1, "its range came back");
         assert_eq!(guard.waiting[0].get(), 0..10);
     }
@@ -1564,9 +1679,10 @@ mod tests {
         assert_eq!(ex.live_workers(), 1);
 
         // The liveness sweep alone must reclaim the dead worker's slot, even
-        // though its speculative twin still references the shared cursor. Passing
-        // `None` for the executor runs the sweep without spawning replacements.
-        let _ = q.set_threads::<SyncExecutor>(2, 1, None);
+        // though its speculative twin still references the shared cursor. The
+        // request is the one *live* worker, so no executor is needed and the call
+        // is not an early return.
+        let _ = q.set_threads::<SyncExecutor>(1, 1, None);
         assert_eq!(
             q.inner.lock().running.len(),
             1,
@@ -1826,25 +1942,33 @@ mod tests {
         for id in 0..3usize {
             let q = q.clone();
             let mut t = ex.drained_task_of(id);
+            // Each thread returns its task, not a range snapshot: the task keeps
+            // the worker's liveness guard, and a worker that drops it while its
+            // peers are still stealing looks dead to the queue -- whose sweep
+            // would (correctly) hand its unclaimed range to someone else. That
+            // would make the "stolen ranges" below the same range twice.
             handles.push(thread::spawn(move || {
                 let outcome = q.steal(&id, &mut t, 1, 1);
-                (id, outcome, t.get())
+                (id, outcome, t)
             }));
         }
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         // All 3 must succeed by splitting the fat peer.
-        for (id, outcome, range) in &results {
+        for (id, outcome, task) in &results {
             assert_eq!(
                 *outcome,
                 StealOutcome::Refilled,
                 "worker {id} failed to steal via split"
             );
+            let range = task.get();
             assert!(range.end - range.start > 0, "worker {id} got empty range");
         }
 
-        // Sub-ranges must not overlap (they are partitions of 0..1000).
-        let mut ranges: Vec<_> = results.iter().map(|(_, _, r)| r.clone()).collect();
+        // The workers' *final* holdings must not overlap: a later split can carve
+        // a sub-range out of an earlier steal, so the final snapshot -- not the
+        // range handed out at refill time -- is what partitions 0..1000.
+        let mut ranges: Vec<_> = results.iter().map(|(_, _, task)| task.get()).collect();
         ranges.sort_by_key(|r| r.start);
         for w in ranges.windows(2) {
             assert!(
@@ -1878,13 +2002,12 @@ mod tests {
     /// `set_threads` shrink.
     ///
     /// A speculative sharer aliases its twin's progress cursor (same `state`
-    /// pointer, `sharer_count` bumped by `share_state`). When the shrink aborts
-    /// the sharer and pushes its task into `waiting`, that reclaimed task still
-    /// points at the *surviving* twin's cursor. The next `steal` to drain it
-    /// calls `take()` on the shared cursor: `take()` atomically claims the
-    /// remaining range for the new worker and empties the shared cursor, so the
-    /// survivor twin exits cleanly on its next `safe_add_start` and the range is
-    /// executed exactly once.
+    /// pointer). When the shrink aborts the sharer and pushes its task into
+    /// `waiting`, that reclaimed task still points at the *surviving* twin's
+    /// cursor. The next `steal` to drain it calls `take()` on the shared cursor:
+    /// `take()` atomically claims the remaining range for the new worker and
+    /// empties the shared cursor, so the survivor twin exits cleanly on its next
+    /// `safe_add_start` and the range is executed exactly once.
     ///
     /// This guards against a regression where the handoff would be "fixed" by
     /// dropping the reclaimed task — which would instead LOSE the remaining work
@@ -1923,5 +2046,112 @@ mod tests {
             guard.waiting[0].same_cursor(&survivor),
             "reclaimed task shares the survivor's cursor; steal's take() handshake transfers it safely"
         );
+    }
+
+    /// A worker that dies with work still unclaimed must not strand it: the next
+    /// `steal` reaps the dead registration and hands its range to a survivor.
+    ///
+    /// Before `steal` swept, the fat-task scan merely *skipped* dead entries and
+    /// only `set_threads` reclaimed them -- so a panicking worker's whole
+    /// remaining range was unreachable until someone happened to resize the pool.
+    #[test]
+    fn steal_reaps_a_dead_peers_range() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new([0..1, 100..200].into_iter());
+        q.set_threads(2, 1, Some(&ex)).unwrap();
+        // Worker 1 dies mid-task: its registration stays, its range unclaimed.
+        ex.kill(1);
+
+        // No `set_threads`: only the survivor's refill can rescue the range.
+        let mut t0 = ex.drained_task_of(0);
+        assert_eq!(q.steal(&0, &mut t0, 1, 1), StealOutcome::Refilled);
+        assert_eq!(t0.get(), 100..200, "the dead peer's range was stranded");
+        let guard = q.inner.lock();
+        assert_eq!(guard.running.len(), 1, "the dead entry was reaped");
+        assert_eq!(guard.waiting.len(), 0);
+    }
+
+    /// `add` reaps a dead registration too, so a task added after a worker
+    /// panicked is not queued behind a range nobody can reach.
+    #[test]
+    fn add_reaps_a_dead_peers_range() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new([0..1, 100..200].into_iter());
+        q.set_threads(2, 1, Some(&ex)).unwrap();
+        ex.kill(1);
+        assert!(q.add(Task::new(500..510)), "worker 0 is still live");
+
+        let mut t0 = ex.drained_task_of(0);
+        // FIFO: the reaped range comes before the added one.
+        assert_eq!(q.steal(&0, &mut t0, 1, 1), StealOutcome::Refilled);
+        assert_eq!(t0.get(), 100..200);
+        let guard = q.inner.lock();
+        assert_eq!(guard.running.len(), 1);
+        assert_eq!(guard.waiting.len(), 1, "the added task still waits");
+        assert_eq!(guard.waiting[0].get(), 500..510);
+    }
+
+    /// A `usize::MAX` request is bounded by the work, not by a constant: growth
+    /// stops once no range can be split under `min_chunk_size`. Eight one-byte
+    /// pieces are all this queue can feed, so eight workers is all it spawns.
+    #[test]
+    fn set_threads_stops_at_the_splittable_work() {
+        let ex = HoldExecutor {
+            spawned: Arc::new(Mutex::new(0)),
+            tasks: Arc::new(Mutex::new(Vec::new())),
+        };
+        let q = TaskQueue::new(core::iter::once(0..8));
+        q.set_threads(usize::MAX, 1, Some(&ex)).unwrap();
+        assert_eq!(
+            q.inner.lock().running.len(),
+            8,
+            "the pool grows only as far as the splittable work feeds it"
+        );
+    }
+
+    /// `None` does not roll back the sweep: dead registrations are dropped and
+    /// the ranges they still hold are handed back to `waiting`, so the next call
+    /// with an executor can still spend them.
+    #[test]
+    fn set_threads_none_still_reclaims_dead_work() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new(core::iter::once(0..10));
+        q.set_threads(1, 1, Some(&ex)).unwrap();
+        ex.kill(0);
+
+        assert!(q.set_threads::<SyncExecutor>(2, 1, None).is_none());
+        let guard = q.inner.lock();
+        assert_eq!(guard.running.len(), 0, "the dead entry was swept");
+        assert_eq!(guard.waiting.len(), 1, "its range went back to waiting");
+        assert_eq!(guard.waiting[0].get(), 0..10);
+    }
+
+    /// `Debug` shows the pool sizes without requiring `H: Debug` (`SyncHandle`
+    /// has no `Debug` impl at all) and without locking the queue.
+    #[test]
+    fn queue_debug_reports_the_pool_sizes() {
+        use std::format;
+        let q: TaskQueue<SyncHandle> = TaskQueue::new(core::iter::once(0..5));
+        let text = format!("{q:?}");
+        assert!(text.contains("waiting: 1"), "pool sizes missing: {text}");
+        assert!(text.contains("running: 0"), "pool sizes missing: {text}");
+    }
+
+    /// Drives one full refill under whichever lock backend is compiled in. Under
+    /// `--no-default-features --features spin` this is the test that pins the
+    /// `spin` path, so it cannot be broken while every other test still passes on
+    /// `std`.
+    #[cfg(all(feature = "spin", not(feature = "std")))]
+    #[test]
+    fn spin_backend_serves_a_refill() {
+        let ex = SyncExecutor::new();
+        let q = TaskQueue::new(core::iter::once(0..10));
+        q.set_threads(1, 1, Some(&ex)).unwrap();
+        let _ = q.add(Task::new(100..110));
+
+        let mut t = ex.drained_task_of(0);
+        assert_eq!(q.steal(&0, &mut t, 1, 1), StealOutcome::Refilled);
+        assert_eq!(t.get(), 100..110);
+        assert!(q.inner.lock().running[0].0.is_alive());
     }
 }

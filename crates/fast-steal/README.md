@@ -77,29 +77,37 @@ impl Executor for TokioExecutor {
         // task, which starts after the lock is released.
         let handle = tokio::spawn(async move {
             loop {
+                // The cooperative cancellation point. `AbortHandle::abort` only
+                // takes effect where the future suspends, so this yield -- placed
+                // *between* publishing one unit and claiming the next -- is what
+                // lets a pool shrink cancel this worker without losing a span it
+                // has already claimed. A loop with no await point can never be
+                // aborted, and a yield between "claimed" and "published" would
+                // truncate the range. See `Handle::abort`'s contract.
+                tokio::task::yield_now().await;
                 // One snapshot of the cursor per element: `start` and `end` move
                 // independently while other workers steal from this task.
-                let mut current = task.get();
-                while current.start < current.end {
-                    let i = current.start;
-                    let res = fib(i);
-                    // `safe_add_start` is what makes speculative sharing safe:
-                    // if another worker already claimed `i`, this fails and we
-                    // simply drop our (duplicate) result instead of sending it.
-                    if task.safe_add_start(i, 1).is_ok() {
-                        println!("task: {i} = {res}");
-                        tx.send((i, res)).unwrap();
-                    } else {
-                        println!("task-failed: {i} = {res}");
+                let current = task.get();
+                if current.start >= current.end {
+                    // `Refilled` is the only outcome that hands this worker more
+                    // work; `NoWork` and `Unregistered` both end its loop.
+                    if task_queue.steal(&id, &mut task, 1, speculative)
+                        != StealOutcome::Refilled
+                    {
+                        break;
                     }
-                    current = task.get();
+                    continue;
                 }
-                // `Refilled` is the only outcome that hands this worker more
-                // work; `NoWork` and `Unregistered` both end its loop.
-                if task_queue.steal(&id, &mut task, 1, speculative)
-                    != StealOutcome::Refilled
-                {
-                    break;
+                let i = current.start;
+                let res = fib(i);
+                // `safe_add_start` is what makes speculative sharing safe:
+                // if another worker already claimed `i`, this fails and we
+                // simply drop our (duplicate) result instead of sending it.
+                if task.safe_add_start(i, 1).is_ok() {
+                    println!("task: {i} = {res}");
+                    tx.send((i, res)).unwrap();
+                } else {
+                    println!("task-failed: {i} = {res}");
                 }
             }
         });
@@ -137,6 +145,9 @@ async fn main() {
         };
         let task_queue = TaskQueue::new(pre_data.iter().cloned());
         task_queue.set_threads(8, 1, Some(&executor)).unwrap();
+        // Shrinking the pool aborts the surplus workers at their yield point;
+        // whatever they had not claimed goes back to `waiting` for the survivors.
+        task_queue.set_threads(2, 1, Some(&executor)).unwrap();
         drop(executor);
         let mut data = HashMap::new();
         while let Some((i, res)) = rx.recv().await {

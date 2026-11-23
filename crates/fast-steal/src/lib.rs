@@ -1,6 +1,7 @@
 #![no_std]
 #![deny(missing_docs)]
 #![deny(unreachable_pub)]
+#![forbid(unsafe_code)]
 //! `fast-steal` provides a `no_std`-compatible building block for work-stealing
 //! schedulers.
 //!
