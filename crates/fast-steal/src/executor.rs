@@ -3,7 +3,7 @@
 //! Implement [`Executor`] to spawn work onto your runtime, and [`Handle`] to give the
 //! queue a way to identify and abort the tasks it spawned.
 
-use crate::{Task, TaskQueue};
+use crate::{ArmedTask, TaskQueue};
 
 /// User-defined executor that runs tasks on a [`TaskQueue`].
 ///
@@ -29,17 +29,16 @@ pub trait Executor {
     ///   key. If it fails to match, `steal` reports
     ///   [`StealOutcome::Unregistered`](crate::StealOutcome::Unregistered) and the
     ///   worker exits while work may still be waiting.
-    /// - **The spawned worker must keep the very `task` value it was given until
-    ///   it exits.** `task` arrives by value and carries the registration's
-    ///   non-clonable liveness guard; the queue keeps its own unarmed clone of
-    ///   the same identity (taken *before* this call). Moving that value into
-    ///   the spawned future is what makes the worker look alive to the liveness
-    ///   sweep in [`TaskQueue::set_threads`](TaskQueue::set_threads) and what
-    ///   lets a shrink recover its unclaimed range; dropping it marks the worker
-    ///   dead, so the queue no longer counts it as a live recipient. A
-    ///   `Task::clone` intentionally does **not** carry the guard, so an
-    ///   observer's clone can neither keep a worker alive nor substitute for
-    ///   moving the original value in.
+    /// - **The spawned worker must keep the very `ArmedTask` it was given until
+    ///   it exits.** It arrives by value and owns the registration's lifetime; the
+    ///   queue keeps its own [`handle`](ArmedTask::handle) of the same identity
+    ///   (taken *before* this call). Moving that value into the spawned future is
+    ///   what makes the worker look alive to the liveness sweep in
+    ///   [`TaskQueue::set_threads`](TaskQueue::set_threads) and what lets a shrink
+    ///   recover its unclaimed range; dropping it marks the worker dead, so the
+    ///   queue no longer counts it as a live recipient. An `ArmedTask` cannot be
+    ///   cloned, and a `handle` carries no lifetime, so an observer can neither
+    ///   keep a worker alive nor substitute for moving the original value in.
     /// - **Do not panic.** `set_threads` calls this *after* draining tasks out of
     ///   `waiting` into a local buffer and *while holding the queue lock*; an
     ///   unwind drops those already-drained tasks on the floor (they are gone from
@@ -49,7 +48,7 @@ pub trait Executor {
     ///   inside the executor — e.g. by returning a handle for a worker that will
     ///   not run, which keeps the queue's bookkeeping consistent — never by
     ///   asserting.
-    fn execute(&self, task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle;
+    fn execute(&self, task: ArmedTask, task_queue: TaskQueue<Self::Handle>) -> Self::Handle;
 }
 
 /// Handle returned by [`Executor::execute`], used to abort or identify a running task.
@@ -113,21 +112,22 @@ mod tests {
     //! implementors of [`Executor`] / [`Handle`], which the trait signatures
     //! alone cannot express.
     extern crate std;
-    use crate::{Executor, Handle, StealOutcome, Task, TaskQueue};
+    use crate::{ArmedTask, Executor, Handle, StealOutcome, Task, TaskQueue};
     use core::cell::{Cell, RefCell};
     use std::vec::Vec;
 
-    /// A runtime-free stub: `execute` spawns nothing, keeps each handed `Task`
-    /// alive in `tasks` (honouring the keep-alive contract) and returns a handle
-    /// carrying a sequential id. `honest` controls whether `is_self` upholds its
-    /// contract or violates it (always `false`).
+    /// A runtime-free stub: `execute` spawns nothing, keeps each handed
+    /// `ArmedTask` alive in `tasks` (honouring the keep-alive contract) and
+    /// returns a handle carrying a sequential id. `honest` controls whether
+    /// `is_self` upholds its contract or violates it (always `false`).
     struct StubExecutor {
         honest: bool,
         next_id: Cell<usize>,
-        /// The armed `Task` each spawned worker was handed, held for the
-        /// duration of the test: dropping it clears the worker's liveness guard,
-        /// so the queue would treat the worker as dead.
-        tasks: RefCell<Vec<Task>>,
+        /// The `ArmedTask` each spawned worker was handed, held for the
+        /// duration of the test: dropping it marks the worker dead, so the queue
+        /// would treat it as gone. `None` once the test has taken the value to
+        /// play the worker itself.
+        tasks: RefCell<Vec<Option<ArmedTask>>>,
     }
     struct StubHandle {
         honest: bool,
@@ -142,10 +142,10 @@ mod tests {
     }
     impl Executor for StubExecutor {
         type Handle = StubHandle;
-        fn execute(&self, task: Task, _queue: TaskQueue<Self::Handle>) -> Self::Handle {
+        fn execute(&self, task: ArmedTask, _queue: TaskQueue<Self::Handle>) -> Self::Handle {
             let id = self.next_id.get();
             self.next_id.set(id + 1);
-            self.tasks.borrow_mut().push(task);
+            self.tasks.borrow_mut().push(Some(task));
             StubHandle {
                 honest: self.honest,
                 id,
@@ -153,10 +153,12 @@ mod tests {
         }
     }
     impl StubExecutor {
-        /// The task worker `id` holds, advanced to `end..end` exactly as a real
-        /// worker leaves its cursor before calling `steal`.
-        fn drained_task_of(&self, id: usize) -> Task {
-            let task = self.tasks.borrow()[id].clone();
+        /// Takes the value worker `id` holds and advances it to `end..end`,
+        /// exactly as a real worker leaves its cursor before calling `steal`.
+        fn drained_task_of(&self, id: usize) -> ArmedTask {
+            let task = self.tasks.borrow_mut()[id]
+                .take()
+                .expect("worker still holds its task");
             let range = task.get();
             assert!(range.start < range.end, "worker {id} had no work to drain");
             task.safe_add_start(range.start, range.end - range.start)

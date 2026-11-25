@@ -11,25 +11,24 @@ extern crate alloc;
 use alloc::sync::Arc;
 use core::{
     fmt,
-    ops::Range,
+    ops::{Deref, Range},
     sync::atomic::{AtomicBool, Ordering},
 };
 use portable_atomic::AtomicU128;
 
-/// A cancellable, concurrent-safe unit of work that tracks a `start..end` range.
+/// A handle to a cancellable, concurrent-safe unit of work tracking a
+/// `start..end` range.
 ///
-/// `Task` is a reference-counted *handle*: each worker holds a strong `Task`
-/// (an `Arc<TaskInner>`), giving every worker a **distinct identity** even when
-/// two workers speculatively share the same progress cursor. The queue keeps its
-/// own view of that identity in its running set, so a dead worker is reclaimed
-/// without waiting for every clone to be dropped.
+/// A `Task` is a reference-counted *handle* (`Arc<TaskInner>`): every handle of
+/// one unit shares the progress cursor and reads the alive flag of the worker
+/// registered against it. Each worker registration owns a **distinct identity**
+/// even when two workers speculatively share one progress cursor, so a dead
+/// worker is reclaimed without waiting for every handle to be dropped.
 ///
-/// Liveness is *not* the identity's strong count. The task handed to a worker
-/// by [`Executor::execute`](crate::Executor::execute) carries an internal
-/// `AliveGuard` that is dropped, marking the worker dead, when that very task
-/// value is dropped. `Clone` shares the identity and cursor but deliberately
-/// leaves the guard behind, so a clone held by an observer cannot pin a worker
-/// that has already exited.
+/// A handle carries no lifetime of its own. `Clone` is cheap and never extends a
+/// worker's life: only the [`ArmedTask`] the queue handed to
+/// [`Executor::execute`](crate::Executor::execute) owns that worker's lifetime,
+/// and dropping that value is what marks the worker dead.
 ///
 /// The range is stored as a single atomic `u128` inside `TaskInner`, allowing
 /// lock-free reads and fine-grained progress updates on targets with native
@@ -39,13 +38,36 @@ use portable_atomic::AtomicU128;
 /// `Task` deliberately implements neither `PartialEq` nor `Eq`: equality had two
 /// meanings (same progress cursor, same worker identity) that callers kept
 /// confusing. Ask for one explicitly with `same_cursor` or `same_identity`.
+#[derive(Clone)]
 pub struct Task {
     inner: Arc<TaskInner>,
-    /// Set only on the value moved into a worker: dropping it marks that
-    /// registration dead. Never cloned (see the `Clone` impl), and never read —
-    /// it exists for its `Drop`.
-    #[allow(dead_code, reason = "held only for its Drop impl")]
-    keep_alive: Option<AliveGuard>,
+}
+
+/// The unit of work a registered worker owns: a [`Task`] plus that worker's
+/// lifetime.
+///
+/// The queue builds one for every worker it starts — on
+/// [`set_threads`](crate::TaskQueue::set_threads) growth and on
+/// [`steal`](crate::TaskQueue::steal) refills — and hands it to
+/// [`Executor::execute`](crate::Executor::execute). Dropping it marks the worker
+/// dead, which is what lets the queue's liveness sweep reclaim the range that
+/// worker had not claimed.
+///
+/// Deliberately not `Clone`: a second owner could outlive the worker and keep a
+/// dead registration looking alive. Take an observing
+/// [`handle`](ArmedTask::handle) instead.
+pub struct ArmedTask {
+    task: Task,
+}
+
+/// Dropping the owned value marks the worker dead.
+///
+/// Implemented on the value rather than on a field so the lifetime cannot be
+/// dropped, kept, or moved separately from the worker it belongs to.
+impl Drop for ArmedTask {
+    fn drop(&mut self) {
+        self.task.inner.alive.store(false, Ordering::Release);
+    }
 }
 
 /// Renders the cursor as a plain range plus the worker's liveness, which is what
@@ -54,8 +76,7 @@ pub struct Task {
 /// Hand-written rather than derived: the packed `AtomicU128` state is an
 /// implementation detail, and printing it would be both unreadable and a
 /// snapshot taken field-by-field *outside* the atomic (it could show a torn
-/// range that never existed). A derived impl would also demand `Debug` of the
-/// non-`Clone` liveness guard.
+/// range that never existed).
 impl fmt::Debug for Task {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Task")
@@ -65,19 +86,68 @@ impl fmt::Debug for Task {
     }
 }
 
-/// Non-`Clone` liveness guard for one registered worker.
-///
-/// Created when the queue registers a task (grow or refill) and carried inside
-/// the [`Task`] value that [`Executor::execute`](crate::Executor::execute) moves
-/// into the worker future. Dropping it clears the identity's alive flag, which
-/// is what [`Task::is_alive`] reports. Because it cannot be cloned, no
-/// external handle can extend a dead worker's lifetime.
-#[derive(Debug)]
-struct AliveGuard(Arc<AtomicBool>);
+impl ArmedTask {
+    /// Builds the unit of work for a `start..end` range.
+    ///
+    /// # Panics
+    /// Panics when `range.start > range.end`, like [`Task::new`].
+    #[must_use]
+    pub fn new(range: Range<u64>) -> Self {
+        assert!(range.start <= range.end);
+        Self::armed_on(Arc::new(AtomicU128::new(Task::pack(range))))
+    }
+    /// Builds a registered identity around the cursor `state`: a fresh
+    /// `TaskInner` whose worker counts as alive until this value is dropped.
+    ///
+    /// Shared by [`new`](ArmedTask::new) (which also makes a cursor) and
+    /// [`share_state`](ArmedTask::share_state) (which takes a peer's).
+    fn armed_on(state: Arc<AtomicU128>) -> Self {
+        Self {
+            task: Task::with_alive(state, Arc::new(AtomicBool::new(true))),
+        }
+    }
+    /// Returns an observing [`Task`] handle for this worker.
+    ///
+    /// The handle shares the identity, the cursor and the alive flag, but not the
+    /// lifetime, so it can neither keep the worker alive nor stand in for the
+    /// value the worker owns. This is what the queue registers for a running
+    /// worker.
+    #[must_use]
+    pub fn handle(&self) -> Task {
+        self.task.clone()
+    }
+    /// The inner [`Task`] handle, for queue code that compares or borrows it.
+    pub(crate) const fn as_task(&self) -> &Task {
+        &self.task
+    }
+    /// Rebinds this worker to `peer`'s progress cursor while keeping its own
+    /// identity and lifetime.
+    ///
+    /// Used by speculative sharing in `steal`: this worker's task aliases the
+    /// victim's cursor without copying it, yet stays a *separate* registration
+    /// that the liveness sweep tracks on its own.
+    pub(crate) fn share_state(&mut self, peer: &Task) {
+        self.task = Task::with_alive(peer.inner.state.clone(), self.task.inner.alive.clone());
+    }
+}
 
-impl Drop for AliveGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+impl Deref for ArmedTask {
+    type Target = Task;
+    /// Cursor and identity access goes through the inner handle; owning the
+    /// worker's lifetime is this type's only addition.
+    fn deref(&self) -> &Task {
+        &self.task
+    }
+}
+
+/// Prints what a caller can observe of the owned unit of work: the cursor. The
+/// worker is alive for exactly as long as this value, so there is no liveness
+/// field to report.
+impl fmt::Debug for ArmedTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ArmedTask")
+            .field("range", &self.task.get())
+            .finish_non_exhaustive()
     }
 }
 
@@ -94,9 +164,9 @@ struct TaskInner {
     /// through [`Task`]'s accessors ([`Task::get`], [`Task::safe_add_start`],
     /// ...), which is what keeps the packed encoding an implementation detail.
     state: Arc<AtomicU128>,
-    /// `true` until the identity's `AliveGuard` is dropped (or forever for an
-    /// identity that was never registered, which then liveness-tracks like a
-    /// plain shared allocation).
+    /// `true` while the [`ArmedTask`] that owns this identity is alive, i.e.
+    /// while a worker is registered against it; `false` for an identity that was
+    /// never registered and again once that `ArmedTask` is dropped.
     alive: Arc<AtomicBool>,
 }
 
@@ -137,55 +207,29 @@ impl Task {
         assert!(range.start <= range.end);
         Self::from_state(Arc::new(AtomicU128::new(Self::pack(range))))
     }
-    /// Builds an unregistered identity around `state`: no liveness guard, and
-    /// the alive flag starts `false` because nothing has armed this identity.
+    /// Builds an unregistered identity around `state`: the alive flag starts
+    /// `false` because nothing has armed this identity.
     ///
     /// This is also how tests fabricate a state `new` would refuse (an inverted
     /// range): [`new`](Task::new) is the only constructor that checks the range
     /// invariant.
     pub(crate) fn from_state(state: Arc<AtomicU128>) -> Self {
-        Self {
-            inner: Arc::new(TaskInner {
-                state,
-                alive: Arc::new(AtomicBool::new(false)),
-            }),
-            keep_alive: None,
-        }
+        Self::with_alive(state, Arc::new(AtomicBool::new(false)))
     }
-    /// Builds a registered identity around an existing cursor `state`.
+    /// Builds an identity around `state` whose alive flag is `alive`.
     ///
-    /// The building block shared by [`new_armed`](Task::new_armed) (which also
-    /// makes a cursor) and [`share_state`](Task::share_state) (which takes its
-    /// peer's): a fresh identity and guard over the same packed state.
-    pub(crate) fn armed_on(state: Arc<AtomicU128>) -> Self {
-        let alive = Arc::new(AtomicBool::new(true));
+    /// The flag is shared with the [`ArmedTask`] that owns this identity, whose
+    /// `Drop` clears it, so dropping that value is visible through every handle.
+    fn with_alive(state: Arc<AtomicU128>, alive: Arc<AtomicBool>) -> Self {
         Self {
-            inner: Arc::new(TaskInner {
-                state,
-                alive: alive.clone(),
-            }),
-            keep_alive: Some(AliveGuard(alive)),
+            inner: Arc::new(TaskInner { state, alive }),
         }
-    }
-    /// Builds an armed task straight from `range`, for a queue refill.
-    ///
-    /// Equivalent to [`new`](Task::new) plus an armed identity, without the
-    /// unarmed intermediate: that intermediate's own `TaskInner` was allocated
-    /// only to be dropped one line later, and every refill runs while the
-    /// queue's lock is held.
-    ///
-    /// # Panics
-    /// Panics when `range.start > range.end`, like [`new`](Task::new).
-    pub(crate) fn new_armed(range: Range<u64>) -> Self {
-        assert!(range.start <= range.end);
-        Self::armed_on(Arc::new(AtomicU128::new(Self::pack(range))))
     }
     /// Returns `true` while the worker registered against this identity is alive.
     ///
     /// The flag starts `false` for an unregistered identity (every [`Task::new`]
-    /// and every clone of one) and becomes `true` only for the value
-    /// [`Executor::execute`](crate::Executor::execute) hands to a worker; dropping
-    /// that value clears it again.
+    /// and every handle of one) and is `true` for every handle of the
+    /// [`ArmedTask`] a worker owns; dropping that `ArmedTask` clears it again.
     #[must_use]
     pub(crate) fn is_alive(&self) -> bool {
         self.inner.alive.load(Ordering::Acquire)
@@ -371,21 +415,11 @@ impl Task {
     /// [`same_cursor`](Task::same_cursor) answers the weaker question and treats
     /// a speculative twin as equal to its peer. This is the stricter one a
     /// registration asks: is this the exact handle the queue handed to that
-    /// worker? A `clone` shares the identity; a twin does not.
+    /// worker? A clone — or an [`ArmedTask::handle`] — shares the identity; a
+    /// twin does not.
     #[must_use]
     pub(crate) fn same_identity(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
-    }
-    /// Rebinds this task to share `other`'s progress cursor while keeping its own
-    /// distinct liveness identity.
-    ///
-    /// Used by speculative sharing in `steal`: the caller's task aliases the
-    /// victim's cursor without copying it, and — unlike a plain `clone` — remains
-    /// a *separate* worker identity with its own guard. That separation is what
-    /// lets the liveness sweep in `set_threads` still track each worker
-    /// independently even after sharing.
-    pub(crate) fn share_state(&mut self, other: &Self) {
-        *self = Self::armed_on(other.inner.state.clone());
     }
 }
 /// Creates a [`Task`] from a `start..end` range.
@@ -395,17 +429,6 @@ impl Task {
 impl From<Range<u64>> for Task {
     fn from(value: Range<u64>) -> Self {
         Self::new(value)
-    }
-}
-
-/// Clones share the identity and progress cursor but not the liveness guard:
-/// an observer's clone must never keep an exited worker alive.
-impl Clone for Task {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            keep_alive: None,
-        }
     }
 }
 
@@ -494,15 +517,15 @@ mod tests {
         assert_eq!(task.remain(), 0);
     }
 
-    /// A guard marks exactly the value that carries it: a clone reports the
-    /// same alive flag but cannot extend the worker's lifetime, because it
-    /// carries no guard of its own.
+    /// Only the owned value keeps the worker alive: a handle reports the same
+    /// alive flag but cannot extend the worker's lifetime, because it does not
+    /// own it.
     #[test]
-    fn armed_marks_only_the_value_that_carries_the_guard() {
-        let armed = Task::new_armed(1..10);
-        let observer = armed.clone();
+    fn armed_marks_only_the_value_that_carries_the_lifetime() {
+        let armed = ArmedTask::new(1..10);
+        let observer = armed.handle();
         assert!(armed.is_alive());
-        assert!(observer.is_alive(), "a clone shares the identity's flag");
+        assert!(observer.is_alive(), "a handle shares the identity's flag");
         drop(armed);
         assert!(
             !observer.is_alive(),
@@ -801,24 +824,24 @@ mod tests {
         assert_eq!(bad.remain(), 0);
     }
 
-    /// `is_alive` follows the worker's own guard, independent of how many twins
-    /// share the cursor.
+    /// `is_alive` follows the worker's own lifetime, independent of how many
+    /// twins share the cursor.
     #[test]
-    fn is_alive_tracks_the_guard_not_the_cursor() {
-        let armed = Task::new_armed(0..10);
-        let observer = armed.clone();
+    fn is_alive_tracks_the_worker_not_the_cursor() {
+        let armed = ArmedTask::new(0..10);
+        let observer = armed.handle();
         assert!(observer.is_alive());
 
-        // A speculative twin carries its own guard, so the victim's death does
+        // A speculative twin owns its own lifetime, so the victim's death does
         // not flip the twin's flag.
-        let victim = Task::new_armed(0..10);
-        let mut twin = Task::new(0..0);
+        let victim = ArmedTask::new(0..10);
+        let mut twin = ArmedTask::new(0..0);
         twin.share_state(&victim);
-        let twin_observer = twin.clone();
+        let twin_observer = twin.handle();
         drop(victim);
         assert!(
             twin_observer.is_alive(),
-            "the twin owns a separate guard and identity"
+            "the twin owns a separate lifetime and identity"
         );
 
         drop(armed);
@@ -862,30 +885,29 @@ mod tests {
         assert!(task.remain() >= u64::MAX / 2);
     }
 
-    /// `new_armed` builds the cursor and the armed identity in one step, without
-    /// the throw-away unarmed intermediate: same range, a live guard, and a drop
-    /// that clears it.
+    /// `ArmedTask::new` builds the cursor and the worker's lifetime in one step:
+    /// same range, marked alive, and a drop that clears it.
     #[test]
-    fn new_armed_is_an_armed_task_over_the_range() {
-        let armed = Task::new_armed(3..9);
+    fn armed_task_new_builds_the_cursor_and_marks_the_worker_alive() {
+        let armed = ArmedTask::new(3..9);
         assert_eq!(armed.get(), 3..9);
         assert!(armed.is_alive());
 
-        let observer = armed.clone();
+        let observer = armed.handle();
         assert!(observer.is_alive());
         drop(armed);
         assert!(
             !observer.is_alive(),
             "dropping the armed value marks the worker dead"
         );
-        assert_eq!(observer.get(), 3..9, "the cursor survives the guard");
+        assert_eq!(observer.get(), 3..9, "the cursor survives the drop");
     }
 
-    /// `new_armed` inherits `new`'s panic contract.
+    /// `ArmedTask::new` inherits `Task::new`'s panic contract.
     #[test]
     #[should_panic(expected = "assertion failed")]
-    fn new_armed_panics_on_an_inverted_range() {
-        let _ = Task::new_armed(core::ops::Range { start: 10, end: 5 });
+    fn armed_task_new_panics_on_an_inverted_range() {
+        let _ = ArmedTask::new(core::ops::Range { start: 10, end: 5 });
     }
 
     /// `Debug` shows the observable cursor and liveness instead of the packed
@@ -893,13 +915,21 @@ mod tests {
     #[test]
     fn debug_shows_the_range_not_the_packed_state() {
         use std::format;
-        let t = Task::new_armed(3..9);
-        let text = format!("{t:?}");
+        let armed = ArmedTask::new(3..9);
+        let handle = armed.handle();
+        let text = format!("{armed:?}");
+        assert!(text.contains("ArmedTask"), "type missing from {text}");
         assert!(text.contains("3..9"), "range missing from {text}");
-        assert!(text.contains("alive: true"), "liveness missing from {text}");
         assert!(
             !text.contains("AtomicU128") && !text.contains("state"),
             "the packed state leaked into Debug: {text}"
+        );
+        let text = format!("{handle:?}");
+        assert!(text.contains("alive: true"), "liveness missing from {text}");
+        drop(armed);
+        assert!(
+            format!("{handle:?}").contains("alive: false"),
+            "a handle after the armed value is dropped must report the worker dead"
         );
     }
 }

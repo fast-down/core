@@ -7,7 +7,7 @@
 
 #![allow(clippy::significant_drop_tightening)]
 extern crate alloc;
-use crate::{Executor, Handle, Task};
+use crate::{ArmedTask, Executor, Handle, Task};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use core::{fmt, ops::Range};
 // The queue's critical sections are short and synchronous (a few `VecDeque`
@@ -201,18 +201,20 @@ impl<H: Handle> TaskQueue<H> {
     ///   solely through [`Handle::is_self`](crate::Handle::is_self), which it calls
     ///   under the queue lock for every registered worker; see that method's
     ///   contract for what such a predicate may do.
-    /// - **`task` must be the task that worker is registered against.** This is
-    ///   enforced at run time, not only under `debug_assertions`: the queue keeps
-    ///   a strong `Task` per worker and replaces it on a refill, so a caller
-    ///   passing any other task would overwrite another worker's registration and
-    ///   strand its range. A mismatch reports
-    ///   [`Unregistered`](StealOutcome::Unregistered) and changes nothing. Identity
-    ///   is what counts (`same_identity`): sharing the progress cursor is not
-    ///   enough, because a speculative twin has its own registration.
+    /// - **`task` must be the value the queue handed that worker.** It is the
+    ///   [`ArmedTask`] moved into
+    ///   [`Executor::execute`](crate::Executor::execute); the queue keeps a
+    ///   [`Task`] handle of the same identity alongside and replaces it on a
+    ///   refill, so a caller passing any other value would overwrite another
+    ///   worker's registration and strand its range. This is enforced at run
+    ///   time, not only under `debug_assertions`. A mismatch reports
+    ///   [`Unregistered`](StealOutcome::Unregistered) and changes nothing.
+    ///   Identity is what counts (`same_identity`): sharing the progress cursor
+    ///   is not enough, because a speculative twin has its own registration.
     /// - **`task` should be exhausted.** Every path that reports
     ///   [`Refilled`](StealOutcome::Refilled) **overwrites `*task`**, dropping the
-    ///   `Task` the caller passed in — and with it the worker's identity and
-    ///   liveness guard (and, for a speculative sharer, its reference to the
+    ///   `ArmedTask` the caller passed in — and with it the worker's identity
+    ///   (and, for a speculative sharer, its reference to the
     ///   shared cursor). Whatever is still unclaimed in it is first taken and put
     ///   back into the queue, so a caller that skips this precondition loses no
     ///   work; it is still a misuse, because the range is handed out again while
@@ -245,7 +247,7 @@ impl<H: Handle> TaskQueue<H> {
     pub fn steal(
         &self,
         id: &H::Id,
-        task: &mut Task,
+        task: &mut ArmedTask,
         min_chunk_size: u64,
         max_speculative: usize,
     ) -> StealOutcome {
@@ -258,7 +260,7 @@ impl<H: Handle> TaskQueue<H> {
         // Authenticated: only now is there a registration to validate the
         // caller's task against. An `Unregistered` caller above has already
         // returned, so it cannot disturb the queue.
-        if !guard.running[worker_idx].0.same_identity(task) {
+        if !guard.running[worker_idx].0.same_identity(task.as_task()) {
             return StealOutcome::Unregistered;
         }
         // `*task` is about to be overwritten. Hand anything it still holds back
@@ -272,14 +274,14 @@ impl<H: Handle> TaskQueue<H> {
             // Exhausted (`Ok(None)`) and corrupted (`Err`) tasks are skipped,
             // never handed to a worker.
             if let Ok(Some(range)) = new_task.take() {
-                *task = Task::new_armed(range);
+                *task = ArmedTask::new(range);
                 found = true;
                 break;
             }
         }
-        if !found && let Some(steal_task) = guard.fattest(Some(task)) {
+        if !found && let Some(steal_task) = guard.fattest(Some(task.as_task())) {
             if let Ok(Some(range)) = steal_task.split_two(min_chunk_size) {
-                *task = Task::new_armed(range);
+                *task = ArmedTask::new(range);
                 found = true;
             } else if max_speculative > 1
                 && guard.live_sharers(&steal_task) < max_speculative
@@ -290,7 +292,7 @@ impl<H: Handle> TaskQueue<H> {
             }
         }
         if found {
-            guard.running[worker_idx].0 = task.clone();
+            guard.running[worker_idx].0 = task.handle();
             StealOutcome::Refilled
         } else {
             guard.running.remove(worker_idx);
@@ -383,11 +385,11 @@ impl<H: Handle> TaskQueue<H> {
                 let Ok(Some(range)) = task.take() else {
                     continue;
                 };
-                // The guard has to travel with the value moved into `execute`;
-                // the queue keeps an unarmed clone (see `Task::clone`) that
-                // shares the identity and reads the same alive flag.
-                let armed = Task::new_armed(range);
-                let registered = armed.clone();
+                // The worker's lifetime travels with the value moved into
+                // `execute`; the queue registers a plain handle of the same
+                // identity, which reads the same alive flag without owning it.
+                let armed = ArmedTask::new(range);
+                let registered = armed.handle();
                 let handle = executor.execute(armed, self.clone());
                 guard.running.push_back((registered, handle));
             }
@@ -395,8 +397,8 @@ impl<H: Handle> TaskQueue<H> {
                 && let Some(steal_task) = guard.fattest(None)
                 && let Ok(Some(range)) = steal_task.split_two(min_chunk_size)
             {
-                let armed = Task::new_armed(range);
-                let registered = armed.clone();
+                let armed = ArmedTask::new(range);
+                let registered = armed.handle();
                 let handle = executor.execute(armed, self.clone());
                 guard.running.push_back((registered, handle));
             }
@@ -481,7 +483,7 @@ impl<H: Handle> TaskQueue<H> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     extern crate std;
-    use crate::{Executor, Handle, StealOutcome, Task, TaskQueue};
+    use crate::{ArmedTask, Executor, Handle, StealOutcome, Task, TaskQueue};
     use std::{
         collections::{HashMap, HashSet},
         sync::{
@@ -515,7 +517,11 @@ mod tests {
 
     impl Executor for TokioExecutor {
         type Handle = TokioHandle;
-        fn execute(&self, mut task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
+        fn execute(
+            &self,
+            mut task: ArmedTask,
+            task_queue: TaskQueue<Self::Handle>,
+        ) -> Self::Handle {
             let id = self
                 .next_id
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -670,7 +676,7 @@ mod tests {
     }
     impl Executor for StealExecutor {
         type Handle = StealHandle;
-        fn execute(&self, mut task: Task, q: TaskQueue<Self::Handle>) -> Self::Handle {
+        fn execute(&self, mut task: ArmedTask, q: TaskQueue<Self::Handle>) -> Self::Handle {
             let id = {
                 let mut g = self.next_id.lock().unwrap();
                 let i = *g;
@@ -841,11 +847,11 @@ mod tests {
 
     /// A lightweight executor used only to exercise `set_threads` bookkeeping
     /// without performing real work. It records how many workers it spawned and
-    /// keeps each handed [`Task`] alive in a never-ending background task so the
-    /// `running` deque stays populated and inspectable after the call returns.
+    /// keeps each handed [`ArmedTask`] alive so the `running` deque stays
+    /// populated and inspectable after the call returns.
     struct HoldExecutor {
         spawned: Arc<Mutex<usize>>,
-        tasks: Arc<Mutex<Vec<Task>>>,
+        tasks: Arc<Mutex<Vec<ArmedTask>>>,
     }
     struct HoldHandle;
     impl Handle for HoldHandle {
@@ -857,11 +863,11 @@ mod tests {
     }
     impl Executor for HoldExecutor {
         type Handle = HoldHandle;
-        fn execute(&self, task: Task, _q: TaskQueue<Self::Handle>) -> Self::Handle {
+        fn execute(&self, task: ArmedTask, _q: TaskQueue<Self::Handle>) -> Self::Handle {
             *self.spawned.lock().unwrap() += 1;
-            // Keep the `Task` alive so `set_threads` shrink can move it back to
-            // `waiting`. No real work is done and no background task is spawned,
-            // so the test runtime exits cleanly.
+            // Keep the worker's value alive so `set_threads` shrink can move its
+            // registration back to `waiting`. No real work is done and no
+            // background task is spawned, so the test runtime exits cleanly.
             self.tasks.lock().unwrap().push(task);
             HoldHandle
         }
@@ -1036,9 +1042,10 @@ mod tests {
     // ---------------------------------------------------------------------
 
     struct SyncExecutor {
-        /// One slot per spawned worker. `None` means that worker has exited and
-        /// released the strong reference it held on its task.
-        slots: Arc<Mutex<Vec<Option<Task>>>>,
+        /// One slot per spawned worker. `None` means that worker's value is
+        /// currently held by the test (playing the worker itself) or that the
+        /// worker has exited and released it.
+        slots: Arc<Mutex<Vec<Option<ArmedTask>>>>,
         aborted: Arc<Mutex<Vec<usize>>>,
     }
     struct SyncHandle {
@@ -1056,7 +1063,7 @@ mod tests {
     }
     impl Executor for SyncExecutor {
         type Handle = SyncHandle;
-        fn execute(&self, task: Task, _q: TaskQueue<Self::Handle>) -> Self::Handle {
+        fn execute(&self, task: ArmedTask, _q: TaskQueue<Self::Handle>) -> Self::Handle {
             // Locks a mutex that is *not* the queue's, honouring the "never
             // re-enter TaskQueue from execute" contract documented in executor.rs.
             let id = {
@@ -1078,19 +1085,24 @@ mod tests {
                 aborted: Arc::new(Mutex::new(Vec::new())),
             }
         }
-        /// The task worker `id` currently holds, as a state-sharing clone.
+        /// An observing handle of the task worker `id` currently holds.
         fn task_of(&self, id: usize) -> Task {
-            self.slots.lock().unwrap()[id].clone().unwrap()
+            self.slots.lock().unwrap()[id]
+                .as_ref()
+                .expect("worker holds its task")
+                .handle()
         }
-        /// The task worker `id` holds after draining its range, as a
-        /// state-sharing clone.
-        ///
-        /// `steal` requires the caller's task to be exhausted, and a real worker
-        /// only calls it after claiming everything it had -- leaving the cursor
-        /// at `end..end`, not at `start..start`. Draining here the same way keeps
-        /// the clone's identity while reproducing that state.
-        fn drained_task_of(&self, id: usize) -> Task {
-            let task = self.task_of(id);
+        /// The value worker `id` holds, still owning the worker's lifetime.
+        fn take_value_of(&self, id: usize) -> ArmedTask {
+            self.slots.lock().unwrap()[id]
+                .take()
+                .expect("worker holds its task")
+        }
+        /// Takes the value worker `id` holds and drains its range to `end..end`,
+        /// exactly as a real worker leaves its cursor before calling `steal`.
+        /// The test now owns the worker's lifetime.
+        fn drained_task_of(&self, id: usize) -> ArmedTask {
+            let task = self.take_value_of(id);
             let range = task.get();
             assert!(range.start < range.end, "worker {id} had no work to drain");
             task.safe_add_start(range.start, range.end - range.start)
@@ -1098,11 +1110,14 @@ mod tests {
             assert_eq!(task.get(), range.end..range.end, "worker {id} not drained");
             task
         }
-        /// Mirror a real worker's local `task` variable being replaced by `steal`.
-        fn rebind(&self, id: usize, task: &Task) {
-            self.slots.lock().unwrap()[id] = Some(task.clone());
+        /// Mirror a real worker keeping the value `steal` handed it, and return
+        /// an observing handle to it.
+        fn rebind(&self, id: usize, task: ArmedTask) -> Task {
+            let handle = task.handle();
+            self.slots.lock().unwrap()[id] = Some(task);
+            handle
         }
-        /// Simulate worker `id` exiting: it drops its strong reference.
+        /// Simulate worker `id` exiting: it drops its value.
         fn kill(&self, id: usize) {
             self.slots.lock().unwrap()[id] = None;
         }
@@ -1183,16 +1198,16 @@ mod tests {
         );
     }
 
-    /// Liveness is the registration's non-`Clone` guard, not the identity's
-    /// strong count: a `Task::clone` held by an observer outlives the worker but
-    /// must not keep it alive.
+    /// Liveness is the owned value's `Drop`, not the identity's strong count: a
+    /// [`Task`] handle held by an observer outlives the worker but must not keep
+    /// it alive.
     #[test]
     fn external_task_clone_does_not_keep_an_exited_worker_alive() {
         let ex = SyncExecutor::new();
         let q = TaskQueue::new(core::iter::once(0..10));
         q.set_threads(1, 1, Some(&ex)).unwrap();
 
-        // An observer's clone: it shares the identity but carries no guard.
+        // An observer's handle: it shares the identity but carries no lifetime.
         let _observer = ex.task_of(0);
         assert!(q.inner.lock().running[0].0.is_alive());
 
@@ -1259,7 +1274,7 @@ mod tests {
         let q = TaskQueue::new(core::iter::once(0..100));
         q.set_threads(1, 1, Some(&ex)).unwrap();
         let _ = q.add(Task::new(500..510));
-        let mut t = Task::new(0..10);
+        let mut t = ArmedTask::new(0..10);
         assert_eq!(
             q.steal(&999, &mut t, 1, 1),
             StealOutcome::Unregistered,
@@ -1323,7 +1338,7 @@ mod tests {
         let q = TaskQueue::new(core::iter::once(0..1));
         q.set_threads(1, 1, Some(&ex)).unwrap();
         let _ = q.add(Task::new(100..200));
-        let mut t = Task::new(0..0);
+        let mut t = ArmedTask::new(0..0);
         assert_eq!(q.steal(&999, &mut t, 1, 1), StealOutcome::Unregistered);
         assert_eq!(
             q.inner.lock().running.len(),
@@ -1412,8 +1427,10 @@ mod tests {
         let q = TaskQueue::new([0..10, 100..200].into_iter());
         q.set_threads(2, 1, Some(&ex)).unwrap();
         // Worker 1 still owns all of 100..200.
-        let mut t = ex.task_of(1);
+        let mut t = ex.take_value_of(1);
+        let old = t.handle();
         assert_eq!(q.steal(&1, &mut t, 1, 1), StealOutcome::Refilled);
+        let t = ex.rebind(1, t);
         // The range it held came back through `waiting` and was handed to the
         // same worker, so none of it was dropped.
         assert_eq!(t.get(), 100..200);
@@ -1423,7 +1440,7 @@ mod tests {
             "the reclaimed range was handed out, not duplicated"
         );
         assert_eq!(
-            ex.task_of(1).get(),
+            old.get(),
             100..100,
             "the old cursor was drained by the reclaim, so nobody re-executes it"
         );
@@ -1495,7 +1512,7 @@ mod tests {
         // to the *last* element, so worker 0 joins worker 2.
         let mut t0 = ex.drained_task_of(0);
         assert_eq!(q.steal(&0, &mut t0, 1, 2), StealOutcome::Refilled);
-        ex.rebind(0, &t0);
+        let t0 = ex.rebind(0, t0);
         assert!(t0.same_cursor(&ex.task_of(2)));
         // Worker 1 tries to become the third sharer of that same crumb and is
         // refused: the live sharer count has reached the cap.
@@ -1590,7 +1607,7 @@ mod tests {
         q.set_threads(2, 10, Some(&ex)).unwrap();
         let mut t0 = ex.drained_task_of(0);
         assert_eq!(q.steal(&0, &mut t0, 10, 2), StealOutcome::Refilled);
-        ex.rebind(0, &t0);
+        let t0 = ex.rebind(0, t0);
         assert!(
             t0.same_cursor(&ex.task_of(1)),
             "worker 0 aliases worker 1's cursor"
@@ -1667,15 +1684,16 @@ mod tests {
 
         let mut t0 = ex.drained_task_of(0);
         assert_eq!(q.steal(&0, &mut t0, 1, 2), StealOutcome::Refilled);
-        ex.rebind(0, &t0);
+        let t0 = ex.rebind(0, t0);
         // Both `running` entries now share one and the same cursor.
         let guard = q.inner.lock();
         assert!(guard.running[0].0.same_cursor(&guard.running[1].0));
         drop(guard);
 
-        // Worker 0 exits, leaving worker 1 as the only live worker.
+        // Worker 0 exits, leaving worker 1 as the only live worker. The handle
+        // the test kept observes the death but cannot prevent it.
         ex.kill(0);
-        drop(t0);
+        assert!(!t0.is_alive(), "the kept handle does not own the lifetime");
         assert_eq!(ex.live_workers(), 1);
 
         // The liveness sweep alone must reclaim the dead worker's slot, even
@@ -1705,7 +1723,7 @@ mod tests {
         // Worker 1 shares worker 0's cursor rather than stealing a half range.
         let mut t1 = ex.drained_task_of(1);
         assert_eq!(q.steal(&1, &mut t1, 10, 2), StealOutcome::Refilled);
-        ex.rebind(1, &t1);
+        let t1 = ex.rebind(1, t1);
         assert!(
             t1.same_cursor(&ex.task_of(0)),
             "worker 1 aliases worker 0's cursor"
@@ -1739,7 +1757,7 @@ mod tests {
         // `split_two` refuses and the speculative-share branch runs.
         let mut t0 = ex.drained_task_of(0);
         assert_eq!(q.steal(&0, &mut t0, 60, 2), StealOutcome::Refilled);
-        ex.rebind(0, &t0);
+        let t0 = ex.rebind(0, t0);
         assert!(
             t0.same_cursor(&ex.task_of(1)),
             "worker 0 aliases worker 1's cursor"
@@ -1817,7 +1835,7 @@ mod tests {
 
     /// `retain` at the top of `set_threads` removes every dead entry first, so the
     /// shrink path always operates on live survivors and needs no separate
-    /// liveness guard.
+    /// defensive check.
     #[test]
     fn set_threads_shrink_guard_never_fires_after_retain() {
         let ex = SyncExecutor::new();
@@ -1942,8 +1960,8 @@ mod tests {
         for id in 0..3usize {
             let q = q.clone();
             let mut t = ex.drained_task_of(id);
-            // Each thread returns its task, not a range snapshot: the task keeps
-            // the worker's liveness guard, and a worker that drops it while its
+            // Each thread returns its task, not a range snapshot: the task owns
+            // the worker's lifetime, and a worker that drops it while its
             // peers are still stealing looks dead to the queue -- whose sweep
             // would (correctly) hand its unclaimed range to someone else. That
             // would make the "stolen ranges" below the same range twice.
@@ -2023,7 +2041,7 @@ mod tests {
         // Worker 0 speculatively aliases worker 1's cursor (5..10).
         let mut t0 = ex.drained_task_of(0);
         assert_eq!(q.steal(&0, &mut t0, 10, 2), StealOutcome::Refilled);
-        ex.rebind(0, &t0);
+        let t0 = ex.rebind(0, t0);
         assert!(
             t0.same_cursor(&ex.task_of(1)),
             "worker 0 now aliases worker 1's cursor"

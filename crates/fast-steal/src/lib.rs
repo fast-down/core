@@ -6,8 +6,10 @@
 //! schedulers.
 //!
 //! The crate is built around three public types:
-//! - [`Task`] — a cancellable unit of work tracking a `start..end` range, advanced
-//!   without locks on targets with native 128-bit atomics.
+//! - [`Task`] / [`ArmedTask`] — a cancellable unit of work tracking a
+//!   `start..end` range, advanced without locks on targets with native 128-bit
+//!   atomics. A worker owns the `ArmedTask` handed to it by [`Executor::execute`];
+//!   every other reference is a [`Task`] handle to the same unit.
 //! - [`TaskQueue`] — a concurrent queue that hands out work and steals sub-ranges
 //!   from busy workers.
 //! - [`Executor`] / [`Handle`] — traits you implement to plug the queue into any
@@ -28,5 +30,5 @@ mod task;
 mod task_queue;
 
 pub use executor::{Executor, Handle};
-pub use task::{RangeError, Task};
+pub use task::{ArmedTask, RangeError, Task};
 pub use task_queue::{StealOutcome, TaskQueue};

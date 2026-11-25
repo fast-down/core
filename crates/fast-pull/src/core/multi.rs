@@ -8,7 +8,7 @@ use core::{
     time::Duration,
 };
 use crossfire::{MAsyncTx, MTx, RecvTimeoutError, WeakTx, mpmc, mpsc};
-use fast_steal::{Executor, Handle, StealOutcome, Task, TaskQueue};
+use fast_steal::{ArmedTask, Executor, Handle, StealOutcome, TaskQueue};
 use futures::TryStreamExt;
 use std::sync::{Arc, OnceLock};
 use tokio_util::sync::CancellationToken;
@@ -304,7 +304,7 @@ where
 {
     type Handle = TokioHandle;
     #[allow(clippy::too_many_lines)]
-    fn execute(&self, mut task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
+    fn execute(&self, mut task: ArmedTask, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
         let id = self.id.fetch_add(1, Ordering::SeqCst);
         let token = self.token.child_token();
 

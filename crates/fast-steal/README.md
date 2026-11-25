@@ -27,7 +27,7 @@ Exactly one lock backend must be enabled; with both, `std` wins.
 
 ```rust,no_run
 extern crate std;
-use fast_steal::{Executor, Handle, StealOutcome, Task, TaskQueue};
+use fast_steal::{ArmedTask, Executor, Handle, StealOutcome, TaskQueue};
 use std::{
     collections::HashMap,
     sync::atomic::{AtomicUsize, Ordering},
@@ -68,7 +68,7 @@ impl Handle for TokioHandle {
 
 impl Executor for TokioExecutor {
     type Handle = TokioHandle;
-    fn execute(&self, mut task: Task, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
+    fn execute(&self, mut task: ArmedTask, task_queue: TaskQueue<Self::Handle>) -> Self::Handle {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let tx = self.tx.clone();
         let speculative = self.speculative;
